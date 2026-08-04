@@ -37,7 +37,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     return mod
 
 
-def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
+def OptimizeForTarget(mod: IRModule, target: Target, tpu_config=None) -> IRModule:
     # which may be introduced by the LegalizeSafeMemoryAccess
     if target.arch == "sm_90":
         mod = tilelang.transform.IfStmtBinding()(mod)
@@ -74,6 +74,10 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.RenormalizeSplitPattern()(mod)
     mod = tir.transform.Simplify()(mod)
     mod = tilelang.transform.AddressAssign()(mod)
+    if (target.kind.name == "tpu" and tpu_config is not None and
+            tpu_config.device_mode == "rv"):
+        mod = tilelang.transform.RVLegalizeAndAllocateRegisters(
+            tpu_config.chip)(mod)
     return mod
 
     mod = tir.transform.VerifyMemory()(mod)

@@ -28,9 +28,9 @@ path.
 The legacy `mode="cmodel"`/`mode="pcie"` argument remains an alias for
 `runtime_mode`. Supplying conflicting values raises `ValueError`.
 
-SG2260E RV lowering and code generation are intentionally not part of this
-parameterization change. Selecting `device_mode="rv"` currently raises
-`NotImplementedError` at the device build boundary instead of silently
-producing atomic `tpu_*` APIs. A working SG2260E baseline can use
-`device_mode="atomic"`; the next backend implementation step will consume the
-already-propagated RV setting during lowering and code generation.
+SG2260E RV now has a structured TIR legalization/register-allocation pass. It
+runs after address assignment and records explicit GR/TR/CR and operand-view
+layout information; see `sg2260e_rv_legalization.md`. A dedicated RV C emitter
+is still the next backend step. The atomic `tpu_*` emitter is not a substitute
+for that path, and a working SG2260E atomic baseline can continue to select
+`device_mode="atomic"`.
