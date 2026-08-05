@@ -53,19 +53,22 @@ tests exercise one representative of every requested golden family, verify
 the function attributes and descriptor fields, and verify deterministic
 allocation.
 
-## Current limitations and next step
+## Code generation and runtime status
 
-This change implements the structured legalization/register-allocation
-contract, not the RV C emitter. The existing atomic `target.build.tilelang_ppl`
-emitter must not be used to interpret `ppl.rv.*` calls. The next implementation
-step is a dedicated RV code-generation path that consumes these descriptors
-and emits `rv_*` APIs. Exact local-bank address/liveness allocation should be
-added there or in a follow-up structured pass, guided by RULE-RV-007.
+The structured contract is consumed by the independent
+`target.build.tilelang_ppl_rv` emitter. It emits SG2260E register configuration,
+DMA/TIU instructions, the TPU runtime entry ABI, and kernel registration; it
+never falls back to the atomic emitter. Copy, add, fill, FP16-input/FP32-
+accumulator GEMM (NN/NT/TT), FP16 reciprocal square root, and the corpus gather
+form are covered. See `sg2260e_rv_codegen_cmodel.md` for the exact support
+matrix, cmodel commands, and remaining PPL limitations.
 
 PPL 1.7.122's top-k RV verifier failure is documented in
 `sg2260e_rv_golden_corpus.md`. Until the SDK issue is resolved, top-k can pass
 TileLang legalization but cannot provide a successful PPL-generated RV C
-golden or cmodel execution result.
+golden or cmodel execution result. Reduction is likewise rejected by RV
+codegen because the PPL 1.7 reduction device C terminates in
+`TPUKERNEL_ASSERT` and the SG2260E RV headers expose no reduction instruction.
 
 ## Verification
 
