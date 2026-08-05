@@ -1,6 +1,7 @@
 // Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/runtime/registry.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
@@ -191,11 +192,34 @@ public:
         ICHECK(access->op.same_as(builtin::tvm_access_ptr()))
             << name << " operand " << operand.role
             << " must be a tile region or tvm_access_ptr";
+        ICHECK_GE(access->args.size(), 4U)
+            << name << " operand " << operand.role
+            << " has malformed tvm_access_ptr; expected dtype, data, offset, extent";
         Var data = GetVarFromAccessPtr(call->args[operand.argument]);
         ICHECK(buffers_.count(data)) << "Cannot resolve RV operand buffer " << data;
         buffer = buffers_[data];
+        PrimExpr offset = access->args[2];
+        PrimExpr access_extent = access->args[3];
+        PrimExpr total_elements = Integer(1);
         for (const PrimExpr &extent : buffer->shape)
-          ranges.push_back(Range::FromMinExtent(0, extent));
+          total_elements = total_elements * extent;
+        arith::Analyzer analyzer;
+        bool zero_offset = analyzer.CanProveEqual(offset, Integer(0));
+        bool full_extent = analyzer.CanProveEqual(access_extent, total_elements);
+        full_region = zero_offset && full_extent;
+        if (full_region) {
+          for (const PrimExpr &extent : buffer->shape)
+            ranges.push_back(Range::FromMinExtent(0, extent));
+        } else {
+          // tvm_access_ptr describes a flat element window.  For a subview (or
+          // whenever symbolic expressions cannot prove a full-buffer access),
+          // retain that explicit one-dimensional extent rather than silently
+          // recovering the backing buffer's multidimensional shape.
+          ICHECK_GT(access_extent.dtype().bits(), 0)
+              << name << " operand " << operand.role
+              << " has an invalid tvm_access_ptr extent";
+          ranges.push_back(Range::FromMinExtent(0, access_extent));
+        }
       }
       Var data = buffer->data;
       bool global = buffer.scope() == "global";

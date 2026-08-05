@@ -239,12 +239,15 @@ def lower(
     device_mod = tir.transform.Filter(_is_device_call)(mod)
 
     if tpu_config.device_mode == "rv":
-        raise NotImplementedError(
-            "SG2260E RV TIR legalization is complete, but the dedicated RV C "
-            "code generator is not implemented; refusing to use the atomic "
-            "tpu_* emitter for ppl.rv.* operations.")
+        codegen = tvm._ffi.get_global_func("target.build.tilelang_ppl_rv")
+    else:
+        codegen = tvm._ffi.get_global_func("target.build.tilelang_ppl")
 
-    codegen_mod = tvm._ffi.get_global_func("target.build.tilelang_ppl")(mod,)  # target)
+    # Both TPU source emitters consume device PrimFuncs.  Keep host functions
+    # out of codegen while retaining the unfiltered module as a compatibility
+    # fallback for the current unsplit TPU lowering pipeline.
+    codegen_input = device_mod if len(device_mod.functions) else mod
+    codegen_mod = codegen(codegen_input,)  # target)
     # return device_mod
     # host_mod = tir.transform.Filter(_is_host_call)(mod)
     # device_mod = tir.transform.Filter(_is_device_call)(mod)
