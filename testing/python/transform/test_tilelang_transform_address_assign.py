@@ -12,7 +12,9 @@ from tilelang.engine.phase import LowerAndLegalize, OptimizeForTarget
 BANK_SIZE = 16 * 1024
 
 
-def _assigned_attrs(func):
+def _assigned_attrs(func, chip="bm1690"):
+    func = func.with_attr("tir.tpu.chip", chip)
+    func = func.with_attr("tir.tpu.device_mode", "atomic")
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     target = tvm.target.Target("tpu")
     with contextlib.redirect_stdout(io.StringIO()):
@@ -119,6 +121,21 @@ def test_exp_composite_operands_are_conservative_bank_clique():
     }
 
     assert len(banks) == 5
+
+
+def test_sg2260e_uses_chip_description_and_preserves_allocation_contract():
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, is_cpu=True) as _:
+            lhs = T.alloc_shared((64, 1024), "float32")
+            rhs = T.alloc_shared((64, 1024), "float32")
+            out = T.alloc_shared((64, 64), "float32")
+            T.ppl_add(out, lhs, rhs)
+
+    attrs = _assigned_attrs(main, "sg2260e")
+    assert attrs["tir.tpu.chip"] == "sg2260e"
+    assert _addr(attrs, "lhs") // BANK_SIZE != _addr(attrs, "rhs") // BANK_SIZE
 
 
 if __name__ == "__main__":

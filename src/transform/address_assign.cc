@@ -48,16 +48,46 @@
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
 #include "../op/gemm.h"
-#include "../target/bm1690_lmem.h"
+#include "../target/tpu_chip_description.h"
 
 namespace tvm {
 namespace tl {
 using namespace tir;
 
 namespace {
+std::vector<int64_t> NormalizeLocalShape(const Array<PrimExpr> &shape,
+                                         const char *context) {
+  auto get_extent = [context](const PrimExpr &expr) {
+    const auto *imm = expr.as<IntImmNode>();
+    ICHECK(imm) << context << " expects IntImm local tensor shapes";
+    ICHECK_GT(imm->value, 0) << context
+                            << " expects positive local tensor shapes";
+    return imm->value;
+  };
+  if (shape.empty()) return {1, 1, 1, 1};
+  if (shape.size() == 1) return {1, 1, 1, get_extent(shape[0])};
+  if (shape.size() == 2)
+    return {1, get_extent(shape[0]), 1, get_extent(shape[1])};
+  if (shape.size() == 3)
+    return {get_extent(shape[0]), get_extent(shape[1]), 1,
+            get_extent(shape[2])};
+  if (shape.size() == 4)
+    return {get_extent(shape[0]), get_extent(shape[1]), get_extent(shape[2]),
+            get_extent(shape[3])};
+  LOG(FATAL) << context << " unsupported local tensor rank: " << shape.size();
+  return {1, 1, 1, 1};
+}
 
-int64_t AlignUp(int64_t value, int64_t align) {
-  return bm1690::AlignUp(value, align);
+const ChipDescription &ResolveChipDescription(const PrimFunc &func) {
+  if (auto chip = func->GetAttr<String>("tir.tpu.chip")) {
+    return GetChipDescription(chip.value());
+  }
+  if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
+    if (auto chip = target.value()->GetAttr<String>("chip")) {
+      return GetChipDescription(chip.value());
+    }
+  }
+  return kBM1690ChipDescription;
 }
 
 } // namespace
@@ -114,8 +144,10 @@ bool LiveRangesOverlap(const OpAddr &lhs, const OpAddr &rhs) {
 
 class MemAllocBankConflictAware {
 public:
-  MemAllocBankConflictAware(int64_t bank_num, int64_t bank_size)
-      : bank_num_(bank_num), bank_size_(bank_size) {
+  MemAllocBankConflictAware(int64_t bank_num, int64_t bank_size,
+                            int64_t tensor_align_bytes)
+      : bank_num_(bank_num), bank_size_(bank_size),
+        tensor_align_bytes_(tensor_align_bytes) {
     total_consumption_ = 0;
     mem_size_ = bank_num * bank_size;
     bank_ops.resize(bank_num);
@@ -153,7 +185,7 @@ public:
       }
       int64_t bytes = liveRange[op].tensor_size;
       int64_t mem_cross_bank_num =
-          static_cast<int64_t>(bm1690::DivUp(bytes, bank_size_));
+          static_cast<int64_t>(DivUp(bytes, bank_size_));
       mem_cross_bank_num = std::max<int64_t>(mem_cross_bank_num, 1);
       for (int i = 0; i < bank_num_; ++i) {
         int64_t offset = i * bank_size_;
@@ -234,7 +266,7 @@ protected:
 
     std::shared_ptr<OpAddr> op_addr = std::make_shared<OpAddr>(
         op, liveRange[op].tensor_size, liveRange[op].start, liveRange[op].end);
-    int64_t prev_offset = AlignUp(offset, bm1690::kTensorAlignBytes);
+    int64_t prev_offset = AlignUp(offset, tensor_align_bytes_);
     int64_t best_offset = -1;
     int64_t smallest_gap = std::numeric_limits<int64_t>::max();
 
@@ -247,7 +279,7 @@ protected:
       }
       if (LiveRangesOverlap(*op_addr, *allocated_op_addr)) {
         int64_t candidate =
-            AlignUp(prev_offset, bm1690::kTensorAlignBytes);
+            AlignUp(prev_offset, tensor_align_bytes_);
         int64_t gap = allocated_op_addr->start - candidate;
         if (gap >= op_addr->size && gap < smallest_gap) {
           smallest_gap = gap;
@@ -257,7 +289,7 @@ protected:
       }
     }
     int64_t trailing_candidate =
-        AlignUp(prev_offset, bm1690::kTensorAlignBytes);
+        AlignUp(prev_offset, tensor_align_bytes_);
     int64_t trailing_gap = end_offset - trailing_candidate;
     if (trailing_gap >= op_addr->size && trailing_gap < smallest_gap) {
       best_offset = trailing_candidate;
@@ -276,6 +308,7 @@ protected:
   int64_t bank_num_;
   int64_t bank_size_;
   int64_t mem_size_;
+  int64_t tensor_align_bytes_;
 };
 
 enum class BufferAccessKind {
@@ -587,8 +620,9 @@ private:
 };
 
 PrimFunc InferAddress(PrimFunc f) {
-  int bank_num = bm1690::kBankNum;
-  int bank_size = bm1690::kBankSize;
+  const ChipDescription &chip = ResolveChipDescription(f);
+  const int64_t bank_num = chip.bank_num;
+  const int64_t bank_size = chip.bank_size;
   std::unordered_map<const BufferNode *, std::unordered_set<const BufferNode *>>
       bank_conflict_map;
   std::unordered_map<const BufferNode *, TensorLive> live_ranges;
@@ -597,8 +631,8 @@ PrimFunc InferAddress(PrimFunc f) {
 
   for (auto &op : alloc_ops) {
     TensorLive live;
-    live.tensor_size =
-        bm1690::TpuAlignSizeBytes(op->shape, op->dtype, "AddressAssign");
+    live.tensor_size = TpuAlignedSizeBytesFromShape4(
+        chip, NormalizeLocalShape(op->shape, "AddressAssign"), op->dtype);
     live_ranges[op] = live;
   }
   BufferUseCollector(alloc_ops, &live_ranges, &bank_conflict_map)
@@ -606,10 +640,11 @@ PrimFunc InferAddress(PrimFunc f) {
 
   std::unordered_map<const BufferNode *, int64_t> addrMapWithBC;
   int64_t memUsedWithBC = 0;
-  MemAllocBankConflictAware allocatorBC(bank_num, bank_size);
+  MemAllocBankConflictAware allocatorBC(bank_num, bank_size,
+                                        chip.tensor_align_bytes);
   auto success = allocatorBC.assignAddr(
       alloc_ops, live_ranges, bank_conflict_map, addrMapWithBC, memUsedWithBC);
-  ICHECK(success) << "BM1690 local memory allocation failed. buffers="
+  ICHECK(success) << chip.name << " local memory allocation failed. buffers="
                   << alloc_ops.size() << ", lmem=" << bank_num * bank_size
                   << " bytes";
 
@@ -617,12 +652,41 @@ PrimFunc InferAddress(PrimFunc f) {
     // std::unordered_map<String, PrimExpr> result;
     auto fn = f.CopyOnWrite();
     auto fn_attr = fn->attrs.CopyOnWrite();
+    fn_attr->dict.Set("tir.tpu.lmem_chip", String(chip.name));
+    fn_attr->dict.Set("tir.tpu.lmem_bank_num",
+                      IntImm(DataType::Int(64), chip.bank_num));
+    fn_attr->dict.Set("tir.tpu.lmem_bank_size",
+                      IntImm(DataType::Int(64), chip.bank_size));
     for (auto op : alloc_ops) {
       int64_t address = addrMapWithBC[op];
       fn_attr->dict.Set(op->name, IntImm(DataType::Int(64), address));
+      const std::string prefix = "tir.tpu.lmem." + op->name + ".";
+      const TensorLive &live = live_ranges.at(op);
+      fn_attr->dict.Set(prefix + "address",
+                        IntImm(DataType::Int(64), address));
+      fn_attr->dict.Set(prefix + "size",
+                        IntImm(DataType::Int(64), live.tensor_size));
+      fn_attr->dict.Set(prefix + "live_start",
+                        IntImm(DataType::Int(64), live.start));
+      fn_attr->dict.Set(prefix + "live_end",
+                        IntImm(DataType::Int(64), live.end));
+      std::vector<std::string> conflicts;
+      for (const BufferNode *other : bank_conflict_map.at(op)) {
+        conflicts.push_back(other->name);
+      }
+      std::sort(conflicts.begin(), conflicts.end());
+      std::string conflict_names;
+      for (size_t i = 0; i < conflicts.size(); ++i) {
+        if (i != 0) {
+          conflict_names += ",";
+        }
+        conflict_names += conflicts[i];
+      }
+      fn_attr->dict.Set(prefix + "conflicts", String(conflict_names));
     }
   }
-  std::cerr << "[AddressAssign] success=" << std::boolalpha << success
+  std::cerr << "[AddressAssign] chip=" << chip.name
+            << " success=" << std::boolalpha << success
             << " buffers=" << alloc_ops.size() << " total=" << memUsedWithBC
             << " bytes\n";
 

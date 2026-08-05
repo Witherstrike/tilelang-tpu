@@ -26,6 +26,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "tpu_chip_description.h"
+
 namespace tvm {
 namespace tl {
 namespace bm1690 {
@@ -37,13 +39,11 @@ constexpr int64_t kBankSize = 16 * 1024;
 constexpr int64_t kTensorAlignBytes = 64;
 
 inline int64_t DivUp(int64_t value, int64_t factor) {
-  ICHECK_GT(factor, 0);
-  return (value + factor - 1) / factor;
+  return tl::DivUp(value, factor);
 }
 
 inline int64_t AlignUp(int64_t value, int64_t align) {
-  ICHECK_GT(align, 0);
-  return DivUp(value, align) * align;
+  return tl::AlignUp(value, align);
 }
 
 inline int64_t GetIntImmValue(const PrimExpr &expr, const char *context) {
@@ -55,8 +55,7 @@ inline int64_t GetIntImmValue(const PrimExpr &expr, const char *context) {
 }
 
 inline int64_t DTypeBytes(DataType dtype) {
-  const int64_t bits = static_cast<int64_t>(dtype.bits()) * dtype.lanes();
-  return std::max<int64_t>(1, DivUp(bits, 8));
+  return tl::DTypeBytes(dtype);
 }
 
 inline std::vector<int64_t> NormalizeLocalShape(const Array<PrimExpr> &shape,
@@ -89,14 +88,8 @@ inline std::vector<int64_t> NormalizeLocalShape(const Array<PrimExpr> &shape,
 
 inline int64_t TpuAlignSizeBytesFromShape4(
     const std::vector<int64_t> &shape4, DataType dtype) {
-  ICHECK_EQ(shape4.size(), 4U);
-  int64_t dtype_bytes = DTypeBytes(dtype);
-  int64_t eu_num = std::max<int64_t>(1, kEuBytes / dtype_bytes);
-  int64_t stride_c = AlignUp(shape4[2] * shape4[3], eu_num);
-  int64_t lane_groups = DivUp(shape4[1], kLaneNum);
-  int64_t bytes = shape4[0] * lane_groups * stride_c * dtype_bytes;
-  return AlignUp(std::max<int64_t>(bytes, kTensorAlignBytes),
-                 kTensorAlignBytes);
+  return tl::TpuAlignedSizeBytesFromShape4(kBM1690ChipDescription, shape4,
+                                           dtype);
 }
 
 inline int64_t TpuAlignSizeBytes(const Array<PrimExpr> &shape, DataType dtype,

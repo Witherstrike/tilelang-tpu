@@ -73,6 +73,13 @@ def OptimizeForTarget(mod: IRModule, target: Target, tpu_config=None) -> IRModul
     mod = tir.transform.UnrollLoop()(mod)
     mod = tir.transform.RenormalizeSplitPattern()(mod)
     mod = tir.transform.Simplify()(mod)
+    if target.kind.name == "tpu" and tpu_config is not None:
+        for global_var, func in list(mod.functions.items()):
+            if isinstance(func, tir.PrimFunc):
+                func = func.with_attr("tir.tpu.chip", tpu_config.chip)
+                func = func.with_attr(
+                    "tir.tpu.device_mode", tpu_config.device_mode)
+                mod.update_func(global_var, func)
     mod = tilelang.transform.AddressAssign()(mod)
     if (target.kind.name == "tpu" and tpu_config is not None and
             tpu_config.device_mode == "rv"):
