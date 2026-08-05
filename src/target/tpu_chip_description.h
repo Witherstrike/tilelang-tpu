@@ -38,12 +38,13 @@ struct ChipDescription {
   int64_t bank_num;
   int64_t bank_size;
   int64_t tensor_align_bytes;
+  bool allow_lifetime_reuse;
 };
 
 inline constexpr ChipDescription kBM1690ChipDescription{
-    "bm1690", 64, 64, 16, 16 * 1024, 64};
+    "bm1690", 64, 64, 16, 16 * 1024, 64, true};
 inline constexpr ChipDescription kSG2260EChipDescription{
-    "sg2260e", 64, 64, 16, 16 * 1024, 64};
+    "sg2260e", 64, 64, 16, 16 * 1024, 64, false};
 
 inline const ChipDescription &GetChipDescription(const std::string &chip) {
   if (chip.empty() || chip == "bm1690") {

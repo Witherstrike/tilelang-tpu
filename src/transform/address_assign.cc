@@ -145,9 +145,11 @@ bool LiveRangesOverlap(const OpAddr &lhs, const OpAddr &rhs) {
 class MemAllocBankConflictAware {
 public:
   MemAllocBankConflictAware(int64_t bank_num, int64_t bank_size,
-                            int64_t tensor_align_bytes)
+                            int64_t tensor_align_bytes,
+                            bool allow_lifetime_reuse)
       : bank_num_(bank_num), bank_size_(bank_size),
-        tensor_align_bytes_(tensor_align_bytes) {
+        tensor_align_bytes_(tensor_align_bytes),
+        allow_lifetime_reuse_(allow_lifetime_reuse) {
     total_consumption_ = 0;
     mem_size_ = bank_num * bank_size;
     bank_ops.resize(bank_num);
@@ -277,7 +279,8 @@ protected:
       if (allocated_op_addr->start >= end_offset) {
         break;
       }
-      if (LiveRangesOverlap(*op_addr, *allocated_op_addr)) {
+      if (!allow_lifetime_reuse_ ||
+          LiveRangesOverlap(*op_addr, *allocated_op_addr)) {
         int64_t candidate =
             AlignUp(prev_offset, tensor_align_bytes_);
         int64_t gap = allocated_op_addr->start - candidate;
@@ -309,6 +312,7 @@ protected:
   int64_t bank_size_;
   int64_t mem_size_;
   int64_t tensor_align_bytes_;
+  bool allow_lifetime_reuse_;
 };
 
 enum class BufferAccessKind {
@@ -519,7 +523,7 @@ private:
     } else if (op_name == "ppl.gemm") {
       mark_arg(1, BufferAccessKind::kRead);
       mark_arg(2, BufferAccessKind::kRead);
-      mark_arg(3, BufferAccessKind::kWrite);
+      mark_arg(3, BufferAccessKind::kReadWrite);
     } else if (op_name == "ppl.sub" || op_name == "ppl.mul" ||
                op_name == "ppl.add" || op_name == "ppl.div") {
       mark_arg(1, BufferAccessKind::kWrite);
@@ -641,7 +645,8 @@ PrimFunc InferAddress(PrimFunc f) {
   std::unordered_map<const BufferNode *, int64_t> addrMapWithBC;
   int64_t memUsedWithBC = 0;
   MemAllocBankConflictAware allocatorBC(bank_num, bank_size,
-                                        chip.tensor_align_bytes);
+                                        chip.tensor_align_bytes,
+                                        chip.allow_lifetime_reuse);
   auto success = allocatorBC.assignAddr(
       alloc_ops, live_ranges, bank_conflict_map, addrMapWithBC, memUsedWithBC);
   ICHECK(success) << chip.name << " local memory allocation failed. buffers="
@@ -657,6 +662,8 @@ PrimFunc InferAddress(PrimFunc f) {
                       IntImm(DataType::Int(64), chip.bank_num));
     fn_attr->dict.Set("tir.tpu.lmem_bank_size",
                       IntImm(DataType::Int(64), chip.bank_size));
+    fn_attr->dict.Set("tir.tpu.lmem_allow_lifetime_reuse",
+                      Bool(chip.allow_lifetime_reuse));
     for (auto op : alloc_ops) {
       int64_t address = addrMapWithBC[op];
       fn_attr->dict.Set(op->name, IntImm(DataType::Int(64), address));
@@ -688,7 +695,7 @@ PrimFunc InferAddress(PrimFunc f) {
   std::cerr << "[AddressAssign] chip=" << chip.name
             << " success=" << std::boolalpha << success
             << " buffers=" << alloc_ops.size() << " total=" << memUsedWithBC
-            << " bytes\n";
+            << " bytes lifetime_reuse=" << chip.allow_lifetime_reuse << "\n";
 
   return f;
 }

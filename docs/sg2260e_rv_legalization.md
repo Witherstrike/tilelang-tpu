@@ -31,7 +31,13 @@ three independent spaces: CR starts at 1, TR at 8, and GR at 32.
 Layout is attached to each operand view. This matters because one buffer may
 need different layouts for full and partial accesses. Global full views are
 continuous, local full views are HW-aligned, and partial copy/global views are
-free-layout. Allocation is deterministic within a function and reuses the same
+free-layout. Allocation is deterministic within a function. BM1690 retains
+lifetime-based address reuse, while SG2260E disables reuse between distinct
+buffers because raw RV DMA/TIU instructions are asynchronous beyond the TIR
+statement live ranges. This conservative policy prevents a later DMA from
+overwriting an earlier operand before the hardware has consumed it, without
+inserting synchronization. Allocation summaries expose the policy through
+`tir.tpu.lmem_allow_lifetime_reuse`. The allocator otherwise reuses the same
 register for the same `(buffer, layout)` view.
 
 The pass recognizes function buffer maps, block `alloc_buffers`,

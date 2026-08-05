@@ -4,6 +4,7 @@
 import contextlib
 import io
 
+import tilelang
 from tilelang import tvm
 import tilelang.language as T
 from tilelang.engine.phase import LowerAndLegalize, OptimizeForTarget
@@ -31,13 +32,33 @@ def _attr_keys(attrs):
     return [str(key) for key in attrs._dict().keys()]
 
 
+def test_bm1690_keeps_lifetime_reuse_policy_for_sequential_buffers():
+    source = r'''
+@T.prim_func
+def main():
+    A = T.alloc_buffer((1, 8, 1, 16), "float16", scope="shared.dyn")
+    B = T.alloc_buffer((1, 8, 1, 16), "float16", scope="shared.dyn")
+    T.evaluate(T.call_extern("int32", "ppl.fill", T.tvm_access_ptr(T.type_annotation("float16"), A.data, 0, 128, 2), T.float32(0)))
+    T.evaluate(T.call_extern("int32", "ppl.fill", T.tvm_access_ptr(T.type_annotation("float16"), B.data, 0, 128, 2), T.float32(0)))
+'''
+    from tvm.script import from_source
+    func = from_source(source, {"T": tvm.script.tir}).with_attr(
+        "tir.tpu.chip", "bm1690")
+    mod = tvm.tir.transform.LowerOpaqueBlock()(tvm.IRModule({"main": func}))
+    mod = tilelang.transform.AddressAssign()(mod)
+    attrs = mod["main"].attrs
+    assert int(attrs["tir.tpu.lmem_allow_lifetime_reuse"]) == 1
+    assert int(attrs["tir.tpu.lmem.A.address"]) == int(
+        attrs["tir.tpu.lmem.B.address"])
+
+
 def _single_attr_with_prefix(attrs, prefix):
     keys = [key for key in _attr_keys(attrs) if key.startswith(prefix)]
     assert len(keys) == 1, keys
     return keys[0]
 
 
-def test_ppl_gemm_output_write_phase_can_share_input_bank():
+def test_ppl_gemm_accumulator_is_bank_separated_from_inputs():
 
     @T.prim_func
     def main():
@@ -55,9 +76,8 @@ def test_ppl_gemm_output_write_phase_can_share_input_bank():
     c_addr = _addr(attrs, "c_shared")
 
     assert a_addr // BANK_SIZE != b_addr // BANK_SIZE
-    assert c_addr // BANK_SIZE == a_addr // BANK_SIZE
-    assert a_addr <= c_addr
-    assert c_addr < a_addr + BANK_SIZE
+    assert c_addr // BANK_SIZE != a_addr // BANK_SIZE
+    assert c_addr // BANK_SIZE != b_addr // BANK_SIZE
 
 
 def test_elementwise_reads_are_bank_separated_while_outputs_remain_flexible():

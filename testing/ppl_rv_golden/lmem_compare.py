@@ -121,7 +121,7 @@ def _overlap(lhs_start: int, lhs_end: int, rhs_start: int, rhs_end: int) -> bool
 
 def validate_allocations(
     tensors: dict[str, LocalTensor], *, bank_size: int, bank_num: int = 16,
-    alignment: int = 64,
+    alignment: int = 64, allow_lifetime_reuse: bool = True,
 ) -> None:
     """Check chip-level capacity, alignment, and simultaneous-liveness safety."""
     for tensor in tensors.values():
@@ -139,6 +139,9 @@ def validate_allocations(
             if address_overlap and live_overlap:
                 raise AssertionError(
                     f"illegal simultaneous allocation overlap: {lhs_name}, {rhs_name}")
+            if address_overlap and not allow_lifetime_reuse:
+                raise AssertionError(
+                    f"lifetime reuse is disabled: {lhs_name}, {rhs_name}")
             has_conflict = (rhs_name in lhs.conflicts or
                             lhs_name in rhs.conflicts)
             bank_overlap = _overlap(lhs.bank_start, lhs.bank_end + 1,

@@ -92,6 +92,18 @@ def test_rejects_overlapping_live_allocations():
         lmem_compare.validate_allocations(tensors, bank_size=16 * 1024)
 
 
+def test_can_disable_lifetime_address_reuse_for_async_rv_execution():
+    mlir = """
+      %0 = ppl.tensorbe LOCAL %none {address = 0 : i64, idx = 0 : i32, bank_conflict = [], live_range = [0, 1], ppl.vname = "a", size = 64 : i64}
+      %1 = ppl.tensorbe LOCAL %none {address = 0 : i64, idx = 1 : i32, bank_conflict = [], live_range = [1, 2], ppl.vname = "b", size = 64 : i64}
+    """
+    tensors = lmem_compare.parse_final_mlir(mlir)
+    lmem_compare.validate_allocations(tensors, bank_size=16 * 1024)
+    with pytest.raises(AssertionError, match="lifetime reuse is disabled"):
+        lmem_compare.validate_allocations(
+            tensors, bank_size=16 * 1024, allow_lifetime_reuse=False)
+
+
 def test_rejects_live_conflict_at_different_offsets_in_same_bank():
     mlir = """
       %0 = ppl.tensorbe LOCAL %none {address = 0 : i64, idx = 0 : i32, bank_conflict = [1], live_range = [0, 2], ppl.vname = "a", size = 64 : i64}
