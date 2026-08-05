@@ -6,6 +6,7 @@ from tilelang import tvm as tvm
 from tilelang.contrib.nvcc import get_target_compute_version
 from tvm.target import Target
 import ctypes
+import glob
 import os
 import tempfile
 import subprocess
@@ -102,9 +103,11 @@ class LibraryGenerator(object):
             ppl_layout = resolve_ppl_layout(PPL_TOP, self.tpu_config.chip)
 
             if self.tpu_config.device_mode == "rv":
-                raise NotImplementedError(
-                    "RV target configuration reached LibraryGenerator, but RV "
-                    "lowering/codegen is not implemented yet")
+                if self.tpu_config.chip != "sg2260e":
+                    raise ValueError("RV LibraryGenerator currently supports SG2260E only")
+                if self.mode != "cmodel":
+                    raise NotImplementedError(
+                        "SG2260E RV runtime integration currently supports cmodel only")
 
             if self.mode=="pcie":
                 self.tpu_compile_pcie(timeout=timeout, layout=ppl_layout)
@@ -161,6 +164,13 @@ class LibraryGenerator(object):
     def _prepare_cmodel_kernel_source(self, kernel_path: str):
         with open(kernel_path, "r") as f:
             kernel_code = f.read()
+
+        # SG2260E exposes the parallel-region API in its PPL 1.7 kernel
+        # headers and emulator.  RV codegen emits those calls directly from
+        # structured TIR AttrStmt nodes, so the cmodel must compile the source
+        # unchanged and preserve the scheduling semantics.
+        if self.tpu_config.device_mode == "rv":
+            return
 
         sanitized = kernel_code.replace("      tpu_parallel_start(); \n", "")
         sanitized = sanitized.replace("      tpu_parallel_end(); \n", "")
@@ -238,6 +248,10 @@ class LibraryGenerator(object):
         src_dir = get_tpu_template_dir()
         definitions, includes = self._ppl_compile_flags(layout, src_dir)
         definitions.append("-DUSING_CMODEL")
+        checker_root = layout.kernel_common_include.parent / "checker"
+        checker_include = checker_root / "include"
+        if layout.release == "1.7" and checker_include.is_dir():
+            includes.append(f"-I{checker_include}")
         common = definitions + includes + ["-O3", "-DNDEBUG", "-fPIC"]
 
         kernel_c = os.path.join(src_dir, "kernel.c")
@@ -271,9 +285,23 @@ class LibraryGenerator(object):
             ["/usr/bin/cc", *common, "-Dkernel_EXPORTS", "-c",
              str(layout.ppl_helper_source), "-o", helper_o],
             "Compile PPL helper", timeout)
+        checker_objects = []
+        if self.tpu_config.device_mode == "rv" and layout.release == "1.7":
+            checker_sources = sorted(glob.glob(str(checker_root / "src" / "*.c")))
+            if not checker_sources:
+                raise FileNotFoundError(
+                    f"PPL 1.7 checker sources are missing: {checker_root / 'src'}")
+            for index, checker_source in enumerate(checker_sources):
+                checker_object = os.path.join(src_dir, f"ppl_checker_{index}.o")
+                self._run_tpu_command(
+                    ["/usr/bin/cc", *common, "-Dkernel_EXPORTS", "-c",
+                     checker_source, "-o", checker_object],
+                    f"Compile PPL checker {os.path.basename(checker_source)}", timeout)
+                checker_objects.append(checker_object)
         self._run_tpu_command(
             ["/usr/bin/cc", "-shared", "-fPIC", "-Wl,--no-undefined",
              "-Wl,-soname,libkernel.so", "-o", libkernel, kernel_c_o, helper_o,
+             *checker_objects,
              f"-Wl,-rpath,{rpath}", str(layout.emulator_library), "-lm"],
             "Link cmodel libkernel.so", timeout)
         self._run_tpu_command(

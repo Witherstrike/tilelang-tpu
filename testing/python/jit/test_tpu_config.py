@@ -1,9 +1,12 @@
 import pytest
 import importlib
+from types import SimpleNamespace
 import tilelang
 from tilelang import tvm
 
 jit_api = importlib.import_module("tilelang.jit")
+libgen_module = importlib.import_module("tilelang.jit.adapter.libgen")
+TPU_TARGET = SimpleNamespace(kind=SimpleNamespace(name="tpu"))
 
 from tilelang.engine.tpu_config import (
     TPUCompileConfig,
@@ -77,3 +80,37 @@ def test_library_generator_receives_tpu_config():
 
     assert generator.tpu_config is config
     assert generator.mode == "pcie"
+
+
+def test_rv_library_generator_dispatches_to_sg2260e_cmodel(monkeypatch, tmp_path):
+    config = TPUCompileConfig("sg2260e", "rv", "cmodel")
+    generator = LibraryGenerator(TPU_TARGET, tpu_config=config)
+    captured = {}
+
+    monkeypatch.setenv("PPL_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(libgen_module, "resolve_ppl_layout",
+                        lambda root, chip: (root, chip))
+    monkeypatch.setattr(
+        generator,
+        "tpu_compile_cmodel",
+        lambda timeout, layout: captured.update(timeout=timeout, layout=layout),
+    )
+
+    generator.compile_lib(timeout=17)
+
+    assert captured == {
+        "timeout": 17,
+        "layout": (str(tmp_path), "sg2260e"),
+    }
+
+
+def test_rv_library_generator_preserves_structured_pipeline_calls(tmp_path):
+    config = TPUCompileConfig("sg2260e", "rv", "cmodel")
+    generator = LibraryGenerator(TPU_TARGET, tpu_config=config)
+    source = tmp_path / "kernel.c"
+    original = "void kernel(void) { tpu_parallel_start(); tpu_parallel_end(); }\n"
+    source.write_text(original, encoding="utf-8")
+
+    generator._prepare_cmodel_kernel_source(str(source))
+
+    assert source.read_text(encoding="utf-8") == original
