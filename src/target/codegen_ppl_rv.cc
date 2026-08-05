@@ -56,6 +56,20 @@ const char *ElementWidth(int code, int bits) {
   return "";
 }
 
+const char *DTypeName(int code, int bits) {
+  if (code == DataType::kFloat && bits == 16)
+    return "DT_FP16";
+  if (code == DataType::kFloat && bits == 32)
+    return "DT_FP32";
+  if (code == DataType::kInt && bits == 32)
+    return "DT_INT32";
+  if (code == DataType::kUInt && bits == 32)
+    return "DT_UINT32";
+  LOG(FATAL) << "Unsupported SG2260E RV scalar dtype code=" << code
+             << ", bits=" << bits;
+  return "";
+}
+
 } // namespace
 
 CodeGenTileLangPPLRV::CodeGenTileLangPPLRV() { restrict_keyword_ = ""; }
@@ -82,9 +96,11 @@ void CodeGenTileLangPPLRV::AddFunction(const PrimFunc &f) {
 
   InitFuncState(f);
   tensor_views_.clear();
+  scalar_views_.clear();
   configured_registers_.clear();
   local_addresses_.clear();
   global_addresses_.clear();
+  parallel_region_ = false;
   for (const auto &attr : f->attrs->dict) {
     if (const auto *address = attr.second.as<IntImmNode>())
       local_addresses_[attr.first] = address->value;
@@ -142,10 +158,37 @@ void CodeGenTileLangPPLRV::AddFunction(const PrimFunc &f) {
     stream << "api->" << field_names[i];
   }
   stream << ");\n  rvt_sync_i(0xdeadbeef, 0);\n  return 0;\n}\n";
+  // TileLang's host launcher resolves the fixed public name main_kernel.
+  // Keep the symbol-derived entry for corpus/debug parity and register a thin
+  // ABI wrapper, as the atomic backend does.
+  stream << "int main_kernel(const void *args) {\n"
+         << "  return " << function_name << "_entry(args);\n"
+         << "}\n"
+         << "TPUKERNEL_FUNC_REGISTER(main_kernel)\n";
 }
 
 void CodeGenTileLangPPLRV::VisitStmt_(const AllocateNode *op) {
   PrintStmt(op->body);
+}
+
+void CodeGenTileLangPPLRV::VisitStmt_(const AttrStmtNode *op) {
+  if (op->attr_key == "tpu_parallel_start") {
+    ICHECK(!parallel_region_) << "Nested SG2260E RV parallel regions are unsupported";
+    parallel_region_ = true;
+    PrintIndent();
+    stream << "tpu_parallel_start();\n";
+    PrintStmt(op->body);
+    return;
+  }
+  if (op->attr_key == "tpu_parallel_end") {
+    ICHECK(parallel_region_) << "Unmatched SG2260E RV parallel region end";
+    PrintIndent();
+    stream << "tpu_parallel_end();\n";
+    parallel_region_ = false;
+    PrintStmt(op->body);
+    return;
+  }
+  CodeGenC::VisitStmt_(op);
 }
 
 CodeGenTileLangPPLRV::TensorView
@@ -260,7 +303,9 @@ void CodeGenTileLangPPLRV::EmitTensorView(const TensorView &view) {
   configured_registers_[register_key] = payload;
   PrintIndent();
   stream << (global ? "RVT_CFGGR(" : "RVT_CFGTR(") << view.register_number
-         << ", " << (view.dtype_code == DataType::kInt || view.dtype_code == DataType::kUInt)
+         // PPL 1.7's SG2260E gather golden configures uint32 indices with
+         // is_int=0; preserve that generated descriptor encoding exactly.
+         << ", " << (view.dtype_code == DataType::kInt)
          << ", " << ElementWidth(view.dtype_code, view.dtype_bits)
          << ", 0, " << LayoutName(view.layout) << ", ";
   stream << address;
@@ -306,8 +351,32 @@ void CodeGenTileLangPPLRV::VisitStmt_(const LetStmtNode *op) {
       tensor_views_.erase(op->var.get());
       return;
     }
+    if (name && name->value == tl::rv::kScalar) {
+      ICHECK_EQ(call->args.size(), 6U)
+          << "SG2260E RV scalar schema mismatch: expected 6 arguments";
+      ScalarView scalar{AsInt(call->args[1], "scalar register"),
+                        AsInt(call->args[2], "scalar dtype code"),
+                        AsInt(call->args[3], "scalar dtype bits"),
+                        AsInt(call->args[4], "scalar dtype lanes"),
+                        call->args[5]};
+      ICHECK_EQ(scalar.dtype_lanes, 1)
+          << "SG2260E RV supports scalar element dtypes only";
+      scalar_views_.emplace(op->var.get(), scalar);
+      PrintStmt(op->body);
+      scalar_views_.erase(op->var.get());
+      return;
+    }
   }
   CodeGenC::VisitStmt_(op);
+}
+
+const CodeGenTileLangPPLRV::ScalarView &
+CodeGenTileLangPPLRV::GetScalarView(const PrimExpr &expr,
+                                    const std::string &operation) const {
+  const auto *var = expr.as<VarNode>();
+  ICHECK(var && scalar_views_.count(var))
+      << operation << " expects an RV scalar operand";
+  return scalar_views_.at(var);
 }
 
 const CodeGenTileLangPPLRV::TensorView &
@@ -377,6 +446,177 @@ void CodeGenTileLangPPLRV::VisitStmt_(const EvaluateNode *op) {
            << ", " << rhs.register_number << ");\n";
     return;
   }
+  if (name == "ppl.rv.fill") {
+    ICHECK_EQ(call->args.size(), 3U) << "ppl.rv.fill expects dst and value";
+    const TensorView &dst = GetTensorView(call->args[1], name);
+    const ScalarView &value = GetScalarView(call->args[2], name);
+    ICHECK_EQ(dst.register_class, static_cast<int>(tl::rv::RegisterClass::kTensor));
+    ICHECK_EQ(dst.access, 1) << "ppl.rv.fill dst must be write-only";
+    ICHECK_EQ(dst.dtype_code, DataType::kFloat);
+    ICHECK(dst.dtype_bits == 16 || dst.dtype_bits == 32)
+        << "ppl.rv.fill supports fp16/fp32 destinations only";
+    ICHECK(value.dtype_code == DataType::kFloat ||
+           value.dtype_code == DataType::kInt ||
+           value.dtype_code == DataType::kUInt)
+        << "ppl.rv.fill value must be numeric";
+    std::string temporary = "rv_scalar_" + std::to_string(value.register_number);
+    PrintIndent();
+    stream << "scalar_t " << temporary << " = {.u32 = 0};\n";
+    PrintIndent();
+    if (value.dtype_code == DataType::kFloat)
+      stream << temporary << ".f32 = (float)(" << PrintExpr(value.value) << ");\n";
+    else if (value.dtype_code == DataType::kUInt)
+      stream << temporary << ".u32 = (uint32_t)(" << PrintExpr(value.value) << ");\n";
+    else
+      stream << temporary << ".s32 = (int32_t)(" << PrintExpr(value.value) << ");\n";
+    PrintIndent();
+    stream << temporary << " = tpu_cast(" << temporary << ", "
+           << DTypeName(dst.dtype_code, dst.dtype_bits) << ", "
+           << (value.dtype_code == DataType::kFloat
+                   ? "DT_FP32"
+                   : (value.dtype_code == DataType::kUInt ? "DT_UINT32"
+                                                          : "DT_INT32"))
+           << ", RM_HALF_TO_EVEN);\n";
+    PrintIndent();
+    stream << "RVT_CR(" << value.register_number << ", 0, "
+           << ElementWidth(dst.dtype_code, dst.dtype_bits)
+           << ", 0, " << temporary << ".u32);\n";
+    PrintIndent();
+    stream << "rvt_cp(" << dst.register_number << ", "
+           << value.register_number << ");\n";
+    return;
+  }
+  if (name == "ppl.rv.gemm") {
+    ICHECK_EQ(call->args.size(), 9U)
+        << "ppl.rv.gemm expects lhs, rhs, accumulator, transpose flags and M/N/K";
+    const TensorView &lhs = GetTensorView(call->args[1], name);
+    const TensorView &rhs = GetTensorView(call->args[2], name);
+    const TensorView &dst = GetTensorView(call->args[3], name);
+    for (const TensorView *view : {&lhs, &rhs}) {
+      ICHECK_EQ(view->register_class,
+                static_cast<int>(tl::rv::RegisterClass::kTensor));
+      ICHECK_EQ(view->dtype_code, DataType::kFloat);
+      ICHECK_EQ(view->dtype_bits, 16)
+          << "ppl.rv.gemm fmm2a inputs must be fp16";
+    }
+    ICHECK_EQ(dst.register_class,
+              static_cast<int>(tl::rv::RegisterClass::kTensor));
+    ICHECK_EQ(dst.dtype_code, DataType::kFloat);
+    ICHECK_EQ(dst.dtype_bits, 32)
+        << "ppl.rv.gemm rvt_fmm2a accumulator must be fp32; PPL 1.7 does "
+           "not define fp16 accumulation";
+    ICHECK_EQ(lhs.access, 0);
+    ICHECK_EQ(rhs.access, 0);
+    ICHECK_EQ(dst.access, 2) << "ppl.rv.gemm output must be a read-write accumulator";
+    bool transpose_lhs = false;
+    bool transpose_rhs = false;
+    if (call->args.size() > 4) {
+      const auto *transpose = call->args[4].as<IntImmNode>();
+      ICHECK(transpose) << "ppl.rv.gemm lhs transpose flag must be constant";
+      transpose_lhs = transpose->value != 0;
+    }
+    if (call->args.size() > 5) {
+      const auto *transpose = call->args[5].as<IntImmNode>();
+      ICHECK(transpose) << "ppl.rv.gemm rhs transpose flag must be constant";
+      transpose_rhs = transpose->value != 0;
+    }
+    ICHECK(!transpose_lhs || transpose_rhs)
+        << "ppl.rv.gemm transpose_A=True, transpose_B=False has no SG2260E "
+           "RV fmm2 variant";
+    int m = AsInt(call->args[6], "gemm M");
+    int n = AsInt(call->args[7], "gemm N");
+    int k = AsInt(call->args[8], "gemm K");
+    ICHECK_GT(m, 0);
+    ICHECK_GT(n, 0);
+    ICHECK_GT(k, 0);
+    ICHECK_EQ(AsInt(dst.shape[1], "gemm accumulator C"), m);
+    ICHECK_EQ(AsInt(dst.shape[3], "gemm accumulator W"), n);
+    ICHECK_EQ(AsInt(lhs.shape[1], "gemm lhs C"), transpose_lhs ? k : m);
+    ICHECK_EQ(AsInt(lhs.shape[3], "gemm lhs W"), transpose_lhs ? m : k);
+    ICHECK_EQ(AsInt(rhs.shape[1], "gemm rhs C"), transpose_rhs ? n : k);
+    ICHECK_EQ(AsInt(rhs.shape[3], "gemm rhs W"), transpose_rhs ? k : n);
+    PrintIndent();
+    stream << "rvt_cfg_quant(0);\n";
+    PrintIndent();
+    stream << "rvt_cfg_satu(0, 0);\n";
+    PrintIndent();
+    stream << (transpose_lhs ? "rvt_fmm2a_tt(" :
+               transpose_rhs ? "rvt_fmm2a_nt(" : "rvt_fmm2a_nn(")
+           << dst.register_number << ", "
+           << lhs.register_number << ", " << rhs.register_number
+           << ", 0, 0, 0);\n";
+    return;
+  }
+  if (name == "ppl.rv.rsqrt") {
+    ICHECK_GE(call->args.size(), 3U) << "ppl.rv.rsqrt expects dst and src";
+    const TensorView &dst = GetTensorView(call->args[1], name);
+    const TensorView &src = GetTensorView(call->args[2], name);
+    ValidateSameTensor(dst, src, name);
+    ICHECK_EQ(dst.register_class, static_cast<int>(tl::rv::RegisterClass::kTensor));
+    ICHECK_EQ(src.register_class, static_cast<int>(tl::rv::RegisterClass::kTensor));
+    ICHECK_EQ(dst.dtype_code, DataType::kFloat);
+    ICHECK_EQ(dst.dtype_bits, 16)
+        << "ppl.rv.rsqrt currently supports the golden FP16 path only";
+    int iterations = 3;
+    if (call->args.size() > 3) {
+      const auto *iter = call->args[3].as<IntImmNode>();
+      ICHECK(iter) << "ppl.rv.rsqrt iteration count must be constant";
+      iterations = static_cast<int>(iter->value);
+    }
+    PrintIndent();
+    stream << "rvt_cfg_rsqrt_iter(" << iterations << ");\n";
+    PrintIndent();
+    stream << "rvt_sfu_rsqrt(" << dst.register_number << ", "
+           << src.register_number << ");\n";
+    return;
+  }
+  if (name == "ppl.rv.gather") {
+    ICHECK_GE(call->args.size(), 4U)
+        << "ppl.rv.gather expects dst, parameter and index";
+    const TensorView &dst = GetTensorView(call->args[1], name);
+    const TensorView &param = GetTensorView(call->args[2], name);
+    const TensorView &index = GetTensorView(call->args[3], name);
+    for (const TensorView *view : {&dst, &param, &index})
+      ICHECK_EQ(view->register_class,
+                static_cast<int>(tl::rv::RegisterClass::kGlobal))
+          << "ppl.rv.gather golden path requires global tensors";
+    ICHECK_EQ(dst.access, 1);
+    ICHECK_EQ(param.access, 0);
+    ICHECK_EQ(index.access, 0);
+    ICHECK_EQ(dst.dtype_code, DataType::kFloat);
+    ICHECK_EQ(dst.dtype_bits, 16);
+    ICHECK_EQ(param.dtype_code, dst.dtype_code);
+    ICHECK_EQ(param.dtype_bits, dst.dtype_bits);
+    ICHECK_EQ(index.dtype_code, DataType::kUInt);
+    ICHECK_EQ(index.dtype_bits, 32)
+        << "ppl.rv.gather index must be uint32";
+    ICHECK_EQ(call->args.size(), 5U)
+        << "ppl.rv.gather expects the TileLang param_h operand";
+    int param_h = AsInt(call->args[4], "gather param_h");
+    ICHECK_GT(param_h, 0) << "ppl.rv.gather param_h must be positive";
+    ICHECK_LE(param_h, 65535)
+        << "ppl.rv.gather param_h exceeds the SG2260E GR shape field";
+    int descriptor_h = AsInt(param.shape[2], "gather parameter H");
+    ICHECK_EQ(param_h, descriptor_h)
+        << "ppl.rv.gather param_h must match the source table's logical height";
+    PrintIndent();
+    stream << "uint64_t rv_dma_index = 0;\n";
+    PrintIndent();
+    // TileLang's param_h is represented by the configured source descriptor.
+    // Its API exposes neither PPL's constant fill value nor index_start_pos;
+    // both are zero, matching the SG2260E gather golden.
+    stream << "rvt_cfg_dmaidx(0, &rv_dma_index);\n";
+    PrintIndent();
+    stream << "rvt_dma_hgather(" << dst.register_number << ", "
+           << param.register_number << ", " << index.register_number
+           << ", 0);\n";
+    return;
+  }
+  if (name == "ppl.rv.reduce_sum" || name == "ppl.rv.reduce_max") {
+    LOG(FATAL) << name << " is unavailable in PPL 1.7 SG2260E RV: the golden "
+                  "device C emits TPUKERNEL_ASSERT because rvt_api.h exposes "
+                  "no reduce instruction";
+  }
   if (name == "ppl.rv.topk") {
     LOG(FATAL) << "ppl.rv.topk is unavailable: PPL 1.7 SG2260E RV lowering "
                   "fails after converting top-k operands to register descriptors";
@@ -386,6 +626,9 @@ void CodeGenTileLangPPLRV::VisitStmt_(const EvaluateNode *op) {
 }
 
 std::string BuildTileLangPPLRV(IRModule mod) {
+  ICHECK_EQ(mod->functions.size(), 1U)
+      << "CodeGenTileLangPPLRV supports exactly one PrimFunc because the TPU "
+         "runtime ABI exports the fixed main_kernel symbol";
   CodeGenTileLangPPLRV cg;
   cg.Init(false);
   for (const auto &entry : mod->functions) {

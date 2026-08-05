@@ -37,20 +37,33 @@ private:
     Array<PrimExpr> stride;
   };
 
+  struct ScalarView {
+    int register_number;
+    int dtype_code;
+    int dtype_bits;
+    int dtype_lanes;
+    PrimExpr value;
+  };
+
   void VisitStmt_(const AllocateNode *op) final;
+  void VisitStmt_(const AttrStmtNode *op) final;
   void VisitStmt_(const LetStmtNode *op) final;
   void VisitStmt_(const EvaluateNode *op) final;
   void EmitTensorView(const TensorView &view);
   TensorView ParseTensorView(const CallNode *call) const;
   const TensorView &GetTensorView(const PrimExpr &expr,
                                   const std::string &operation) const;
+  const ScalarView &GetScalarView(const PrimExpr &expr,
+                                  const std::string &operation) const;
   void ValidateSameTensor(const TensorView &lhs, const TensorView &rhs,
                           const std::string &operation) const;
 
   std::unordered_map<const VarNode *, TensorView> tensor_views_;
+  std::unordered_map<const VarNode *, ScalarView> scalar_views_;
   std::unordered_map<int, std::string> configured_registers_;
   std::unordered_map<std::string, int64_t> local_addresses_;
   std::unordered_map<std::string, std::string> global_addresses_;
+  bool parallel_region_{false};
 };
 
 std::string BuildTileLangPPLRV(IRModule mod);

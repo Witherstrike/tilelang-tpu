@@ -32,7 +32,7 @@ const std::unordered_map<std::string, std::vector<OperandSchema>> &Schemas() {
   static const std::unordered_map<std::string, std::vector<OperandSchema>> schemas = {
       {"ppl.copy", {{1, "src"}, {2, "dst"}}},
       {"ppl.fill", {{1, "dst"}}},
-      {"ppl.gemm", {{1, "lhs"}, {2, "rhs"}, {3, "dst"}}},
+      {"ppl.gemm", {{1, "lhs"}, {2, "rhs"}, {3, "accumulator"}}},
       {"ppl.sub", {{1, "dst"}, {2, "lhs"}, {3, "rhs"}}},
       {"ppl.mul", {{1, "dst"}, {2, "lhs"}, {3, "rhs"}}},
       {"ppl.add", {{1, "dst"}, {2, "lhs"}, {3, "rhs"}}},
@@ -59,6 +59,8 @@ enum class AccessKind : int { kRead = 0, kWrite = 1, kReadWrite = 2, kConservati
 AccessKind AccessForRole(const std::string &role) {
   if (role == "dst" || role == "dst_data" || role == "dst_index")
     return AccessKind::kWrite;
+  if (role == "accumulator")
+    return AccessKind::kReadWrite;
   if (role == "tmp")
     return AccessKind::kReadWrite;
   if (role.rfind("work", 0) == 0 || role == "coeff" || role == "table")
@@ -102,6 +104,16 @@ Array<PrimExpr> Normalize4D(const Array<PrimExpr> &dims, bool local_layout) {
     result = dims;
   }
   return result;
+}
+
+Array<PrimExpr> NormalizeGather4D(const Array<PrimExpr> &dims,
+                                  const std::string &role) {
+  PrimExpr one = IntImm(DataType::Int(32), 1);
+  if ((role == "dst" || role == "param") && dims.size() == 2)
+    return {one, one, dims[0], dims[1]};
+  if (role == "index" && dims.size() == 1)
+    return {one, one, dims[0], one};
+  return Normalize4D(dims, false);
 }
 
 Array<PrimExpr> CompactStrides(const Array<PrimExpr> &shape) {
@@ -172,9 +184,15 @@ public:
     auto schema_it = Schemas().find(name);
     ICHECK(schema_it != Schemas().end())
         << "SG2260E RV legalization has no operand schema for " << name;
+    if (name == "ppl.gemm") {
+      ICHECK_EQ(call->args.size(), 9U)
+          << "ppl.gemm expects exactly lhs, rhs, accumulator, transpose_A, "
+             "transpose_B, M, N and K";
+    }
 
     Array<PrimExpr> rewritten_args = call->args;
     std::vector<std::pair<Var, PrimExpr>> bindings;
+    std::unordered_map<std::string, Array<PrimExpr>> operand_shapes;
     for (const OperandSchema &operand : schema_it->second) {
       ICHECK_LT(static_cast<size_t>(operand.argument), call->args.size());
       const auto *access = call->args[operand.argument].as<CallNode>();
@@ -241,7 +259,10 @@ public:
       Array<PrimExpr> dims;
       for (const Range &range : ranges)
         dims.push_back(range->extent);
-      Array<PrimExpr> shape4 = Normalize4D(dims, !global);
+      Array<PrimExpr> shape4 =
+          name == "ppl.gather" ? NormalizeGather4D(dims, operand.role)
+                               : Normalize4D(dims, !global);
+      operand_shapes.emplace(operand.role, shape4);
       Array<PrimExpr> raw_strides = buffer->strides.empty()
                                            ? CompactStrides(buffer->shape)
                                            : buffer->strides;
@@ -283,6 +304,35 @@ public:
       bindings.emplace_back(
           scalar, Call(scalar_value.dtype(), builtin::call_extern(), scalar_args));
       rewritten_args.Set(scalar_arg, scalar);
+    }
+
+    if (name == "ppl.gemm") {
+      const auto *transpose_lhs = call->args[4].as<IntImmNode>();
+      const auto *transpose_rhs = call->args[5].as<IntImmNode>();
+      ICHECK(transpose_lhs && transpose_rhs)
+          << "ppl.gemm transpose flags must be constant for SG2260E RV";
+      const Array<PrimExpr> &lhs = operand_shapes.at("lhs");
+      const Array<PrimExpr> &rhs = operand_shapes.at("rhs");
+      const Array<PrimExpr> &accumulator = operand_shapes.at("accumulator");
+      PrimExpr inferred_m = transpose_lhs->value ? lhs[3] : lhs[1];
+      PrimExpr inferred_k = transpose_lhs->value ? lhs[1] : lhs[3];
+      PrimExpr inferred_n = transpose_rhs->value ? rhs[1] : rhs[3];
+      arith::Analyzer analyzer;
+      auto require_equal = [&](const PrimExpr &explicit_value,
+                               const PrimExpr &inferred_value,
+                               const char *dimension) {
+        ICHECK(tvm::StructuralEqual()(explicit_value, inferred_value) ||
+               analyzer.CanProveEqual(explicit_value, inferred_value))
+            << "ppl.gemm explicit " << dimension
+            << " does not match the operand descriptors";
+      };
+      require_equal(call->args[6], inferred_m, "M");
+      require_equal(call->args[7], inferred_n, "N");
+      require_equal(call->args[8], inferred_k, "K");
+      require_equal(accumulator[1], inferred_m, "accumulator M");
+      require_equal(accumulator[3], inferred_n, "accumulator N");
+      require_equal(transpose_rhs->value ? rhs[3] : rhs[1], inferred_k,
+                    "rhs K");
     }
 
     rewritten_args.Set(0, StringImm("ppl.rv." + name.substr(4)));
