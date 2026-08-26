@@ -234,9 +234,15 @@ def lower(
     mod = LowerAndLegalize(mod, target)
 
     # Phase 2: Optimize the IR for the target
-    mod = OptimizeForTarget(mod, target)
+    mod = OptimizeForTarget(mod, target, tpu_config)
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     device_mod = tir.transform.Filter(_is_device_call)(mod)
+
+    if tpu_config.device_mode == "rv":
+        raise NotImplementedError(
+            "SG2260E RV TIR legalization is complete, but the dedicated RV C "
+            "code generator is not implemented; refusing to use the atomic "
+            "tpu_* emitter for ppl.rv.* operations.")
 
     codegen_mod = tvm._ffi.get_global_func("target.build.tilelang_ppl")(mod,)  # target)
     # return device_mod

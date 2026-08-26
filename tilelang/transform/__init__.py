@@ -296,3 +296,8 @@ def AddressAssign():
         The result pass
     """
     return _ffi_api.AddressAssign()  # type: ignore
+
+
+def RVLegalizeAndAllocateRegisters(chip: str):
+    """Legalize TPU operations into explicit SG2260E RV views and registers."""
+    return _ffi_api.RVLegalizeAndAllocateRegisters(chip)  # type: ignore
