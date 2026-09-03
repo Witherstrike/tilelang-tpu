@@ -846,7 +846,6 @@ private:
       auto parallel_start = AttrStmt(make_zero(DataType::Int(32)),
                                      "tpu_parallel_start", 0, no_op);
       stmts.insert(stmts.begin(), parallel_start);
-      std::cout << "850 OK" << std::endl;
       auto parallel_end =
           AttrStmt(make_zero(DataType::Int(32)), "tpu_parallel_end", 0, no_op);
       stmts.push_back(parallel_end);
@@ -1051,7 +1050,6 @@ private:
         f_add_child(pipeline_body_seq->seq[i]);
       }
     }
-    std::cout << __LINE__ << "OK" << std::endl;
     auto pipeline_stages = Downcast<Array<Integer>>(
         op->annotations.at(tir::attr::software_pipeline_stage));
     auto pipeline_orders = Downcast<Array<Integer>>(
@@ -1086,7 +1084,6 @@ private:
           /*order=*/static_cast<int>(pipeline_orders[i]->value), is_async};
       pipeline_info.emplace(original_order[i], stage_order);
     }
-    std::cout << __LINE__ << "OK" << std::endl;
     ValidatePipelineBody(pipeline_info, original_order);
 
     // Step 4: Rewrite the pipeline body.

@@ -1,7 +1,7 @@
 # TileLang-TPU 的 PPL 指令 Profiling 设计与实现
 
 本文说明为什么需要独立 profiling 模块、PPL 1.7 的真实工作机制、TileLang-TPU 的
-CModel/PCIe 实现、使用方式、安全边界与 2026-09-03 的实测结论。
+CModel/PCIe 实现、使用方式、安全边界与 2026-09-04 的实测结论。
 
 这里严格区分三类时间：host wall time、原始命令记录、解码后的设备指令时间。只有最后一类
 可以回答“某条 TIU/GDMA 指令用了多久”。
@@ -10,13 +10,14 @@ CModel/PCIe 实现、使用方式、安全边界与 2026-09-03 的实测结论�
 
 | 路径 | 已实现 | 本机证据 | 仍有限制 |
 | --- | --- | --- | --- |
-| SG2260E + TPU-Kernel + CModel | `FILE_DUMP_CMD`、四核设置、raw/.txt 解析、可选 PerfAI | 64×64 FP16 matmul 数值通过；24 个 raw 工件、78 条文本命令 | 本机 SDK 未附 CModel PerfAI，因此没有 CModel 真实逐指令时间 |
-| SG2260E + RV + CModel | 同一隔离收集框架 | `rvt_kernel_start → rvt_sync_all` 成功；24 个 raw 工件、48 条控制命令 | 这是控制路径，不是 RV tensor arithmetic 数值证明 |
-| SG2260E + TPU-Kernel + PCIe | TPUDNN recorder、单次 dispatch、raw 收集、`bigTpuProfile` JSON 投影 | device 0 数值通过；四核 PMU 记录；真实解码 36 条设备命令 | 只验证一个 matmul；profiling 开销下的 host 时间不能作 kernel 性能值 |
-| SG2260E + RV + PCIe | 与 TPU-Kernel 共用 TPUDNN host 路径 | RV 控制 kernel 成功；四核 recorder 工件生成 | decoder 会去掉系统控制命令，因而该 case 没有 tensor 指令 timing；仍需 descriptor 完整的 RV 数值 case |
+| SG2260E + TPU-Kernel + CModel | `FILE_DUMP_CMD`、四核拓扑设置、raw/.txt 解析、可选 PerfAI | add/sub/mul/div 与 matmul 全部数值通过；逐元素 58、matmul 78 条文本命令 | 本机 SDK 未附 CModel PerfAI，因此没有 CModel 真实逐指令时间 |
+| SG2260E + RV + CModel | 同一隔离收集框架 | 同一五项数值全部通过，覆盖 RV descriptor、DMA、算术、GEMM 与回写 | CModel raw 只有命令文本，不提供真实 duration |
+| SG2260E + TPU-Kernel + PCIe | TPUDNN recorder、单次 dispatch、raw 收集、`bigTpuProfile` JSON 投影 | device 0 五项数值通过；逐元素各 16、matmul 36 条真实 timing | profiling 开销下的 host 时间不能作 kernel 性能值 |
+| SG2260E + RV + PCIe | 与 TPU-Kernel 共用 TPUDNN host 路径 | device 0 五项数值通过；逐元素各 16、matmul 36 条真实 timing | 当前只覆盖固定 shape/dtype 的单核工作负载 |
 
-因此，profiling 已经在 CModel 和 PCIe 两端实际发挥作用。PCIe 端还完成了真实逐指令解码；
-RV 控制 case 证明了 RV host/recorder 路径，不应被夸大成 RV tensor 指令性能验证。
+因此，profiling 已经在 CModel 和 PCIe 两端实际发挥作用；RV 不再只是控制路径，真实
+tensor add/sub/mul/div 和 `MM2_NN` 已取得数值与逐指令证据。单次 recorder 结果仍只用于
+诊断，不用于宣称统计性能。
 
 ## 2. 为什么不能直接给 JIT 加 `--profiling`
 
@@ -227,57 +228,60 @@ report = TPUInstructionProfiler(config).run_pcie(
 
 内部 `timeout_s` 是 worker、CModel PerfAI 锁等待、AutoRunner 或 PCIe decoder 共用的绝对
 wall-clock deadline，不为每阶段重新计时。超时、KeyboardInterrupt 或父进程死亡时，
-supervisor 终止自己的整个进程组；opt-in 硬件测试在第一项失败后 `pytest.exit`，不继续下一项。
+supervisor 终止自己的整个进程组；SIGTERM、SIGKILL、最终 reap 和日志 pipe drain 各有硬
+上限，即使驱动调用处于不可中断状态也不会再落入无期限 `communicate()`。opt-in 硬件矩阵
+在第一项失败后停止，不继续下一项。
 
 CModel PerfAI 的 `auto_build` 是共享可变目录。TileLang 用按 PerfAI root 命名的 Linux 抽象
 Unix socket 串行化自身会话；socket 随进程退出自动释放，不产生旧版 `/tmp/*.lock` 残留。
 
-验证构建、pytest 基目录、下载到隔离目录的 decoder 依赖及 raw 工件均是中间证据，不纳入
-Git；完成报告后必须整体清理。仓库只保留实现、测试和本 README。
+矩阵在 `research/artifacts` 下创建唯一、自有的 scratch，并通过 `try/finally` 只删除该目录；
+raw/decoded 报告不受影响。验证构建、pytest 基目录和临时安装的 decoder 依赖不纳入 Git，
+完成报告后清理；仓库只保留实现、测试和本 README。
 
-## 7. 2026-09-03 验证记录
+## 7. 2026-09-04 验证记录
 
 ### 7.1 CModel
 
-- TPU-Kernel 64×64 FP16 matmul：数值 `allclose` 通过；24 个 raw 工件；78 条命令
-  （BD 30、GDMA 34、SDMA 14）。
-- RV control：`rvt_kernel_start → rvt_sync_all` 成功；24 个 raw 工件；48 条控制命令
-  （BD/GDMA/SDMA 各 16）。
+- SG2260E TPU-Kernel 与 RV：add/sub/mul/div、64×64 FP16 matmul 共 10 项全部
+  `allclose` 通过；每个逐元素解析 58 条 raw 命令，matmul 78 条。
+- BM1690 TPU-Kernel：同样五项全部通过；逐元素 94、matmul 122 条 raw 命令。
+- 三种组合合计 15/15；24/48 个 trace 文件反映 4/8 核模拟器拓扑，不代表工作负载多核执行。
 
 ### 7.2 PCIe device 0
 
-- TPU-Kernel matmul：数值通过；recorder 显示 core 0 为 TIU/GDMA/SDMA = 22/26/6，
-  core 1–3 各为 6/6/6；生成目录式 `cdm_profile_data_dev0-0/`。
-- 同一真实工件由 `bigTpuProfile 0.3.4` 解码为 36 条非系统设备命令：BDC 16、GDMA 20；
-  opcode 为 `tensorLd` 16、`MM2_NN` 8、`copy` 4、`data_convert` 4、`tensorSt` 4。
-  一次端到端复验的单条 duration 范围为 11–520 ns，合计 6358 ns。
-- RV control：板端成功；recorder 显示 core 0 为 8/8/8，core 1–3 各为 6/6/6；生成同样
-  的目录式 raw 工件。结构化 decoder 去掉系统/控制命令后为 0 条，这是 control-only case
-  的预期结果，不是 profiling 失效。
-- 端到端 `run_pcie → TPUDNN → raw directory → bigTpuProfile → stable JSON → report` 通过。
+- TPU-Kernel 与 RV 的 add/sub/mul/div、matmul 均完成加载、单次发射、回传、数值比对、
+  recorder 和结构化解码，合计 10/10。
+- 每个逐元素 case 为 16 条：`tensorLd` 8、对应算术 4、`tensorSt` 4。单条
+  TPU-Kernel/RV add/sub/mul 分别为 14/12 ns，div 为 74/72 ns。
+- 每个 matmul 为 36 条：`tensorLd` 16、`MM2_NN` 8、copy 4、`data_convert` 4、
+  `tensorSt` 4；两后端 `MM2_NN` 和 convert 单条均为 51 ns 与 12 ns。
+- 初次 TPU-Kernel matmul 因 `T.Pipelined(num_stages=1)` 将 load 与直接消费者 GEMM 放入
+  并行区而数值失败；矩阵按首错停止。改为依赖有序的 `T.serial` 后，CModel 三组合和
+  PCIe 均通过。这证明 CModel 无法替代真实并行时序验证。
+- 端到端 `run_pcie → TPUDNN → raw directory → bigTpuProfile → stable JSON → report` 在
+  两种编程模型的真实 tensor 指令上通过。
 
 host 打印的单次时间约 8 ms，包含 runtime 调用和 profiling 开销，不能与上述设备命令 ns
 直接求和或当成无扰动性能。性能结论需要关闭 profiling 后的重复测量与统计设计。
 
 ### 7.3 工程回归
 
-- layout、JIT adapter、RVT codegen/link 与 profiling 测试合计 `66 passed, 4 skipped`；skip
-  项仅是未显式授权的真实 CModel/PCIe 用例。
-- 随后显式启用两条 CModel 真实用例，结果为 `2 passed`：TPU-Kernel matmul 完成数值比较，
-  RV control 完成实际初始化、发射、同步和 raw 收集。
-- PCIe 真实用例使用外层 process-group timeout 与内部 supervisor；TPU-Kernel、RV control
-  均成功，因此未触发“首个失败即终止后续板端测试”的保护分支。完成后确认无 profiler、
-  pytest 或 vendor worker 残留进程。
+- TPU 相关静态/单元测试：`101 passed, 4 skipped`；覆盖双 target、工具链、codegen、
+  AddressAssign、运行时门禁、超时进程组与 bounded kill/drain。
+- CModel 数值矩阵：15/15；PCIe 数值+timing 矩阵：10/10。
+- 初次 PCIe matmul 数值失败实际触发 fail-stop，RV 未继续运行；修复、重过 CModel 和单项
+  canary 后才启动 RV。全部完成后无 profiler、runner、vendor worker 或 JIT scratch 残留。
 
 ## 8. 尚未完成的工作
 
 1. 获得与本机 SG2260E raw schema 匹配的 CModel PerfAI，验证真实 CModel
    `profile_data.js`，而不只依赖 fixture。
-2. 实现最小 RV tensor 数值链：descriptor/register 配置、DMA load、一条算术、DMA store；
-   然后才能报告 RV tensor instruction timing。
-3. 扩充 PCIe 数值矩阵（dtype、tail、copy/fill/elementwise/reduce），每项必须先有 CModel
+2. 扩充 PCIe 数值矩阵（dtype、tail、copy/fill/elementwise/reduce），每项必须先有 CModel
    基线，再单次板端验证。
-4. 为 profile artifact 增加正式 manifest（resolved target、SDK、board runtime、kernel、输入
+3. 为 profile artifact 增加正式 manifest（resolved target、SDK、board runtime、kernel、输入
    shape/dtype）；在此之前不要用不同构建之间的 timing 做自动回归判定。
-5. 将 profiling duration 与普通 benchmark 分层：profiling 用于定位指令，benchmark 用于低
+4. 将 profiling duration 与普通 benchmark 分层：profiling 用于定位指令，benchmark 用于低
    扰动统计；不能让 autotune 直接消费一次有 recorder 开销的 host wall time。
+5. 为 dependency-correct TPU software pipeline 增加 hazard/buffer-version 模型；在此之前核心
+   correctness worker 保持串行。

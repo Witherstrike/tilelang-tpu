@@ -462,7 +462,7 @@ private:
     }
   }
 
-  bool VisitKnownPPLExtern(const CallNode *op) {
+  bool VisitKnownTPUExtern(const CallNode *op) {
     if (!op->op.same_as(builtin::call_extern()) || op->args.empty()) {
       return false;
     }
@@ -478,17 +478,31 @@ private:
     };
 
     OpScope scope(this);
-    if (op_name == "ppl.copy") {
+    if (op_name == "ppl.copy" || op_name == "tl.tpu.copy") {
       mark_arg(1, BufferAccessKind::kRead);
       mark_arg(2, BufferAccessKind::kWrite);
-    } else if (op_name == "ppl.fill") {
+    } else if (op_name == "ppl.fill" || op_name == "tl.tpu.fill") {
       mark_arg(1, BufferAccessKind::kWrite);
-    } else if (op_name == "ppl.gemm") {
+    } else if (op_name == "ppl.gemm" || op_name == "tl.tpu.gemm") {
       mark_arg(1, BufferAccessKind::kRead);
       mark_arg(2, BufferAccessKind::kRead);
-      mark_arg(3, BufferAccessKind::kWrite);
+      bool accumulate = true;
+      if (op->args.size() >= 10) {
+        if (const auto *value = op->args[9].as<IntImmNode>()) {
+          accumulate = value->value != 0;
+        }
+      } else if (op->args.size() >= 6) {
+        // Compatibility for the original 9-argument ppl.gemm ABI.
+        if (const auto *transpose_b = op->args[5].as<IntImmNode>()) {
+          accumulate = transpose_b->value == 0;
+        }
+      }
+      mark_arg(3, accumulate ? BufferAccessKind::kReadWrite
+                             : BufferAccessKind::kWrite);
     } else if (op_name == "ppl.sub" || op_name == "ppl.mul" ||
-               op_name == "ppl.add" || op_name == "ppl.div") {
+               op_name == "ppl.add" || op_name == "ppl.div" ||
+               op_name == "tl.tpu.sub" || op_name == "tl.tpu.mul" ||
+               op_name == "tl.tpu.add" || op_name == "tl.tpu.div") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);
@@ -548,7 +562,7 @@ private:
       StmtExprVisitor::VisitExpr_(op);
       return;
     }
-    if (VisitKnownPPLExtern(op)) {
+    if (VisitKnownTPUExtern(op)) {
       return;
     }
     if (IsAccessPtrCall(op)) {

@@ -35,7 +35,7 @@ def _single_attr_with_prefix(attrs, prefix):
     return keys[0]
 
 
-def test_ppl_gemm_output_write_phase_can_share_input_bank():
+def test_ppl_gemm_readwrite_accumulator_is_separated_from_both_inputs():
 
     @T.prim_func
     def main():
@@ -52,10 +52,13 @@ def test_ppl_gemm_output_write_phase_can_share_input_bank():
     b_addr = _addr(attrs, "b_shared")
     c_addr = _addr(attrs, "c_shared")
 
-    assert a_addr // BANK_SIZE != b_addr // BANK_SIZE
-    assert c_addr // BANK_SIZE == a_addr // BANK_SIZE
-    assert a_addr <= c_addr
-    assert c_addr < a_addr + BANK_SIZE
+    # ppl_gemm implements C += A @ B.  All three operands are therefore read
+    # during the GEMM and must not contend for the same local-memory bank.
+    assert len({
+        a_addr // BANK_SIZE,
+        b_addr // BANK_SIZE,
+        c_addr // BANK_SIZE,
+    }) == 3
 
 
 def test_elementwise_reads_are_bank_separated_while_outputs_remain_flexible():
@@ -122,7 +125,7 @@ def test_exp_composite_operands_are_conservative_bank_clique():
 
 
 if __name__ == "__main__":
-    test_ppl_gemm_output_write_phase_can_share_input_bank()
+    test_ppl_gemm_readwrite_accumulator_is_separated_from_both_inputs()
     test_elementwise_reads_are_bank_separated_while_outputs_remain_flexible()
     test_reduce_tmp_is_separated_from_input_bank()
     test_exp_composite_operands_are_conservative_bank_clique()

@@ -129,7 +129,10 @@ def test_raw_rvt_wrapper_copies_all_buffers_even_with_result_idx(tmp_path):
     """Raw RVT pointer effects are opaque to TIR's result-index analysis."""
     TLTPUSourceWrapper(
         scheduled_ir_module=tvm.IRModule({"opaque_rvt": _two_buffer_wrapper_primfunc}),
-        source="void opaque_rvt(void) { rvt_kernel_start(); }",
+        source=(
+            "#define TILELANG_TPU_OPAQUE_RAW_RVT_ABI 1\n"
+            "void opaque_rvt(void) { rvt_kernel_start(); }"
+        ),
         target=tvm.target.Target("tpu"),
         output_indices=[1],
         output_dir=str(tmp_path),

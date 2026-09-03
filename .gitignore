@@ -105,7 +105,12 @@ tilelang/jit/adapter/cython/.cycache
 # gap assessment is source documentation and is deliberately the only tracked
 # exception under research/.
 /research/*
+# Local experiment logs and raw outputs. Keep them out of Git deliberately.
+/research/artifacts/
 !/research/upstream-gap/
 !/research/upstream-gap/README.md
 !/research/ppl-profiling/
 !/research/ppl-profiling/README.md
+!/research/rv-backend/
+!/research/rv-backend/README.md
+!/research/rv-backend/TESTING.md

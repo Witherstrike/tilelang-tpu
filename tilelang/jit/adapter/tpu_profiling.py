@@ -271,7 +271,12 @@ def _spawn_guarded_profile_process(command: Sequence[str], *, cwd: Path,
     )
 
 
-def _kill_process_group(process: subprocess.Popen) -> None:
+_PROCESS_TERMINATION_GRACE_S = 5.0
+_PROCESS_KILL_GRACE_S = 5.0
+_PROCESS_PIPE_DRAIN_S = 5.0
+
+
+def _kill_process_group(process: subprocess.Popen) -> bool:
     """Stop a guarded worker and all of its children without touching its parent shell.
 
     The direct process is the lightweight supervisor.  ``SIGTERM`` makes its
@@ -281,20 +286,69 @@ def _kill_process_group(process: subprocess.Popen) -> None:
     guarded path.
     """
 
+    if process.poll() is not None:
+        return True
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
+        pass
     try:
-        process.wait(timeout=5)
-        return
+        process.wait(timeout=_PROCESS_TERMINATION_GRACE_S)
+        return True
     except subprocess.TimeoutExpired:
         pass
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
-        return
-    process.wait()
+        pass
+    try:
+        process.wait(timeout=_PROCESS_KILL_GRACE_S)
+        return True
+    except subprocess.TimeoutExpired:
+        # A process stuck in uninterruptible kernel sleep cannot be reaped by
+        # user space.  Never turn the TPU watchdog into another unbounded wait.
+        return False
+
+
+def _timeout_output_as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _terminate_and_collect(process: subprocess.Popen) -> Tuple[str, str]:
+    """Terminate a guarded group and drain its pipes with a final hard bound.
+
+    A killed command descendant can retain an inherited pipe while stuck in a
+    driver call.  ``Popen.communicate()`` without a timeout would then defeat
+    the outer hardware watchdog.  Preserve whatever output is available,
+    close this process's pipe handles, and return even in that pathological
+    case.
+    """
+
+    reaped = _kill_process_group(process)
+    try:
+        stdout, stderr = process.communicate(timeout=_PROCESS_PIPE_DRAIN_S)
+        return stdout, stderr
+    except subprocess.TimeoutExpired as exc:
+        stdout = _timeout_output_as_text(exc.output)
+        stderr = _timeout_output_as_text(exc.stderr)
+        diagnostic = (
+            "TileLang TPU watchdog: process group did not close its output "
+            f"pipes within {_PROCESS_PIPE_DRAIN_S:g}s after termination"
+        )
+        if not reaped:
+            diagnostic += "; the supervisor process also could not be reaped"
+        stderr = f"{stderr}\n{diagnostic}\n" if stderr else diagnostic + "\n"
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+        return stdout, stderr
 
 
 def _write_worker_logs(output_dir: Path, stdout: str, stderr: str) -> Tuple[Path, Path]:
@@ -761,8 +815,7 @@ class TPUInstructionProfiler:
                 raise subprocess.TimeoutExpired(normalized_command, 0)
             stdout, stderr = process.communicate(timeout=remaining)
         except subprocess.TimeoutExpired:
-            _kill_process_group(process)
-            stdout, stderr = process.communicate()
+            stdout, stderr = _terminate_and_collect(process)
             stdout_path, stderr_path = _write_worker_logs(output_dir, stdout, stderr)
             raise TPUProfilingTimeoutError(
                 f"PCIe TPU profile session exceeded its total {self.config.timeout_s}s "
@@ -827,8 +880,7 @@ class TPUInstructionProfiler:
                             timeout=_remaining_timeout(deadline))
                 except subprocess.TimeoutExpired:
                     assert decoder is not None
-                    _kill_process_group(decoder)
-                    decoder_stdout, decoder_stderr = decoder.communicate()
+                    decoder_stdout, decoder_stderr = _terminate_and_collect(decoder)
                     parser_stdout, parser_stderr = _write_parser_logs(
                         output_dir, decoder_stdout, decoder_stderr)
                     parser_status = "timed-out"
@@ -1002,8 +1054,7 @@ class TPUInstructionProfiler:
                 raise subprocess.TimeoutExpired(normalized_command, 0)
             stdout, stderr = process.communicate(timeout=remaining)
         except subprocess.TimeoutExpired:
-            _kill_process_group(process)
-            stdout, stderr = process.communicate()
+            stdout, stderr = _terminate_and_collect(process)
             stdout_path, stderr_path = _write_worker_logs(output_dir, stdout, stderr)
             raise TPUProfilingTimeoutError(
                 f"CModel TPU profile session exceeded its total {self.config.timeout_s}s "
@@ -1081,8 +1132,8 @@ class TPUInstructionProfiler:
                                 )
                                 remaining = _remaining_timeout(deadline)
                                 if remaining <= 0:
-                                    _kill_process_group(parser)
-                                    parser_stdout_text, parser_stderr_text = parser.communicate()
+                                    parser_stdout_text, parser_stderr_text = \
+                                        _terminate_and_collect(parser)
                                     parser_stdout, parser_stderr = _write_parser_logs(
                                         output_dir, parser_stdout_text, parser_stderr_text)
                                     parser_status = "deadline-exhausted"
@@ -1096,8 +1147,8 @@ class TPUInstructionProfiler:
                                         parser_stdout_text, parser_stderr_text = parser.communicate(
                                             timeout=remaining)
                                     except subprocess.TimeoutExpired:
-                                        _kill_process_group(parser)
-                                        parser_stdout_text, parser_stderr_text = parser.communicate()
+                                        parser_stdout_text, parser_stderr_text = \
+                                            _terminate_and_collect(parser)
                                         parser_stdout, parser_stderr = _write_parser_logs(
                                             output_dir, parser_stdout_text, parser_stderr_text)
                                         parser_status = "timed-out"

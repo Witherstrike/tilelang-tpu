@@ -92,22 +92,20 @@ def test_rvt_lowering_keeps_explicit_vendor_calls():
         )
 
 
-def test_rvt_preamble_survives_a_later_plain_primfunc():
-    """The RVT include/guard belongs to the whole codegen module, not one func."""
+def test_tpu_codegen_rejects_a_multifunction_runtime_module():
+    """One generated main_kernel entry cannot safely wrap multiple PrimFuncs."""
     module = tvm.IRModule({
         "rvt_first": _rvt_smoke_primfunc,
         "plain_last": _plain_multifunc_primfunc,
     })
-    source = tilelang.lower(
-        module,
-        target="tpu",
-        chip="sg2260e",
-        device_mode="rv",
-        runtime_mode="cmodel",
-    ).kernel_source
-    assert '#include "rvt_api.h"' in source
-    assert '#error "RVT externs require TPU device_mode=rv"' in source
-    assert "rvt_kernel_start()" in source
+    with pytest.raises(tvm.error.TVMError, match="exactly one PrimFunc"):
+        tilelang.lower(
+            module,
+            target="tpu",
+            chip="sg2260e",
+            device_mode="rv",
+            runtime_mode="cmodel",
+        )
 
 
 def test_tpukernel_externs_have_a_separate_programming_model_fence():
@@ -159,7 +157,7 @@ def test_native_codegen_fences_direct_ffi_externs(extern_name, programming_model
         "mcpu": "sg2260e",
         "tpu-programming-model": programming_model,
     })
-    codegen = tvm._ffi.get_global_func("target.build.tilelang_ppl")
+    codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
     with pytest.raises(tvm.error.TVMError, match=extern_name):
         codegen(tvm.IRModule({"native_model_fence": raw_extern}), target)
@@ -175,7 +173,7 @@ def test_native_codegen_rejects_an_unsupported_chip_model_pair():
         "mcpu": "bm1690",
         "tpu-programming-model": "rv",
     })
-    codegen = tvm._ffi.get_global_func("target.build.tilelang_ppl")
+    codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
     with pytest.raises(tvm.error.TVMError, match="does not support"):
         codegen(tvm.IRModule({"bm_rv_is_invalid": rvt_extern}), target)
@@ -192,7 +190,7 @@ def test_native_codegen_rejects_an_unknown_chip_like_legacy_model():
         "model": "SG2260ERV",
         "tpu-programming-model": "tpukernel",
     })
-    codegen = tvm._ffi.get_global_func("target.build.tilelang_ppl")
+    codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
     with pytest.raises(tvm.error.TVMError, match="legacy target model"):
         codegen(tvm.IRModule({"unknown_legacy_model": raw_extern}), target)

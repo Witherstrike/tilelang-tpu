@@ -17,7 +17,7 @@
  * under the License.
  */
 
-#include "codegen_ppl.h"
+#include "codegen_tpu_common.h"
 
 #include <cctype>
 
@@ -61,7 +61,7 @@ struct TPUTargetSelection {
 
 TPUTargetSelection GetTPUTargetSelection(const Target& target) {
   ICHECK_EQ(target->kind->name, "tpu")
-      << "CodeGenTileLangPPL requires a TPU Target";
+      << "TileLang TPU codegen requires a TPU Target";
   const std::string mcpu = LowerASCII(TargetStringOrEmpty(target->GetAttr<String>("mcpu")));
   const std::string legacy_model =
       LowerASCII(TargetStringOrEmpty(target->GetAttr<String>("model")));
@@ -77,7 +77,7 @@ TPUTargetSelection GetTPUTargetSelection(const Target& target) {
 
   if (!mcpu.empty()) {
     ICHECK(IsSupportedTPUChip(mcpu))
-        << "CodeGenTileLangPPL requires a supported target chip via "
+        << "TileLang TPU codegen requires a supported target chip via "
         << "tpu -mcpu=<bm1690|sg2260e>; got " << mcpu;
     ICHECK(!model_is_chip || legacy_model == mcpu)
         << "Conflicting TPU target attributes: mcpu=" << mcpu
@@ -86,14 +86,14 @@ TPUTargetSelection GetTPUTargetSelection(const Target& target) {
 
   const std::string chip = !mcpu.empty() ? mcpu : (model_is_chip ? legacy_model : "");
   ICHECK(!chip.empty())
-      << "CodeGenTileLangPPL requires a supported target chip via "
+      << "TileLang TPU codegen requires a supported target chip via "
       << "tpu -mcpu=<bm1690|sg2260e>; got "
       << (chip.empty() ? "no chip" : chip);
 
   const std::string programming_model =
       TargetStringOrEmpty(target->GetAttr<String>("tpu-programming-model"));
   ICHECK(programming_model == "tpukernel" || programming_model == "rv")
-      << "CodeGenTileLangPPL requires a normalized target "
+      << "TileLang TPU codegen requires a normalized target "
       << "tpu-programming-model=<tpukernel|rv>; got "
       << (programming_model.empty() ? "no programming model" : programming_model);
   ICHECK(SupportsProgrammingModel(chip, programming_model))
@@ -106,16 +106,21 @@ TPUTargetSelection GetTPUTargetSelection(const Target& target) {
 
 // Return source code. The Target carries the same chip selected by the PPL
 // layout resolver, so codegen is no longer implicitly BM1690-only.
-std::string BuildTileLangPPL(IRModule mod, Target target) {
+std::string BuildTileLangTPU(IRModule mod, Target target) {
   using tvm::runtime::Registry;
   bool output_ssa = false;
   TPUTargetSelection selection = GetTPUTargetSelection(target);
-  CodeGenTileLangPPL cg(selection.chip, selection.programming_model);
+  CodeGenTileLangTPU cg(selection.chip, selection.programming_model);
   cg.Init(output_ssa);
+
+  ICHECK_EQ(mod->functions.size(), 1U)
+      << "TileLang TPU runtime codegen currently accepts exactly one PrimFunc "
+         "per module because it emits one registered main_kernel entry; inline "
+         "or split helper PrimFuncs before this boundary";
 
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())
-        << "CodeGenTileLangPPL: Can only take PrimFunc";
+        << "TileLang TPU codegen can only take PrimFunc";
     auto f = Downcast<PrimFunc>(kv.second);
     // auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
     // ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch);
@@ -128,8 +133,13 @@ std::string BuildTileLangPPL(IRModule mod, Target target) {
   // return runtime::CUDAModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code);
 }
 
+TVM_REGISTER_GLOBAL("target.build.tilelang_tpu")
+    .set_body_typed(BuildTileLangTPU);
+
+// Compatibility key for callers compiled against the original TPU backend.
+// Both names deliberately share one validated dispatcher.
 TVM_REGISTER_GLOBAL("target.build.tilelang_ppl")
-    .set_body_typed(BuildTileLangPPL);
+    .set_body_typed(BuildTileLangTPU);
 // TVM_REGISTER_GLOBAL("target.build.tl_debug_codegen").set_body_typed(BuildTLDebug);
 
 } // namespace codegen

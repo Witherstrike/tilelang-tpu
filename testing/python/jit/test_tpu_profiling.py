@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+from tilelang.jit.adapter import tpu_profiling as tpu_profiling_module
 from tilelang.jit.adapter.tpu_profiling import (
     TPUInstructionProfiler,
     TPUProfilingConfig,
@@ -305,6 +306,55 @@ def test_cmodel_profile_timeout_terminates_the_worker_process_group(tmp_path):
 
     with pytest.raises(TPUProfilingTimeoutError, match="process group was terminated"):
         TPUInstructionProfiler(config).run_cmodel(command)
+
+
+def test_kill_and_drain_remains_bounded_when_process_cannot_be_reaped(monkeypatch):
+    class Pipe:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    class StuckProcess:
+        pid = 123456789
+
+        def __init__(self):
+            self.stdout = Pipe()
+            self.stderr = Pipe()
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout):
+            raise subprocess.TimeoutExpired("stuck", timeout)
+
+        def communicate(self, timeout):
+            raise subprocess.TimeoutExpired(
+                "stuck", timeout, output="partial stdout", stderr="partial stderr")
+
+    signals = []
+    monkeypatch.setattr(
+        tpu_profiling_module.os, "killpg",
+        lambda pid, signum: signals.append((pid, signum)))
+    monkeypatch.setattr(
+        tpu_profiling_module, "_PROCESS_TERMINATION_GRACE_S", 0.001)
+    monkeypatch.setattr(
+        tpu_profiling_module, "_PROCESS_KILL_GRACE_S", 0.001)
+    monkeypatch.setattr(
+        tpu_profiling_module, "_PROCESS_PIPE_DRAIN_S", 0.001)
+
+    process = StuckProcess()
+    stdout, stderr = tpu_profiling_module._terminate_and_collect(process)
+
+    assert stdout == "partial stdout"
+    assert "partial stderr" in stderr
+    assert "did not close its output pipes" in stderr
+    assert "could not be reaped" in stderr
+    assert signals == [
+        (process.pid, signal.SIGTERM),
+        (process.pid, signal.SIGKILL),
+    ]
+    assert process.stdout.closed and process.stderr.closed
 
 
 def test_profile_deadline_covers_worker_and_perfai_runtime(tmp_path):

@@ -1,10 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-"""Numerical FP16 matrix-multiplication demo for the TPU backends.
+"""Numerical elementwise demo for TPU-Kernel and RV Tensor lowering.
 
-The module is safe to import: compilation and device dispatch only happen from
-``main``. PCIe execution is additionally guarded by ``--allow-pcie`` and an
-explicit device id because loading the vendor runtime can initialize hardware.
+The module is safe to import. Select ``add``, ``sub``, ``mul``, or ``div``
+with ``--operation``; compilation and dispatch only happen from ``main``.
+PCIe use is fail-closed and needs both ``--allow-pcie`` and ``--device-id``.
 """
 
 from __future__ import annotations
@@ -20,52 +20,37 @@ import torch
 
 M = 64
 N = 64
-K = 64
 BLOCK_M = 32
 BLOCK_N = 32
-BLOCK_K = 32
 
 
-def matmul(
-    M: int,
-    N: int,
-    K: int,
-    block_M: int,
-    block_N: int,
-    block_K: int,
-    dtype: str = "float16",
-    output_tile_dtype: str = "float16",
-):
-    """Build the user-facing TileLang kernel.
+def elementwise(operation: str):
+    """Build one operation while preserving the public ``T.ppl_*`` API."""
 
-    ``T.ppl_*`` remains the stable frontend spelling. The compiler selects
-    TPU-Kernel or RV Tensor lowering from ``device_mode`` at compile time.
-    """
+    if operation not in ("add", "sub", "mul", "div"):
+        raise ValueError(f"unsupported elementwise operation: {operation!r}")
 
     @T.prim_func
     def main_kernel_inner(
-        A: T.Tensor((M, K), dtype),
-        B: T.Tensor((K, N), dtype),
-        C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, N), "float32"),
+        B: T.Tensor((M, N), "float32"),
+        C: T.Tensor((M, N), "float32"),
     ):
-        with T.Kernel(
-            T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True
-        ) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K), dtype)
-            B_shared = T.alloc_shared((block_K, block_N), dtype)
-            C_shared = T.alloc_shared((block_M, block_N), "float32")
-            C_out = T.alloc_shared((block_M, block_N), output_tile_dtype)
-
-            T.ppl_fill(C_shared, T.float32(0))
-            # This demo establishes the backend-neutral GEMM contract.  Keep
-            # producer loads ordered before their GEMM consumer; validated
-            # TPU software-pipeline overlap is a separate optimization layer.
-            for k in T.serial(T.ceildiv(K, block_K)):
-                T.ppl_copy(A[by * block_M, k * block_K], A_shared)
-                T.ppl_copy(B[k * block_K, bx * block_N], B_shared)
-                T.ppl_gemm(A_shared, B_shared, C_shared)
-            T.ppl_copy(C_shared, C_out)
-            T.ppl_copy(C_out, C[by * block_M, bx * block_N])
+        with T.Kernel(2, 2, is_cpu=True) as (bx, by):
+            A_shared = T.alloc_shared((BLOCK_M, BLOCK_N), "float32")
+            B_shared = T.alloc_shared((BLOCK_M, BLOCK_N), "float32")
+            C_shared = T.alloc_shared((BLOCK_M, BLOCK_N), "float32")
+            T.ppl_copy(A[by * BLOCK_M, bx * BLOCK_N], A_shared)
+            T.ppl_copy(B[by * BLOCK_M, bx * BLOCK_N], B_shared)
+            if operation == "add":
+                T.ppl_add(C_shared, A_shared, B_shared)
+            elif operation == "sub":
+                T.ppl_subtract(C_shared, A_shared, B_shared)
+            elif operation == "mul":
+                T.ppl_mul(C_shared, A_shared, B_shared)
+            else:
+                T.ppl_div(C_shared, A_shared, B_shared)
+            T.ppl_copy(C_shared, C[by * BLOCK_M, bx * BLOCK_N])
 
     return main_kernel_inner
 
@@ -81,8 +66,6 @@ def _device_id(value: str) -> int:
 def _configure_runtime_safety(
     runtime_mode: str, allow_pcie: bool, device_id: Optional[int]
 ) -> None:
-    """Establish the PCIe loader contract before TileLang compilation."""
-
     if runtime_mode == "cmodel":
         if allow_pcie or device_id is not None:
             raise ValueError(
@@ -120,6 +103,7 @@ def _configure_runtime_safety(
 
 def run(
     *,
+    operation: str = "add",
     chip: str = "sg2260e",
     device_mode: str = "tpukernel",
     runtime_mode: str = "cmodel",
@@ -127,8 +111,10 @@ def run(
     device_id: Optional[int] = None,
     seed: int = 0,
 ) -> None:
-    """Compile, execute, and numerically validate one backend selection."""
+    """Compile, execute, and numerically validate one elementwise operation."""
 
+    if operation not in ("add", "sub", "mul", "div"):
+        raise ValueError(f"unsupported elementwise operation: {operation!r}")
     if chip not in ("bm1690", "sg2260e"):
         raise ValueError(f"unsupported TPU chip: {chip!r}")
     if device_mode not in ("tpukernel", "rv"):
@@ -141,37 +127,52 @@ def run(
 
     torch.manual_seed(seed)
     kernel = tilelang.compile(
-        matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K),
+        elementwise(operation),
         out_idx=-1,
         target=f"tpu -mcpu={chip}",
         device_mode=device_mode,
         runtime_mode=runtime_mode,
     )
-    a = torch.randn(M, K, dtype=torch.float16)
-    b = torch.randn(K, N, dtype=torch.float16)
-    actual = torch.zeros(M, N, dtype=torch.float16)
+    a = torch.randn(M, N, dtype=torch.float32)
+    if operation == "div":
+        # The RV instruction uses an approximate reciprocal path. Keeping the
+        # divisor in [0.5, 2.0) avoids singular inputs and yields a useful test.
+        b = torch.rand(M, N, dtype=torch.float32) * 1.5 + 0.5
+    else:
+        b = torch.randn(M, N, dtype=torch.float32)
+    actual = torch.zeros(M, N, dtype=torch.float32)
     kernel(a, b, actual)
 
-    expected = torch.matmul(a, b).half()
+    expected = {
+        "add": torch.add,
+        "sub": torch.sub,
+        "mul": torch.mul,
+        "div": torch.div,
+    }[operation](a, b)
+    atol, rtol = ((1e-2, 1e-2) if operation == "div" else (1e-5, 1e-5))
     absolute_error = torch.abs(actual - expected)
     max_abs_error = float(torch.max(absolute_error))
     mean_abs_error = float(torch.mean(absolute_error))
-    passed = torch.allclose(actual, expected, atol=1e-2, rtol=1e-2)
+    passed = torch.allclose(actual, expected, atol=atol, rtol=rtol)
     print(
-        "MATMUL_RESULT "
-        f"chip={chip} device_mode={device_mode} runtime_mode={runtime_mode} "
-        f"max_abs_error={max_abs_error:.8g} "
+        "ELEMENTWISE_RESULT "
+        f"operation={operation} chip={chip} device_mode={device_mode} "
+        f"runtime_mode={runtime_mode} max_abs_error={max_abs_error:.8g} "
         f"mean_abs_error={mean_abs_error:.8g} passed={passed}",
         flush=True,
     )
     if not passed:
         raise AssertionError(
-            f"FP16 matmul mismatch: max absolute error is {max_abs_error:.8g}"
+            f"elementwise {operation} mismatch: max absolute error is "
+            f"{max_abs_error:.8g}"
         )
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--operation", choices=("add", "sub", "mul", "div"), default="add"
+    )
     parser.add_argument(
         "--chip", choices=("bm1690", "sg2260e"), default="sg2260e"
     )
@@ -196,6 +197,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parser.parse_args(argv)
     try:
         run(
+            operation=args.operation,
             chip=args.chip,
             device_mode=args.device_mode,
             runtime_mode=args.runtime_mode,

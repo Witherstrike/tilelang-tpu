@@ -783,7 +783,10 @@ class TLTPUSourceWrapper(object):
         # any pointer argument; always D2S every argument in that case even
         # when a caller supplied result_idx.  The Python adapter follows the
         # same rule for an explicit full-parameter call.
-        has_raw_rvt_abi = "rvt_" in self.source
+        # Canonical RV lowering has precise TIR effects and therefore uses the
+        # ordinary output set.  Only the explicit marker emitted for opaque raw
+        # rvt_* calls needs conservative copy-back of every argument.
+        has_raw_rvt_abi = "TILELANG_TPU_OPAQUE_RAW_RVT_ABI" in self.source
         copy_back_indices = (
             set(range(len(self.function_args)))
             if has_raw_rvt_abi or not self.output_indices

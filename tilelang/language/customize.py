@@ -98,7 +98,7 @@ def view(src: Buffer,
     return T.Buffer(shape, dtype, src.data)
 
 
-def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False):
+def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, accumulate=None):
     """Launch a TPU GEMM on local/shared tiles.
 
     Args:
@@ -108,6 +108,11 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False):
         transpose_A: Whether `A` should be treated as transposed.
             This option is not recommended in current TPU usage.
         transpose_B: Whether `B` should be treated as transposed.
+        accumulate: Whether to compute `C += A @ B` instead of overwriting C.
+            When omitted, the compatibility default is `not transpose_B`:
+            the historical TPU-Kernel NN API accumulated while its NT API
+            overwrote. New code should pass this argument explicitly whenever
+            the distinction matters.
 
     Returns:
         PrimExpr: Handle to the emitted GEMM extern call.
@@ -117,20 +122,28 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False):
 
     Notes:
         `K` is inferred from `A` and `B`, and must match.
-        In current TPU usage, `C` is typically initialized first, then reused
-        as the accumulation tile across one or more `ppl_gemm` calls.
+        The backend contract carries accumulation explicitly. TPU-Kernel does
+        not provide an accumulating right-transpose instruction, so
+        `transpose_B=True, accumulate=True` is rejected rather than silently
+        overwriting C.
         `transpose_A` is not recommended in the current TPU path; prefer using
         `transpose_B=True` when a transpose form is needed.
     """
     Aptr = A.access_ptr("r")
     Bptr = B.access_ptr("r")
-    Cptr = C.access_ptr("rw")
+    if accumulate is None:
+        accumulate = not transpose_B
+    if not isinstance(accumulate, bool):
+        raise TypeError("ppl_gemm accumulate must be a Python bool or None")
+    Cptr = C.access_ptr("rw" if accumulate else "w")
     M = C.shape[0]
     N = C.shape[1]
     K = A.shape[0] if transpose_A else A.shape[1]
     K_B = B.shape[1] if transpose_B else B.shape[0]
     assert K == K_B, "gemm K shape check failed"
-    return T.call_extern("handle", "ppl.gemm", Aptr, Bptr, Cptr, transpose_A, transpose_B, M, N, K)
+    return T.call_extern(
+        "handle", "tl.tpu.gemm", Aptr, Bptr, Cptr,
+        transpose_A, transpose_B, M, N, K, accumulate)
 
 
 def ppl_copy(
@@ -204,7 +217,7 @@ def ppl_copy(
 
     src = _to_region(src, "r")
     dst = _to_region(dst, "w")
-    return T.call_extern("handle", "ppl.copy", src, dst)
+    return T.call_extern("handle", "tl.tpu.copy", src, dst)
 
 
 def ppl_fill(buffer, value):
@@ -228,7 +241,7 @@ def ppl_fill(buffer, value):
         and `float32`.
     """
     buffer = buffer.access_ptr("w")
-    return T.call_extern("handle", "ppl.fill", buffer, value)
+    return T.call_extern("handle", "tl.tpu.fill", buffer, value)
 
 
 def ppl_clear(buffer):
@@ -257,7 +270,7 @@ def ppl_subtract(out, inp1, inp2):
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
-    return T.call_extern("handle", "ppl.sub", outptr, inpptr1, inpptr2)
+    return T.call_extern("handle", "tl.tpu.sub", outptr, inpptr1, inpptr2)
 
 
 def ppl_mul_C(out, inp1, value):
@@ -307,7 +320,7 @@ def ppl_mul(out, inp1, inp2):
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
-    return T.call_extern("handle", "ppl.mul", outptr, inpptr1, inpptr2)
+    return T.call_extern("handle", "tl.tpu.mul", outptr, inpptr1, inpptr2)
 
 
 @T.macro
@@ -443,7 +456,7 @@ def ppl_add(out, inp1, inp2):
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
-    return T.call_extern("handle", "ppl.add", outptr, inpptr1, inpptr2)
+    return T.call_extern("handle", "tl.tpu.add", outptr, inpptr1, inpptr2)
 
 
 def ppl_div(out, inp1, inp2):
@@ -469,7 +482,7 @@ def ppl_div(out, inp1, inp2):
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
-    return T.call_extern("handle", "ppl.div", outptr, inpptr1, inpptr2)
+    return T.call_extern("handle", "tl.tpu.div", outptr, inpptr1, inpptr2)
 
 
 @T.macro

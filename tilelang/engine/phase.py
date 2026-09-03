@@ -74,31 +74,3 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.Simplify()(mod)
     mod = tilelang.transform.AddressAssign()(mod)
     return mod
-
-    mod = tir.transform.VerifyMemory()(mod)
-    mod = tir.transform.AnnotateEntryFunc()(mod)
-    # TODO(lei): This is a hack to make sure the
-    # thread level allreduce pass can be applied
-    # in TL. As Tl only use one thread dimension
-    # the var binding information will be lost
-    # in the lowering process with Legalization
-    # and Simplify pass.
-    # We can find a way better to create var instead
-    # of putting the LowerThreadAllreduce before
-    # the Legalization.
-    mod = tilelang.transform.ThreadPartialSync("shared.dyn")(mod)
-    mod = tir.transform.InferFragment()(mod)
-    mod = tir.transform.LowerThreadAllreduce()(mod)
-    mod = tilelang.transform.LowerHopperIntrin()(mod)
-    mod = tilelang.transform.ThreadSync("shared")(mod)
-    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
-    mod = tilelang.transform.InjectPTXAsyncCopy()(mod)
-
-    mod = tilelang.transform.AnnotateDeviceRegions()(mod)
-    mod = tir.transform.SplitHostDevice()(mod)
-    mod = tir.transform.MergeSharedMemoryAllocations()(mod)
-
-    mod = tilelang.transform.MakePackedAPI()(mod)
-    mod = tir.transform.LowerDeviceKernelLaunch()(mod)
-
-    return mod

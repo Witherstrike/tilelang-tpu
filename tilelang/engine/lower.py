@@ -56,10 +56,10 @@ def get_host_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]:
     return lambda func: not get_device_call(is_device_c)(func)
 
 
-# PPL calls describe the traditional TPU-Kernel command stream.  The complete
-# ``tpu_`` vendor namespace belongs to that same ABI (BDC/GDMA/HAU/SDMA/VSDMA/
-# CDMA and its synchronization helpers), so a hand-written call_extern cannot
-# evade the model boundary by bypassing the ``ppl.`` facade.
+# ``tl.tpu.*`` is the backend-neutral semantic ABI produced by the public
+# ``T.ppl_*`` compatibility helpers.  Vendor namespaces stay model-specific:
+# ``ppl.``/``tpu_`` are TPU-Kernel calls and ``rvt_`` is the expert raw RV ABI.
+_PORTABLE_TPU_EXTERN_PREFIX = "tl.tpu."
 _TPUKERNEL_EXTERN_PREFIXES = ("ppl.", "tpu_")
 _RVT_EXTERN_PREFIX = "rvt_"
 
@@ -71,6 +71,8 @@ def _tpu_extern_programming_model(call: tir.Call) -> Optional[str]:
     name = getattr(call.args[0], "value", None)
     if not isinstance(name, str):
         return None
+    if name.startswith(_PORTABLE_TPU_EXTERN_PREFIX):
+        return "portable"
     if name.startswith(_RVT_EXTERN_PREFIX):
         return "rv"
     if name.startswith(_TPUKERNEL_EXTERN_PREFIXES):
@@ -112,9 +114,9 @@ def _reject_tpu_externs_for_non_tpu_target(mod: tvm.IRModule, target: Target) ->
         f"{func}: {name} ({model})" for func, name, model in externs)
     raise ValueError(
         f"TPU externs cannot lower for target={target.kind.name!r}: {rendered}. "
-        "Use an explicit TPU target such as 'tpu -mcpu=sg2260e' and select "
-        "device_mode='tpukernel' for ppl./tpu_* calls or device_mode='rv' "
-        "for rvt_* calls.")
+        "Use an explicit TPU target such as 'tpu -mcpu=sg2260e'. Portable "
+        "tl.tpu.* calls select their backend through device_mode; raw ppl./tpu_* "
+        "calls require 'tpukernel' and raw rvt_* calls require 'rv'.")
 
 
 def _validate_tpu_programming_model(mod: tvm.IRModule, tpu_config) -> None:
@@ -128,7 +130,7 @@ def _validate_tpu_programming_model(mod: tvm.IRModule, tpu_config) -> None:
     incompatible = [
         (func, name, model)
         for func, name, model in _collect_tpu_externs(mod)
-        if model != tpu_config.programming_model
+        if model != "portable" and model != tpu_config.programming_model
     ]
 
     if incompatible:
@@ -137,8 +139,9 @@ def _validate_tpu_programming_model(mod: tvm.IRModule, tpu_config) -> None:
         raise ValueError(
             f"TPU device_mode={tpu_config.programming_model!r} cannot lower "
             f"externs from a different programming model: {rendered}. "
-            "Use device_mode='tpukernel' for ppl./tpu_* "
-            "calls or device_mode='rv' for rvt_* calls.")
+            "Portable tl.tpu.* calls work with either backend; use "
+            "device_mode='tpukernel' for raw ppl./tpu_* calls or "
+            "device_mode='rv' for raw rvt_* calls.")
 
 
 @tvm.register_func("tilelang_callback_cuda_compile", override=True)
@@ -347,7 +350,7 @@ def lower(
         # PPL codegen needs the full module because TPU host/device ownership
         # is represented by the generated PPL ABI rather than TVM's ordinary
         # device module split.
-        kernel_source = tvm._ffi.get_global_func("target.build.tilelang_ppl")(mod, target)
+        kernel_source = tvm._ffi.get_global_func("target.build.tilelang_tpu")(mod, target)
         return CompiledArtifact(
             host_mod, device_mod, params, kernel_source, tpu_config=tpu_config)
 
