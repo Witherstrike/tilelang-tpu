@@ -1,128 +1,212 @@
 #include <tpuv7_rt.h>
 #include "kernel.h"
+#include <algorithm>
+#include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
-#include <chrono>
-#include <iostream>
 
-tpuRtStream_t stream;
-tpuRtKernelModule_t tpu_module;
+tpuRtStream_t stream = nullptr;
+tpuRtKernelModule_t tpu_module = nullptr;
 
-int init(){{
-  tpuRtStatus_t ret;
-  ret = tpuRtInit();
+static int tilelang_tpu_device_id() {{
+#ifdef USING_CMODEL
+  return 0;
+#else
+  // Board execution is deliberately fail-closed.  The Python loader blocks
+  // PCIe dlopen too; retain the same gate here so a manually loaded main.so
+  // cannot reach tpuRtInit without an explicit acknowledgement.
+  const char* allow_pcie = std::getenv("TILELANG_TPU_ALLOW_PCIE_LOAD");
+  if (allow_pcie == nullptr || std::strcmp(allow_pcie, "1") != 0) {{
+    std::cerr << "Set TILELANG_TPU_ALLOW_PCIE_LOAD=1 before a PCIe TPU dispatch.\n";
+    return -1;
+  }}
+  // A caller must also name the intended PCIe device rather than inheriting
+  // the historical hard-coded device ID 14.
+  const char* value = std::getenv("TILELANG_TPU_DEVICE_ID");
+  if (value == nullptr || *value == '\0') {{
+    std::cerr << "Set TILELANG_TPU_DEVICE_ID before a PCIe TPU dispatch.\n";
+    return -1;
+  }}
+  char* end = nullptr;
+  errno = 0;
+  const long parsed = std::strtol(value, &end, 10);
+  if (errno != 0 || end == value || *end != '\0' || parsed < 0 ||
+      parsed > std::numeric_limits<int>::max()) {{
+    std::cerr << "Invalid TILELANG_TPU_DEVICE_ID: " << value << "\n";
+    return -1;
+  }}
+  return static_cast<int>(parsed);
+#endif
+}}
+
+static const char* tilelang_tpu_kernel_path() {{
+#ifdef TILELANG_PPL_KERNEL_PATH
+  return TILELANG_PPL_KERNEL_PATH;
+#else
+  // Keep the standalone template usable, while JIT-built main.so embeds its
+  // private libkernel.so path and never relies on this process-global value.
+  return std::getenv("PPL_KERNEL_PATH");
+#endif
+}}
+
+int init() {{
+#ifdef USING_CMODEL
+#ifndef TILELANG_TPU_CMODEL_CORE_NUM
+#error "CModel main.so must embed the target core count"
+#endif
+  // This must happen in the process that calls tpuRtInit.  Setting it only in
+  // the compiler process breaks a fresh cached/from-database CModel process.
+  if (setenv("TPU_RT_CORE_NUM", TILELANG_TPU_CMODEL_CORE_NUM, 1) != 0) {{
+    return -9;
+  }}
+#endif
+  const int device_id = tilelang_tpu_device_id();
+  if (device_id < 0) {{
+    return -2;
+  }}
+  tpuRtStatus_t ret = tpuRtInit();
   if (ret != tpuRtSuccess) {{
     return -1;
   }}
-#ifdef USING_CMODEL
-  tpuRtSetDevice(0);
-#else
-  tpuRtSetDevice(14); // Set TPU ID
-#endif
-  tpuRtStreamCreate(&stream);
-  auto kernel_dir = getenv("PPL_KERNEL_PATH");
-  if (!kernel_dir) {{
-    return -2;
+  ret = tpuRtSetDevice(device_id);
+  if (ret != tpuRtSuccess) {{
+    return -3;
+  }}
+  ret = tpuRtStreamCreate(&stream);
+  if (ret != tpuRtSuccess) {{
+    stream = nullptr;
+    return -4;
+  }}
+  const char* kernel_dir = tilelang_tpu_kernel_path();
+  if (kernel_dir == nullptr || *kernel_dir == '\0') {{
+    tpuRtStreamDestroy(stream);
+    stream = nullptr;
+    return -5;
   }}
   tpu_module = tpuRtKernelLoadModuleFile(kernel_dir, stream);
-  if (NULL == tpu_module) {{
-    printf("tpuRtKernelLoadModuleFile failed\n");
-    return -2;
+  if (tpu_module == nullptr) {{
+    tpuRtStreamDestroy(stream);
+    stream = nullptr;
+    return -6;
   }}
   return 0;
 }}
 
-void post(){{
-  tpuRtKernelUnloadModule(tpu_module, stream);
-  tpuRtStreamDestroy(stream);
+void post() {{
+  if (tpu_module != nullptr) {{
+    tpuRtKernelUnloadModule(tpu_module, stream);
+    tpu_module = nullptr;
+  }}
+  if (stream != nullptr) {{
+    tpuRtStreamDestroy(stream);
+    stream = nullptr;
+  }}
 }}
 
 extern "C" int tilelang_tpu_run(void** args) {{
+  if (args == nullptr) {{
+    return -7;
+  }}
 {arg_declarations}
 
-  int res = init();
-  if(res != 0){{
-    return res;
+  int status = init();
+  if (status != 0) {{
+    return status;
   }}
 
-  // 设备指针声明
+  // Device pointers are initialized so cleanup remains safe after a partial
+  // allocation or transfer failure.
 {device_declarations}
 
-  // 分配设备内存
+  do {{
 {malloc_statements}
-
-  // 拷贝数据到设备
+    if (status != 0) {{
+      break;
+    }}
 {memcpy_s2d_statements}
+    if (status != 0) {{
+      break;
+    }}
 
-  // 调用内核函数
-
-  auto start = std::chrono::high_resolution_clock::now();  // 开始计时
-
+    auto start = std::chrono::high_resolution_clock::now();
 {kernel_call}
+    auto end = std::chrono::high_resolution_clock::now();
+    if (rst != 0) {{
+      std::cerr << "kernel_launch failed: " << rst << "\n";
+      status = rst;
+      break;
+    }}
+    std::cout << "kernel_launch success\n";
 
-  auto end = std::chrono::high_resolution_clock::now();    // 结束计时
+    const auto duration =
+        std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    const double elapsed_time_ms = duration.count() / 1000.0;
+    std::cout << "Single kernel execution time: " << elapsed_time_ms << " ms ("
+              << duration.count() << " us)\n";
 
-  if (rst) {{
-    printf("kernel_launch failed\n");
-    return 1;
-  }}
-  printf("kernel_launch success\n");
+    // Benchmarking is opt-in. Its default is zero extra launches for both
+    // CModel and PCIe, so a first PCIe smoke remains exactly one dispatch.
+    int measure_runs = 0;
+    if (const char* value = std::getenv("TILELANG_TPU_BENCHMARK_RUNS")) {{
+      measure_runs = std::max(0, std::atoi(value));
+    }}
+    if (measure_runs > 0) {{
+      const int warmup_runs = std::min(5, measure_runs);
+      std::cout << "\n=== Performance Benchmark (after " << warmup_runs
+                << " warmup runs) ===\n";
+      for (int i = 0; i < warmup_runs; ++i) {{
+{pure_kernel_call}
+        if (rst != 0) {{
+          status = rst;
+          break;
+        }}
+      }}
+      if (status != 0) {{
+        break;
+      }}
+      double total_time_us = 0.0;
+      double min_time_us = std::numeric_limits<double>::max();
+      double max_time_us = 0.0;
+      for (int i = 0; i < measure_runs; ++i) {{
+        const auto run_start = std::chrono::high_resolution_clock::now();
+{pure_kernel_call}
+        const auto run_end = std::chrono::high_resolution_clock::now();
+        if (rst != 0) {{
+          status = rst;
+          break;
+        }}
+        const double run_time_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(run_end - run_start)
+                .count();
+        total_time_us += run_time_us;
+        min_time_us = std::min(min_time_us, run_time_us);
+        max_time_us = std::max(max_time_us, run_time_us);
+      }}
+      if (status != 0) {{
+        break;
+      }}
+      std::cout << "Runs: " << measure_runs << ", average: "
+                << total_time_us / measure_runs / 1000.0 << " ms, min: "
+                << min_time_us / 1000.0 << " ms, max: "
+                << max_time_us / 1000.0 << " ms\n";
+    }}
 
-  // 计算执行时间
-  auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-  double elapsed_time_ms = duration.count() / 1000.0;
-  double elapsed_time_us = duration.count();
-
-  printf("Single kernel execution time: %.3f ms (%.0f us)\n", elapsed_time_ms, elapsed_time_us);
-
-  // 性能测试
-  const int warmup_runs = 5;
-  const int measure_runs = 10;
-
-  printf("\n=== Performance Benchmark (after %d warmup runs) ===\n", warmup_runs);
-
-  // 预热运行
-  for (int i = 0; i < warmup_runs; i++) {{
-    {pure_kernel_call}
-  }}
-
-  printf("Runs: %d\n", measure_runs);
-
-  // 测量运行
-  double total_time_us = 0.0;
-  double min_time_us = std::numeric_limits<double>::max();
-  double max_time_us = 0.0;
-
-  for (int i = 0; i < measure_runs; i++) {{
-    auto run_start = std::chrono::high_resolution_clock::now();
-    {pure_kernel_call}
-    auto run_end = std::chrono::high_resolution_clock::now();
-    
-    auto run_duration = std::chrono::duration_cast<std::chrono::microseconds>(run_end - run_start);
-    double run_time_us = run_duration.count();
-    
-    total_time_us += run_time_us;
-    min_time_us = std::min(min_time_us, run_time_us);
-    max_time_us = std::max(max_time_us, run_time_us);
-  }}
-
-  double avg_time_us = total_time_us / measure_runs;
-  double avg_time_ms = avg_time_us / 1000.0;
-
-
-  printf("Average execution time: %.3f ms (%.0f us)\n", avg_time_ms, avg_time_us);
-  printf("Minimum execution time: %.3f ms (%.0f us)\n", min_time_us / 1000.0, min_time_us);
-  printf("Maximum execution time: %.3f ms (%.0f us)\n", max_time_us / 1000.0, max_time_us);
-  
-  // 拷贝输出数据回主机
+    if (tpuRtStreamSynchronize(stream) != tpuRtSuccess) {{
+      status = -8;
+      break;
+    }}
 {memcpy_d2s_statements}
-  tpuRtStreamSynchronize(stream);
+    if (status != 0) {{
+      break;
+    }}
+  }} while (false);
 
-  // 释放设备内存
 {free_statements}
-
   post();
-  return 0;
+  return status;
 }}

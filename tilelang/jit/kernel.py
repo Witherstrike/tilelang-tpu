@@ -246,6 +246,7 @@ class JITKernel(object):
                 kernel_global_source=artifact.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
+                tpu_config=self.tpu_config,
             )
         elif execution_backend == "cython":
             adapter = CythonKernelAdapter(
@@ -289,6 +290,7 @@ class JITKernel(object):
                 func_or_mod=func_or_mod,
                 kernel_global_source=kernel_global_source,
                 kernel_lib_path=kernel_lib_path,
+                tpu_config=self.tpu_config,
             )
         elif execution_backend == "cython":
             adapter = CythonKernelAdapter.from_database(
@@ -298,6 +300,7 @@ class JITKernel(object):
                 func_or_mod=func_or_mod,
                 kernel_global_source=kernel_global_source,
                 kernel_lib_path=kernel_lib_path,
+                tpu_config=self.tpu_config,
             )
         else:
             # Handle invalid backend.

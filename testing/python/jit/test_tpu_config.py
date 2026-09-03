@@ -3,6 +3,8 @@ import importlib
 import tilelang
 from tilelang import tvm
 
+kernel_module = importlib.import_module("tilelang.jit.kernel")
+
 jit_api = importlib.import_module("tilelang.jit")
 
 from tilelang.engine.tpu_config import (
@@ -43,6 +45,15 @@ def test_tpu_config_normalizes_chip_and_legacy_mode():
         chip="sg2260e", device_mode="rv", runtime_mode="cmodel")
 
 
+def test_rv_defaults_to_cmodel_until_pcie_is_explicit():
+    assert resolve_tpu_compile_config(
+        chip="sg2260e", device_mode="rv") == TPUCompileConfig(
+            "sg2260e", "rv", "cmodel")
+    assert resolve_tpu_compile_config(
+        chip="sg2260e", device_mode="rv", runtime_mode="pcie") == TPUCompileConfig(
+            "sg2260e", "rv", "pcie")
+
+
 def test_tpu_config_rejects_conflicting_runtime_aliases():
     with pytest.raises(ValueError, match="Conflicting TPU runtime modes"):
         resolve_tpu_compile_config(runtime_mode="cmodel", mode="pcie")
@@ -77,3 +88,41 @@ def test_library_generator_receives_tpu_config():
 
     assert generator.tpu_config is config
     assert generator.mode == "pcie"
+
+
+@pytest.mark.parametrize("backend,adapter_name", [
+    ("ctypes", "CtypesKernelAdapter"),
+    ("cython", "CythonKernelAdapter"),
+])
+def test_database_adapter_forwards_tpu_config(monkeypatch, backend, adapter_name):
+    """Cached TPU artifacts must retain the chip/device/runtime tuple."""
+    captured = {}
+
+    class FakeAdapter:
+
+        @classmethod
+        def from_database(cls, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+    monkeypatch.setattr(kernel_module, adapter_name, FakeAdapter)
+    kernel = JITKernel(
+        target="tpu",
+        execution_backend=backend,
+        from_database=True,
+        chip="sg2260e",
+        device_mode="rv",
+        runtime_mode="cmodel",
+    )
+
+    adapter = kernel._create_adapter_from_database(
+        params=[],
+        result_idx=[],
+        target="tpu",
+        func_or_mod=object(),
+        kernel_global_source="",
+        kernel_lib_path="/tmp/tilelang-unused.so",
+    )
+
+    assert adapter is not None
+    assert captured["tpu_config"] == TPUCompileConfig("sg2260e", "rv", "cmodel")

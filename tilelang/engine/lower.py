@@ -202,7 +202,7 @@ def lower(
     enable_device_compile=False,
     chip: str = "bm1690",
     device_mode: str = "atomic",
-    runtime_mode: str = "pcie",
+    runtime_mode: Optional[str] = None,
 ) -> CompiledArtifact:
     '''
         enable_host_codegen: whether to enable host codegen, default is False, as we have our
@@ -214,6 +214,7 @@ def lower(
     tpu_config = resolve_tpu_compile_config(
         chip=chip, device_mode=device_mode, runtime_mode=runtime_mode)
     mod = func_or_mod
+    params = None
     if isinstance(func_or_mod, tir.PrimFunc):
         func = func_or_mod
         params = extrac_params(func) if not runtime_only else None

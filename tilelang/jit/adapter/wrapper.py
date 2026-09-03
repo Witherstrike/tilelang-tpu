@@ -10,6 +10,7 @@ from .utils import match_declare_kernel, match_declare_kernel_cpu, is_cuda_targe
 import re
 import logging
 import textwrap
+import os
 
 PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY = """
     cudaError_t result_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxDynamicSharedMemorySize, {1});
@@ -660,7 +661,8 @@ class TLTPUSourceWrapper(object):
                  device_mod: Optional[IRModule] = None,
                  host_mod: Optional[IRModule] = None,
                  pass_configs: Optional[Dict[str, Any]] = None,
-                 output_indices: Optional[List[int]] = None):
+                 output_indices: Optional[List[int]] = None,
+                 output_dir: Optional[str] = None):
         self.mod = scheduled_ir_module
         self.target = target
         self.source = source
@@ -668,6 +670,9 @@ class TLTPUSourceWrapper(object):
         self.host_mod = host_mod
         self.pass_configs = pass_configs
         self.output_indices = output_indices if output_indices is not None else []
+        self.template_dir = get_tpu_template_dir()
+        self.output_dir = os.path.abspath(output_dir or self.template_dir)
+        os.makedirs(self.output_dir, exist_ok=True)
         self.function_args = None
         self.function_names: Optional[str] = None
         self.dynamic_smem_buf: Optional[int] = None
@@ -682,6 +687,10 @@ class TLTPUSourceWrapper(object):
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
+                if any(not isinstance(dim, tvm.tir.IntImm) for dim in buffer.shape):
+                    raise NotImplementedError(
+                        "TileLang TPU JIT does not yet support dynamic tensor shapes; "
+                        "the generated TPU host ABI has no scalar shape-argument path.")
                 function_args.append({
                     "name": buffer.data.name,
                     "type": self._TYPE_MAP[buffer.dtype],
@@ -689,21 +698,23 @@ class TLTPUSourceWrapper(object):
                     "shape": list(buffer.shape),
                 })
             elif isinstance(param, tvm.tir.Var):
-                function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
+                raise NotImplementedError(
+                    "TileLang TPU JIT does not yet support scalar PrimFunc parameters; "
+                    "pass scalar values through a tensor or implement the TPU scalar ABI first.")
             else:
                 raise ValueError(
                     f"Parameter {param} is not in the buffer map of the primary function.")
         self.function_args = function_args
     
     def write_kernel_c(self):
-        with open(f"{get_tpu_template_dir()}/kernel.c",'w') as f:
+        with open(os.path.join(self.output_dir, "kernel.c"), 'w') as f:
             f.write(self.source)
 
     def create_kernel_header(self, function_name: str = "main_kernel"):
         num_params = len(self.function_args)
         
-        template_file = get_tpu_template_dir() + "/kernel_template.h"
-        output_file = get_tpu_template_dir() + "/kernel.h"
+        template_file = os.path.join(self.template_dir, "kernel_template.h")
+        output_file = os.path.join(self.output_dir, "kernel.h")
         with open(template_file, "r") as f: 
             template_content = f.read()
 
@@ -731,8 +742,8 @@ class TLTPUSourceWrapper(object):
 
     def create_kernel_cpp(self, function_name: str = "main_kernel"):
         num_params = len(self.function_args)
-        template_file = get_tpu_template_dir() + "/kernel_template.cpp"
-        output_file = get_tpu_template_dir() + "/kernel.cpp"
+        template_file = os.path.join(self.template_dir, "kernel_template.cpp")
+        output_file = os.path.join(self.output_dir, "kernel.cpp")
         with open(template_file, "r") as f: 
             template_content = f.read()
         
@@ -753,8 +764,8 @@ class TLTPUSourceWrapper(object):
         
 
     def create_main_cpp(self, function_name: str = "main_kernel"):
-        template_file = get_tpu_template_dir() + "/main_template.cpp"
-        output_file = get_tpu_template_dir() + "/main.cpp"
+        template_file = os.path.join(self.template_dir, "main_template.cpp")
+        output_file = os.path.join(self.output_dir, "main.cpp")
         with open(template_file, "r") as f: 
             template_content = f.read()
         
@@ -766,6 +777,18 @@ class TLTPUSourceWrapper(object):
         memcpy_d2s_statements = []
         free_statements = []
         kernel_call_args = []
+        # TIR BufferStore analysis supplies output_indices for ordinary PPL
+        # kernels.  Raw RVT calls are opaque C ABI operations, so they have no
+        # TIR write effect for that analysis.  They may intentionally mutate
+        # any pointer argument; always D2S every argument in that case even
+        # when a caller supplied result_idx.  The Python adapter follows the
+        # same rule for an explicit full-parameter call.
+        has_raw_rvt_abi = "rvt_" in self.source
+        copy_back_indices = (
+            set(range(len(self.function_args)))
+            if has_raw_rvt_abi or not self.output_indices
+            else set(self.output_indices)
+        )
         
         for i, arg in enumerate(self.function_args):
             arg_name = arg["name"]
@@ -776,16 +799,26 @@ class TLTPUSourceWrapper(object):
                 size_suffix = f" * sizeof({arg['type']})"
             data_size = " * ".join([str(dim) for dim in arg["shape"]]) + size_suffix
             
+            arg_declarations.append(
+                f'  if (args[{i}] == nullptr) {{ return {-100 - i}; }}')
             arg_declarations.append(f'  char* {arg_name} = static_cast<char*>(args[{i}]);')
             arg_declarations.append(f'  size_t {arg_name}_size = {data_size};')
-            device_declarations.append(f'  void *dev_{arg_name};')
-            malloc_statements.append(f'  tpuRtMalloc((void **)(&dev_{arg_name}), {arg_name}_size, 0);')
-            memcpy_s2d_statements.append(f'  tpuRtMemcpyS2D(dev_{arg_name}, {arg_name}, {arg_name}_size);')
+            device_declarations.append(f'  void *dev_{arg_name} = nullptr;')
+            malloc_statements.append(
+                f'    if (tpuRtMalloc(&dev_{arg_name}, {arg_name}_size, 0) != tpuRtSuccess) '
+                f'{{ status = {-200 - i}; break; }}')
+            memcpy_s2d_statements.append(
+                f'    if (tpuRtMemcpyS2D(dev_{arg_name}, {arg_name}, {arg_name}_size) != tpuRtSuccess) '
+                f'{{ status = {-300 - i}; break; }}')
             
-            if i in self.output_indices:
-                memcpy_d2s_statements.append(f'  tpuRtMemcpyD2S({arg_name}, dev_{arg_name}, {arg_name}_size);')
+            if i in copy_back_indices:
+                memcpy_d2s_statements.append(
+                    f'    if (tpuRtMemcpyD2S({arg_name}, dev_{arg_name}, {arg_name}_size) != tpuRtSuccess) '
+                    f'{{ status = {-400 - i}; break; }}')
             
-            free_statements.append(f'  tpuRtFree(&dev_{arg_name}, 0);')
+            free_statements.append(
+                f'  if (dev_{arg_name} != nullptr) {{ tpuRtFree(&dev_{arg_name}, 0); '
+                f'dev_{arg_name} = nullptr; }}')
             kernel_call_args.append(f'(unsigned long long)dev_{arg_name}')
         
         kernel_call = f'  int rst = {function_name}({", ".join(kernel_call_args)});'
@@ -845,12 +878,13 @@ class TLWrapper(BaseWrapper):
     lib: Optional[object] = None
     output_indices: List[int] = []
 
-    def __init__(self, target: Target):
+    def __init__(self, target: Target, tpu_workspace_dir: Optional[str] = None):
         super().__init__()
         self.scheduled_ir_module = None
         self.pass_configs = None
         self.target = target
         self.lib = None
+        self.tpu_workspace_dir = tpu_workspace_dir
 
     def assign_optimized_module(self, scheduled_ir_module: IRModule):
         self.scheduled_ir_module = scheduled_ir_module
@@ -897,6 +931,7 @@ class TLWrapper(BaseWrapper):
                 device_mod=self.device_mod,
                 host_mod=self.host_mod,
                 pass_configs=self.pass_configs,
-                output_indices=self.output_indices
+                output_indices=self.output_indices,
+                output_dir=self.tpu_workspace_dir,
                 )
         return wrapper.lib_code

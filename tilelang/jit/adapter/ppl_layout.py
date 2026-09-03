@@ -37,6 +37,20 @@ class PPLLayout:
                 self.runtime_include,
             ) if path.is_dir())
 
+    @property
+    def rvt_api_header(self) -> Path:
+        """The PPL 1.7 RV Tensor ABI header for this chip architecture."""
+        return self.kernel_include / "rvt_api.h"
+
+    def require_rvt_api(self) -> Path:
+        """Return the RVT header or explain why ``device_mode=\"rv\"`` is invalid."""
+        header = self.rvt_api_header
+        if not header.is_file():
+            raise FileNotFoundError(
+                "PPL 1.7 RV target requested, but this chip SDK does not provide "
+                f"rvt_api.h: {header}")
+        return header
+
 
 _PPL_17_CHIP_DEFINITIONS = {
     "tpub_7_1": ("__tpub_7_1__", "__sg2260__"),

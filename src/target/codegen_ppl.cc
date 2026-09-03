@@ -82,6 +82,15 @@ void CodeGenTileLangPPL::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {}
 
 std::string CodeGenTileLangPPL::Finish() {
   decl_stream << "#include \"ppl_helper.h\"\n";
+  if (uses_rvt_api_) {
+    // RVT calls use the vendor ABI directly. Do not permit an accidental
+    // implicit declaration in an atomic build: only device_mode="rv" sets
+    // TILELANG_TPU_RV and selects a PPL package with rvt_api.h.
+    decl_stream << "#ifndef TILELANG_TPU_RV\n"
+                << "#error \"RVT externs require TPU device_mode=rv\"\n"
+                << "#endif\n"
+                << "#include \"rvt_api.h\"\n";
+  }
   decl_stream << "#ifndef TILELANG_PPL_HELPER_HAS_GET_DTYPE\n"
               << "static data_type_t __ppl_get_dtype(int type) {\n"
               << "  data_type_t __dtype[] = {DT_FP32,    DT_FP32,    DT_FP16,  "
@@ -960,6 +969,12 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
   std::vector<std::string> inst;
   if (op->op.same_as(builtin::call_extern())) {
     std::string op_name = Downcast<StringImm>(op->args[0])->value;
+    if (op_name.rfind("ppl.", 0) == 0) {
+      ICHECK_EQ(rvt_direct_call_count_, 0)
+          << "Raw RVT rvt_* calls cannot share a kernel with ppl.* calls; "
+          << "their descriptor and command-stream ownership models are distinct.";
+      ++ppl_extern_count_;
+    }
     if (op_name == "ppl.copy") {
       tl::BufferMap buffer_map;
       auto is_local_tensor_scope = [](const std::string &scope) {
@@ -1906,6 +1921,18 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
 
       this->PrintIndent();
       this->stream << "tpu_hau_sort_natural_index(" << dst_data << ".addr, " << dst_idx  << ".addr, " << src << ".addr, " << length_val << ", " << K_val << ", " << (descended_val ? "true" : "false") << ", " << dtype << ");\n";
+    } else {
+      // PPL-specific operations above need tensor/address lowering. RVT and
+      // other explicit C ABI calls already carry native arguments, so use the
+      // generic C emitter instead of silently dropping an unknown extern.
+      if (op_name.rfind("rvt_", 0) == 0) {
+        ICHECK_EQ(ppl_extern_count_, 0)
+            << "Raw RVT rvt_* calls cannot share a kernel with ppl.* calls; "
+            << "their descriptor and command-stream ownership models are distinct.";
+        ++rvt_direct_call_count_;
+        uses_rvt_api_ = true;
+      }
+      CodeGenC::VisitExpr_(op, os);
     }
 
   } else if (op->op.same_as(builtin::if_then_else())) {
@@ -2181,6 +2208,12 @@ void CodeGenTileLangPPL::PrintVecElemLoadExpr(DataType t, int i,
 
 void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
   this->InitFuncState(f);
+  // Finish() emits one shared preamble for the entire IRModule, so this is a
+  // module-level OR rather than per-function state.  Resetting it here makes
+  // an RVT function silently lose rvt_api.h when a later ordinary PrimFunc is
+  // emitted in the same module.
+  rvt_direct_call_count_ = 0;
+  ppl_extern_count_ = 0;
   ReserveKeywordsAsUnique();
   auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
   f_attrs = f->attrs;

@@ -12,6 +12,12 @@ from tvm.relay import TensorType
 from tvm import tir
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
+from tilelang.jit.adapter.utils import is_tpu_target
+from tilelang.jit.adapter.tpu import (
+    make_tpu_forward,
+    reject_unverified_tpu_database_artifact,
+)
+from tilelang.engine.tpu_config import TPUCompileConfig, resolve_tpu_compile_config
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 
@@ -51,7 +57,8 @@ class CtypesKernelAdapter(BaseKernelAdapter):
                  device_mod: Optional[tvm.IRModule] = None,
                  kernel_global_source: Optional[str] = None,
                  verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None):
+                 pass_configs: Optional[Dict[str, Any]] = None,
+                 tpu_config: Optional[TPUCompileConfig] = None):
         """Initialize the adapter with the given TIR function or module.
         
         Args:
@@ -88,19 +95,26 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
         self.target = Target.canon_target(determine_target(target))
         self.verbose = verbose
-        self.wrapper = TLWrapper(self.target)
-        self.lib_generator = LibraryGenerator(self.target)
+        self.tpu_config = tpu_config or resolve_tpu_compile_config()
+        self.lib_generator = LibraryGenerator(self.target, tpu_config=self.tpu_config)
+        self.wrapper = TLWrapper(
+            self.target, tpu_workspace_dir=self.lib_generator.tpu_workspace_dir)
 
         self.wrapper.assign_optimized_module(self.ir_module)
         self.wrapper.assign_pass_configs(pass_configs)
         self.wrapper.assign_host_module(host_mod)
         self.wrapper.assign_device_module(device_mod)
+        self.wrapper.assign_output_indices(self.result_idx)
         self.wrapped_source = self.wrapper.wrap(self.get_kernel_source(kernel_only=True))
 
         self.lib_generator.update_lib_code(self.wrapped_source)
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
-        self.lib.init()
+        if is_tpu_target(self.target):
+            self.tpu_forward = make_tpu_forward(
+                self.lib, self.params, self.result_idx, self.dynamic_symbolic_map)
+        else:
+            self.lib.init()
 
         self._post_init()
 
@@ -113,7 +127,8 @@ class CtypesKernelAdapter(BaseKernelAdapter):
                       kernel_global_source: str,
                       kernel_lib_path: str,
                       verbose: bool = False,
-                      pass_configs: Optional[Dict[str, Any]] = None):
+                      pass_configs: Optional[Dict[str, Any]] = None,
+                      tpu_config: Optional[TPUCompileConfig] = None):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
@@ -143,9 +158,15 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
         adapter.target = Target.canon_target(determine_target(target))
         adapter.verbose = verbose
-        adapter.lib_generator = LibraryGenerator(adapter.target)
+        adapter.tpu_config = tpu_config or resolve_tpu_compile_config()
+        reject_unverified_tpu_database_artifact(adapter.target)
+        adapter.lib_generator = LibraryGenerator(adapter.target, tpu_config=adapter.tpu_config)
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
-        adapter.lib.init()
+        if is_tpu_target(adapter.target):
+            adapter.tpu_forward = make_tpu_forward(
+                adapter.lib, adapter.params, adapter.result_idx, adapter.dynamic_symbolic_map)
+        else:
+            adapter.lib.init()
 
         adapter._post_init()
         return adapter
@@ -242,6 +263,8 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
     def _convert_torch_func(self) -> Callable:
         """Returns a PyTorch-compatible function wrapper for the kernel."""
+        if is_tpu_target(self.target):
+            return self.tpu_forward
         return self._warp_forward_from_prebuild_lib
 
     @property

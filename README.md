@@ -2,13 +2,13 @@
 
 TileLang-TPU is a TPU-oriented extension of TileLang for SOPHGO accelerators. It preserves the TileLang Python DSL while adding TPU lowering, TPU code generation, and JIT runtime integration, enabling TileLang kernels to be compiled and executed on TPU platforms.
 
-The project provides end-to-end TPU support centered on BM1690, including `target="tpu"`, `mode="pcie|cmodel"`, TPU DSL intrinsics, generated host/device glue code, and runnable TPU demos.
+The project provides TPU support for BM1690 and SG2260E, including `target="tpu"`, `runtime_mode="pcie|cmodel"`, TPU DSL intrinsics, generated host/device glue code, and runnable TPU demos.
 ## Highlights
 
 - TileLang frontend with TPU target support
 - TPU-specific DSL intrinsics such as `ppl_copy`, `ppl_gemm`, `ppl_reduce_sum`, `ppl_reduce_max`, `ppl_rsqrt`, and `ppl_rope_add`
 - End-to-end JIT flow from Python kernel definition to generated TPU host/device artifacts
-- BM1690-oriented execution path with both PCIe execution and `cmodel` simulation modes
+- BM1690 and SG2260E execution paths with both PCIe and `cmodel` modes
 - Operator coverage aligned with kernels commonly used by Llama and DeepSeek workloads
 
 ## What This Project Does
@@ -23,7 +23,7 @@ In short, this repository is about bringing TileLang's programming model to SOPH
 
 ## Current Status
 
-- The current mainline JIT path focuses on BM1690.
+- The current mainline JIT path supports BM1690 and PPL 1.7 SG2260E.
 - `tilelang.compile(..., target="tpu")` is wired into the repository.
 - Both `mode="pcie"` and `mode="cmodel"` are present in the TPU adapter path.
 - TPU demos are available under [`tpu_demo/`](./tpu_demo/).
@@ -94,9 +94,37 @@ kernel = tilelang.compile(
     my_kernel,
     out_idx=-1,
     target="tpu",
-    mode="pcie",   # or "cmodel"
+    chip="sg2260e",
+    device_mode="rv",
+    runtime_mode="cmodel",
 )
 ```
+
+`device_mode="rv"` exposes a direct, low-level bridge to the PPL 1.7 RV Tensor
+ABI. `T.rvt_*` calls require explicit CR/TR/GR descriptor setup and do not turn
+existing `T.ppl_*` operations into RV instructions automatically. The generic
+`T.rvt_call` escape hatch only supports APIs whose C arguments are representable
+by TIR; APIs taking C structs by value need dedicated helpers first. Raw
+`T.rvt_*` and high-level `T.ppl_*` calls also cannot share one kernel, because
+their descriptor and command-stream ownership models are different.
+
+RVT defaults to `cmodel` when no runtime mode is supplied. PCIe loading is
+fail-closed because loading the runtime can touch the board even before a
+dispatch. Only after a CModel numerical smoke test should a supervised PCIe
+bring-up explicitly set both variables below, select `runtime_mode="pcie"`, and
+run one dispatch under an external watchdog:
+
+```bash
+export TILELANG_TPU_ALLOW_PCIE_LOAD=1
+export TILELANG_TPU_DEVICE_ID=<verified-board-id>
+timeout --kill-after=5s 30s python your_single_dispatch_smoke.py
+```
+
+TPU JIT compilation writes each kernel and its host wrapper to a private
+temporary workspace; it no longer depends on a process-global `PPL_KERNEL_PATH`
+or shared generated files under `src/tl_templates/tpu/`. TPU cache/database
+artifact loading is deliberately disabled until it can bundle that private
+kernel with a verified chip/device/runtime manifest.
 
 Inside TPU kernels, the common building blocks are exposed as TileLang DSL intrinsics in [`tilelang/language/customize.py`](./tilelang/language/customize.py), including:
 

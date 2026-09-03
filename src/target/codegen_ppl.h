@@ -125,6 +125,12 @@ private:
   int32_t GetWmmaFragmentSize(const std::string &scope, const VarNode *variable,
                               int32_t size);
   int32_t gemm_idx_ = 0;
+  // Set while emitting a direct RVT extern. Finish() then emits a hard
+  // compile-time guard so rvt_* cannot accidentally be used with the atomic
+  // PPL configuration.
+  bool uses_rvt_api_{false};
+  int rvt_direct_call_count_{0};
+  int ppl_extern_count_{0};
 
   DictAttrs f_attrs;
   std::vector<std::pair<tir::Var, Range>> loop_var_ranges_;

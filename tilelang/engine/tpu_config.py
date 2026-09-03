@@ -38,12 +38,21 @@ def resolve_tpu_compile_config(
     runtime_mode: Optional[TPURuntimeMode] = None,
     mode: Optional[TPURuntimeMode] = None,
 ) -> TPUCompileConfig:
-    """Normalize the new runtime_mode API and the legacy mode alias."""
+    """Normalize the new runtime_mode API and the legacy mode alias.
+
+    RVT is brought up through CModel first.  Selecting ``device_mode="rv"``
+    without a runtime therefore defaults to CModel; PCIe dispatch requires an
+    explicit ``runtime_mode="pcie"`` selection.  Atomic mode keeps its
+    historical PCIe default.
+    """
     if runtime_mode is not None and mode is not None and runtime_mode != mode:
         raise ValueError(
             f"Conflicting TPU runtime modes: runtime_mode={runtime_mode!r}, mode={mode!r}")
+    selected_runtime = runtime_mode or mode
+    if selected_runtime is None:
+        selected_runtime = "cmodel" if device_mode == "rv" else "pcie"
     return TPUCompileConfig(
         chip=chip,
         device_mode=device_mode,
-        runtime_mode=runtime_mode or mode or "pcie",
+        runtime_mode=selected_runtime,
     )

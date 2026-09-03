@@ -9,9 +9,9 @@ import ctypes
 import os
 import tempfile
 import subprocess
+import shutil
 import logging
 from tilelang.env import TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
-from tilelang.jit.adapter.utils import get_tpu_template_dir
 from tilelang.jit.adapter.ppl_layout import PPLLayout, resolve_ppl_layout
 from tilelang.engine.tpu_config import TPUCompileConfig, resolve_tpu_compile_config
 
@@ -31,6 +31,18 @@ class LibraryGenerator(object):
         self.target = target
         self.tpu_config = tpu_config or resolve_tpu_compile_config(mode=mode)
         self.mode = self.tpu_config.runtime_mode
+        # TPU compilation emits several cooperating sources and shared objects.
+        # Keep every generator in its own directory so a later compile cannot
+        # replace an already-loaded CModel/PCIe kernel through global template
+        # files or PPL_KERNEL_PATH.
+        self.tpu_workspace_dir: Optional[str] = None
+        if is_tpu_target(self.target):
+            self._ensure_tpu_workspace()
+
+    def _ensure_tpu_workspace(self) -> str:
+        if self.tpu_workspace_dir is None:
+            self.tpu_workspace_dir = tempfile.mkdtemp(prefix="tilelang-tpu-")
+        return self.tpu_workspace_dir
 
     def update_lib_code(self, lib_code: str):
         self.lib_code = lib_code
@@ -39,6 +51,13 @@ class LibraryGenerator(object):
     def load_lib(self, lib_path: Optional[str] = None):
         if lib_path is None:
             lib_path = self.libpath
+        if is_tpu_target(self.target) and self.mode == "pcie":
+            if os.environ.get("TILELANG_TPU_ALLOW_PCIE_LOAD") != "1":
+                raise RuntimeError(
+                    "PCIe TPU library loading is disabled by default because dlopen may "
+                    "initialize the board runtime. Complete a CModel numerical smoke first, "
+                    "then set TILELANG_TPU_ALLOW_PCIE_LOAD=1 and TILELANG_TPU_DEVICE_ID "
+                    "for an explicitly supervised PCIe run.")
         return ctypes.CDLL(lib_path)
 
     def compile_lib(self, timeout: float = None, with_tl: bool = True):
@@ -89,11 +108,6 @@ class LibraryGenerator(object):
                 "-I" + TILELANG_TEMPLATE_PATH,
             ]
         elif is_tpu_target(target):
-
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".c", delete=False)
-            libpath = src.name.replace(".c", ".so")
-
-
             import os
             # 设置环境变量
             PPL_TOP = os.environ.get("PPL_PROJECT_ROOT", None)
@@ -102,9 +116,11 @@ class LibraryGenerator(object):
             ppl_layout = resolve_ppl_layout(PPL_TOP, self.tpu_config.chip)
 
             if self.tpu_config.device_mode == "rv":
-                raise NotImplementedError(
-                    "RV target configuration reached LibraryGenerator, but RV "
-                    "lowering/codegen is not implemented yet")
+                # RVT is a direct PPL ABI bridge: the generated PPL source
+                # includes rvt_api.h and users emit explicit rvt_* externs.
+                # A missing header is a chip/SDK capability error, rather
+                # than a silent fallback to the atomic path.
+                ppl_layout.require_rvt_api()
 
             if self.mode=="pcie":
                 self.tpu_compile_pcie(timeout=timeout, layout=ppl_layout)
@@ -112,8 +128,8 @@ class LibraryGenerator(object):
                 self.tpu_compile_cmodel(timeout=timeout, layout=ppl_layout)
             else:
                 raise ValueError(f"Unsupported compile mode: {self.mode}")
-            self.srcpath = src.name
-            self.libpath = f"{get_tpu_template_dir()}/main.so"
+            self.srcpath = self._ensure_tpu_workspace()
+            self.libpath = os.path.join(self.srcpath, "main.so")
             return
 
         else:
@@ -142,6 +158,12 @@ class LibraryGenerator(object):
         self.libpath = libpath
 
     def remove_lib(self):
+        if self.tpu_workspace_dir is not None:
+            shutil.rmtree(self.tpu_workspace_dir, ignore_errors=True)
+            self.tpu_workspace_dir = None
+            self.libpath = None
+            self.srcpath = None
+            return
         if self.libpath:
             os.remove(self.libpath)
         self.libpath = None
@@ -180,11 +202,14 @@ class LibraryGenerator(object):
             raise RuntimeError(f"{task_name} failed: {e}") from e
 
     @staticmethod
-    def _ppl_compile_flags(layout: PPLLayout, src_dir: str):
+    def _ppl_compile_flags(layout: PPLLayout, src_dir: str, device_mode: str = "atomic"):
         definitions = [
             *(f"-D{definition}" for definition in layout.compile_definitions),
             "-DTILELANG_PPL_HELPER_HAS_GET_DTYPE",
         ]
+        if device_mode == "rv":
+            layout.require_rvt_api()
+            definitions.append("-DTILELANG_TPU_RV")
         includes = [f"-I{path}" for path in layout.include_dirs]
         include_dir = os.path.join(src_dir, "include")
         if os.path.isdir(include_dir):
@@ -197,8 +222,9 @@ class LibraryGenerator(object):
         if not os.path.isfile(cross_gcc):
             raise FileNotFoundError(f"PPL PCIe cross compiler is missing: {cross_gcc}")
 
-        src_dir = get_tpu_template_dir()
-        definitions, includes = self._ppl_compile_flags(layout, src_dir)
+        src_dir = self._ensure_tpu_workspace()
+        definitions, includes = self._ppl_compile_flags(
+            layout, src_dir, self.tpu_config.device_mode)
         common = definitions + ["-Dlibkernel_EXPORTS"] + includes + [
             "-O3", "-DNDEBUG", "-fPIC", "-flto"
         ]
@@ -219,7 +245,10 @@ class LibraryGenerator(object):
              "-Wl,--no-whole-archive", "-Wl,-s", "-ldl", "-lm"],
             "Link PCIe libkernel.so", timeout)
 
-        host_common = definitions + includes + ["-O3", "-DNDEBUG", "-std=c++17", "-fPIC"]
+        host_common = definitions + includes + [
+            "-O3", "-DNDEBUG", "-std=c++17", "-fPIC",
+            f'-DTILELANG_PPL_KERNEL_PATH="{libkernel}"',
+        ]
         kernel_host_o = os.path.join(src_dir, "kernel_host.o")
         main_o = os.path.join(src_dir, "main.o")
         self._run_tpu_command(
@@ -236,11 +265,11 @@ class LibraryGenerator(object):
              "-ltpuv7_rt", "-Wl,--no-as-needed", "-lcdm_daemon_emulator",
              "-Wl,--as-needed", "-lpthread"],
             "Link PCIe main.so", timeout)
-        os.environ["PPL_KERNEL_PATH"] = libkernel
 
     def tpu_compile_cmodel(self, timeout, layout: PPLLayout):
-        src_dir = get_tpu_template_dir()
-        definitions, includes = self._ppl_compile_flags(layout, src_dir)
+        src_dir = self._ensure_tpu_workspace()
+        definitions, includes = self._ppl_compile_flags(
+            layout, src_dir, self.tpu_config.device_mode)
         definitions.append("-DUSING_CMODEL")
         common = definitions + includes + ["-O3", "-DNDEBUG", "-fPIC"]
 
@@ -252,20 +281,24 @@ class LibraryGenerator(object):
         libkernel = os.path.join(src_dir, "libkernel.so")
         main_so = os.path.join(src_dir, "main.so")
         rpath = f"{layout.runtime_lib}:{layout.backend_lib}"
-
         # TPUv7 defaults to eight emulator cores. SG2260E exposes four, and
         # launching the extra scalar-emulator workers makes them address
-        # non-existent cores before the first kernel can complete.
-        os.environ["TPU_RT_CORE_NUM"] = str(layout.max_core_num)
+        # non-existent cores before the first kernel can complete.  Embed the
+        # value in main.so so cached/from-database processes do not depend on
+        # this compiler process having set TPU_RT_CORE_NUM already.
+        host_common = common + [
+            f'-DTILELANG_PPL_KERNEL_PATH="{libkernel}"',
+            f'-DTILELANG_TPU_CMODEL_CORE_NUM="{layout.max_core_num}"',
+        ]
 
         logger.info("Compiling TPU cmodel kernel for PPL 1.7 architecture %s", layout.arch)
         self._prepare_cmodel_kernel_source(kernel_c)
         self._run_tpu_command(
-            ["/usr/bin/c++", *common, "-std=c++17", "-c",
+            ["/usr/bin/c++", *host_common, "-std=c++17", "-c",
              os.path.join(src_dir, "kernel.cpp"), "-o", kernel_cpp_o],
             "Compile TPU host wrapper", timeout)
         self._run_tpu_command(
-            ["/usr/bin/c++", *common, "-std=c++17", "-c",
+            ["/usr/bin/c++", *host_common, "-std=c++17", "-c",
              os.path.join(src_dir, "main.cpp"), "-o", main_cpp_o],
             "Compile TPU host entry", timeout)
         self._run_tpu_command(
@@ -286,4 +319,3 @@ class LibraryGenerator(object):
              f"-Wl,--disable-new-dtags,-rpath,{rpath}", "-ltpuv7_rt",
              "-lcdm_daemon_emulator", "-lpthread"],
             "Link cmodel main.so", timeout)
-        os.environ["PPL_KERNEL_PATH"] = libkernel

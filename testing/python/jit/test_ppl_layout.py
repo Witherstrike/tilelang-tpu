@@ -56,6 +56,18 @@ def test_resolve_sg2260e_core_count(tmp_path):
     assert layout.compile_definitions == ("__tpub_7_1_e__", "__sg2260e__")
 
 
+def test_rvt_api_is_required_for_rv_mode(tmp_path):
+    arch = "tpub_7_1_e"
+    _make_ppl_17_layout(tmp_path, logical_chip="sg2260e", arch=arch)
+    layout = resolve_ppl_layout(str(tmp_path), "sg2260e")
+
+    with pytest.raises(FileNotFoundError, match="rvt_api.h"):
+        layout.require_rvt_api()
+
+    _touch(tmp_path / f"deps/chip/{arch}/TPU1686/kernel/include/rvt_api.h")
+    assert layout.require_rvt_api() == layout.rvt_api_header
+
+
 def test_rejects_legacy_ppl_layout(tmp_path):
     chip_root = tmp_path / "runtime/bm1690"
     emulator_root = chip_root / "tpuv7-runtime-emulator"

@@ -1,5 +1,5 @@
 #pragma once
-#ifndef __bm1690__
+#if !defined(__bm1690__) && !defined(__sg2260__) && !defined(__sg2260e__)
 #define __bm1690__
 #endif
 

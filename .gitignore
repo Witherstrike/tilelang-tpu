@@ -18,6 +18,7 @@
 
 debug/
 build/
+/build-*/
 dist/
 wheelhouse/
 __pycache__
@@ -99,3 +100,7 @@ tilelang/jit/adapter/cython/.cycache
 /src/tl_templates/tpu/libkernel.so
 /src/tl_templates/tpu/main.cpp
 /src/tl_templates/tpu/main.so
+
+# Local SDK/PDF investigation artifacts. Keep them available to developers
+# without making generated OCR, page images, or probes part of the source tree.
+/research/

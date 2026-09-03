@@ -77,6 +77,27 @@ from .customize import (
     ppl_gather,  # noqa: F401
     ppl_topk,  # noqa: F401
 )
+from .rvt import (  # noqa: F401
+    rvt_call,
+    rvt_kernel_start,
+    rvt_set_max_cmd_id,
+    rvt_parallel,
+    rvt_fence,
+    rvt_sync_i,
+    rvt_sync_all,
+    rvt_sync_all_gdma,
+    rvt_sync_all_tiu,
+    rvt_cfg_satu,
+    rvt_cfg_lanemask,
+    rvt_cfg_round_mode,
+    rvt_fadd,
+    rvt_fsub,
+    rvt_fmul,
+    rvt_fmac,
+    rvt_dma_ld,
+    rvt_dma_st,
+    rvt_dma_cp,
+)
 from .builtin import *  # noqa: F401
 
 from .memscope import *  # noqa: F401

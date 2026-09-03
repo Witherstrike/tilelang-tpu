@@ -13,6 +13,10 @@ from tvm.relay import TensorType
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_target, is_tpu_target
+from tilelang.jit.adapter.tpu import (
+    make_tpu_forward,
+    reject_unverified_tpu_database_artifact,
+)
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.tensor import map_torch_type
@@ -201,8 +205,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.verbose = verbose
         self.tpu_config = tpu_config or resolve_tpu_compile_config(mode=mode)
         self.mode = self.tpu_config.runtime_mode
-        self.wrapper = TLWrapper(self.target)
         self.lib_generator = LibraryGenerator(self.target, tpu_config=self.tpu_config)
+        self.wrapper = TLWrapper(
+            self.target, tpu_workspace_dir=self.lib_generator.tpu_workspace_dir)
 
         self.wrapper.assign_optimized_module(self.ir_module)
         self.wrapper.assign_pass_configs(pass_configs)
@@ -215,38 +220,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
         if is_tpu_target(self.target):
-            self.lib.tilelang_tpu_run.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
-            self.lib.tilelang_tpu_run.restype = ctypes.c_int
-            # TODO: 暂时使用ctypes，后续考虑更高效cython
-            def lambda_forward(*args):
-                host_tensors = [arg.detach().cpu().contiguous() for arg in args]
-                arg_buffers = []
-                arg_sizes = []
-                for tensor in host_tensors:
-                    storage = tensor.untyped_storage()
-                    nbytes = storage.nbytes()
-                    raw = bytes(storage)
-                    buf = ctypes.create_string_buffer(raw, nbytes)
-                    arg_buffers.append(buf)
-                    arg_sizes.append(nbytes)
-
-                argv = (ctypes.c_void_p * len(args))()
-                for i, buf in enumerate(arg_buffers):
-                    argv[i] = ctypes.cast(buf, ctypes.c_void_p).value
-
-                ret = self.lib.tilelang_tpu_run(argv)
-                args_list = list(args)
-                for i in self.result_idx:
-                    result_tensor = torch.empty(
-                        args[i].shape, dtype=args[i].dtype, device="cpu")
-                    ctypes.memmove(
-                        result_tensor.data_ptr(),
-                        arg_buffers[i],
-                        arg_sizes[i])
-                    args_list[i][...] = result_tensor.to(args_list[i].device)
-
-                return ret
-            self.func = lambda_forward
+            # The TPU host ABI is not a normal Cython ``call`` wrapper.
+            self.func = make_tpu_forward(
+                self.lib, self.params, self.result_idx, self.dynamic_symbolic_map)
         else:
             self.lib.get_last_error.restype = ctypes.c_char_p
             result = self.lib.init()
@@ -271,7 +247,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
                       kernel_global_source: str,
                       kernel_lib_path: str,
                       verbose: bool = False,
-                      pass_configs: Optional[Dict[str, Any]] = None):
+                      pass_configs: Optional[Dict[str, Any]] = None,
+                      tpu_config: Optional[TPUCompileConfig] = None):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
@@ -293,8 +270,16 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.buffer_device_map = adapter._process_buffer_device()
 
         adapter.verbose = verbose
-        adapter.lib_generator = LibraryGenerator(adapter.target)
+        adapter.tpu_config = tpu_config or resolve_tpu_compile_config()
+        adapter.mode = adapter.tpu_config.runtime_mode
+        reject_unverified_tpu_database_artifact(adapter.target)
+        adapter.lib_generator = LibraryGenerator(adapter.target, tpu_config=adapter.tpu_config)
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
+
+        if is_tpu_target(adapter.target):
+            adapter.func = make_tpu_forward(
+                adapter.lib, adapter.params, adapter.result_idx, adapter.dynamic_symbolic_map)
+            return adapter
 
         adapter.lib.get_last_error.restype = ctypes.c_char_p
         result = adapter.lib.init()
