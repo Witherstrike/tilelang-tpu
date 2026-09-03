@@ -199,11 +199,12 @@ class LibraryGenerator(object):
 
         src_dir = get_tpu_template_dir()
         definitions, includes = self._ppl_compile_flags(layout, src_dir)
-        common = definitions + ["-Dlibkernel_EXPORTS"] + includes + ["-O3", "-DNDEBUG", "-fPIC"]
+        common = definitions + ["-Dlibkernel_EXPORTS"] + includes + [
+            "-O3", "-DNDEBUG", "-fPIC", "-flto"
+        ]
         kernel_o = os.path.join(src_dir, "kernel.o")
         helper_o = os.path.join(src_dir, "ppl_helper.o")
         libkernel = os.path.join(src_dir, "libkernel.so")
-        rpath = f"{layout.backend_lib}:{layout.runtime_lib}"
 
         self._run_tpu_command(
             [cross_gcc, *common, "-c", os.path.join(src_dir, "kernel.c"), "-o", kernel_o],
@@ -212,10 +213,10 @@ class LibraryGenerator(object):
             [cross_gcc, *common, "-c", str(layout.ppl_helper_source), "-o", helper_o],
             "Compile PPL helper", timeout)
         self._run_tpu_command(
-            [cross_gcc, "-shared", "-fPIC", "-Wl,--no-undefined",
+            [cross_gcc, "-shared", "-fPIC", "-flto", "-Wl,--no-undefined",
              "-Wl,-soname,libkernel.so", "-o", libkernel, kernel_o, helper_o,
-             f"-Wl,-rpath,{rpath}", "-Wl,--whole-archive", str(layout.firmware_archive),
-             "-Wl,--no-whole-archive", "-lm"],
+             "-Wl,--whole-archive", str(layout.firmware_archive),
+             "-Wl,--no-whole-archive", "-Wl,-s", "-ldl", "-lm"],
             "Link PCIe libkernel.so", timeout)
 
         host_common = definitions + includes + ["-O3", "-DNDEBUG", "-std=c++17", "-fPIC"]
@@ -231,7 +232,9 @@ class LibraryGenerator(object):
             ["g++", "-shared", "-fPIC", "-Wl,--no-undefined", "-o",
              os.path.join(src_dir, "main.so"), kernel_host_o, main_o,
              f"-L{layout.runtime_lib}",
-             f"-Wl,-rpath,{layout.runtime_lib}", "-ltpuv7_rt", "-lpthread"],
+             f"-Wl,--disable-new-dtags,-rpath,{layout.runtime_lib}",
+             "-ltpuv7_rt", "-Wl,--no-as-needed", "-lcdm_daemon_emulator",
+             "-Wl,--as-needed", "-lpthread"],
             "Link PCIe main.so", timeout)
         os.environ["PPL_KERNEL_PATH"] = libkernel
 
