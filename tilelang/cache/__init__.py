@@ -22,8 +22,8 @@ def cached(
     execution_backend: Optional[Literal["dlpack", "ctypes", "cython"]] = "cython",
     verbose: Optional[bool] = False,
     pass_configs: Optional[dict] = None,
-    chip: str = "bm1690",
-    device_mode: Literal["atomic", "rv"] = "atomic",
+    chip: Optional[str] = None,
+    device_mode: Literal["tpukernel", "rv", "atomic"] = "tpukernel",
     runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
     mode: Optional[Literal["pcie", "cmodel"]] = None,
 ) -> JITKernel:

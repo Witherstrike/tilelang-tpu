@@ -48,7 +48,7 @@
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
 #include "../op/gemm.h"
-#include "../target/bm1690_lmem.h"
+#include "../target/tpuv7_lmem.h"
 
 namespace tvm {
 namespace tl {
@@ -57,7 +57,7 @@ using namespace tir;
 namespace {
 
 int64_t AlignUp(int64_t value, int64_t align) {
-  return bm1690::AlignUp(value, align);
+  return tpuv7::AlignUp(value, align);
 }
 
 } // namespace
@@ -153,7 +153,7 @@ public:
       }
       int64_t bytes = liveRange[op].tensor_size;
       int64_t mem_cross_bank_num =
-          static_cast<int64_t>(bm1690::DivUp(bytes, bank_size_));
+          static_cast<int64_t>(tpuv7::DivUp(bytes, bank_size_));
       mem_cross_bank_num = std::max<int64_t>(mem_cross_bank_num, 1);
       for (int i = 0; i < bank_num_; ++i) {
         int64_t offset = i * bank_size_;
@@ -234,7 +234,7 @@ protected:
 
     std::shared_ptr<OpAddr> op_addr = std::make_shared<OpAddr>(
         op, liveRange[op].tensor_size, liveRange[op].start, liveRange[op].end);
-    int64_t prev_offset = AlignUp(offset, bm1690::kTensorAlignBytes);
+    int64_t prev_offset = AlignUp(offset, tpuv7::kTensorAlignBytes);
     int64_t best_offset = -1;
     int64_t smallest_gap = std::numeric_limits<int64_t>::max();
 
@@ -247,7 +247,7 @@ protected:
       }
       if (LiveRangesOverlap(*op_addr, *allocated_op_addr)) {
         int64_t candidate =
-            AlignUp(prev_offset, bm1690::kTensorAlignBytes);
+            AlignUp(prev_offset, tpuv7::kTensorAlignBytes);
         int64_t gap = allocated_op_addr->start - candidate;
         if (gap >= op_addr->size && gap < smallest_gap) {
           smallest_gap = gap;
@@ -257,7 +257,7 @@ protected:
       }
     }
     int64_t trailing_candidate =
-        AlignUp(prev_offset, bm1690::kTensorAlignBytes);
+        AlignUp(prev_offset, tpuv7::kTensorAlignBytes);
     int64_t trailing_gap = end_offset - trailing_candidate;
     if (trailing_gap >= op_addr->size && trailing_gap < smallest_gap) {
       best_offset = trailing_candidate;
@@ -587,8 +587,8 @@ private:
 };
 
 PrimFunc InferAddress(PrimFunc f) {
-  int bank_num = bm1690::kBankNum;
-  int bank_size = bm1690::kBankSize;
+  int bank_num = tpuv7::kBankNum;
+  int bank_size = tpuv7::kBankSize;
   std::unordered_map<const BufferNode *, std::unordered_set<const BufferNode *>>
       bank_conflict_map;
   std::unordered_map<const BufferNode *, TensorLive> live_ranges;
@@ -598,7 +598,7 @@ PrimFunc InferAddress(PrimFunc f) {
   for (auto &op : alloc_ops) {
     TensorLive live;
     live.tensor_size =
-        bm1690::TpuAlignSizeBytes(op->shape, op->dtype, "AddressAssign");
+        tpuv7::TpuAlignSizeBytes(op->shape, op->dtype, "AddressAssign");
     live_ranges[op] = live;
   }
   BufferUseCollector(alloc_ops, &live_ranges, &bank_conflict_map)
@@ -609,7 +609,7 @@ PrimFunc InferAddress(PrimFunc f) {
   MemAllocBankConflictAware allocatorBC(bank_num, bank_size);
   auto success = allocatorBC.assignAddr(
       alloc_ops, live_ranges, bank_conflict_map, addrMapWithBC, memUsedWithBC);
-  ICHECK(success) << "BM1690 local memory allocation failed. buffers="
+  ICHECK(success) << "TPUv7 local memory allocation failed. buffers="
                   << alloc_ops.size() << ", lmem=" << bank_num * bank_size
                   << " bytes";
 

@@ -36,7 +36,7 @@
 #include <utility>
 #include <vector>
 
-#include "bm1690_lmem.h"
+#include "tpuv7_lmem.h"
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
 #include "../op/gemm.h"
@@ -45,7 +45,10 @@
 namespace tvm {
 namespace codegen {
 
-CodeGenTileLangPPL::CodeGenTileLangPPL() {
+CodeGenTileLangPPL::CodeGenTileLangPPL(std::string target_chip,
+                                       std::string target_programming_model)
+    : target_chip_(std::move(target_chip)),
+      target_programming_model_(std::move(target_programming_model)) {
   restrict_keyword_ = "global_addr_t";
 }
 
@@ -81,15 +84,22 @@ public:
 void CodeGenTileLangPPL::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {}
 
 std::string CodeGenTileLangPPL::Finish() {
+  decl_stream << "/* TileLang TPU target: " << target_chip_
+              << ", programming model: " << target_programming_model_ << " */\n";
   decl_stream << "#include \"ppl_helper.h\"\n";
   if (uses_rvt_api_) {
     // RVT calls use the vendor ABI directly. Do not permit an accidental
-    // implicit declaration in an atomic build: only device_mode="rv" sets
+    // implicit declaration in a TPU-Kernel build: only device_mode="rv" sets
     // TILELANG_TPU_RV and selects a PPL package with rvt_api.h.
     decl_stream << "#ifndef TILELANG_TPU_RV\n"
                 << "#error \"RVT externs require TPU device_mode=rv\"\n"
                 << "#endif\n"
                 << "#include \"rvt_api.h\"\n";
+  }
+  if (uses_tpukernel_api_) {
+    decl_stream << "#ifndef TILELANG_TPU_TPUKERNEL\n"
+                << "#error \"TPU-Kernel externs require TPU device_mode=tpukernel\"\n"
+                << "#endif\n";
   }
   decl_stream << "#ifndef TILELANG_PPL_HELPER_HAS_GET_DTYPE\n"
               << "static data_type_t __ppl_get_dtype(int type) {\n"
@@ -969,11 +979,18 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
   std::vector<std::string> inst;
   if (op->op.same_as(builtin::call_extern())) {
     std::string op_name = Downcast<StringImm>(op->args[0])->value;
-    if (op_name.rfind("ppl.", 0) == 0) {
+    const bool is_tpukernel_extern =
+        op_name.rfind("ppl.", 0) == 0 || op_name.rfind("tpu_", 0) == 0;
+    const bool is_rvt_extern = op_name.rfind("rvt_", 0) == 0;
+    if (is_tpukernel_extern) {
+      ICHECK_EQ(target_programming_model_, "tpukernel")
+          << "TPU-Kernel extern " << op_name
+          << " requires target tpu-programming-model=tpukernel";
       ICHECK_EQ(rvt_direct_call_count_, 0)
-          << "Raw RVT rvt_* calls cannot share a kernel with ppl.* calls; "
+          << "Raw RVT rvt_* calls cannot share a kernel with TPU-Kernel calls; "
           << "their descriptor and command-stream ownership models are distinct.";
-      ++ppl_extern_count_;
+      ++tpukernel_extern_count_;
+      uses_tpukernel_api_ = true;
     }
     if (op_name == "ppl.copy") {
       tl::BufferMap buffer_map;
@@ -1925,9 +1942,12 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       // PPL-specific operations above need tensor/address lowering. RVT and
       // other explicit C ABI calls already carry native arguments, so use the
       // generic C emitter instead of silently dropping an unknown extern.
-      if (op_name.rfind("rvt_", 0) == 0) {
-        ICHECK_EQ(ppl_extern_count_, 0)
-            << "Raw RVT rvt_* calls cannot share a kernel with ppl.* calls; "
+      if (is_rvt_extern) {
+        ICHECK_EQ(target_programming_model_, "rv")
+            << "RVT extern " << op_name
+            << " requires target tpu-programming-model=rv";
+        ICHECK_EQ(tpukernel_extern_count_, 0)
+            << "Raw RVT rvt_* calls cannot share a kernel with TPU-Kernel calls; "
             << "their descriptor and command-stream ownership models are distinct.";
         ++rvt_direct_call_count_;
         uses_rvt_api_ = true;
@@ -2060,14 +2080,14 @@ void CodeGenTileLangPPL::VisitStmt_(const AllocateNode *op) {
   std::string vid = AllocLocalVarID(buffer_var);
   var_idmap_[buffer_var] = vid;
 
-  auto shape4 = tl::bm1690::NormalizeLocalShape(op->extents, "PPL codegen");
+  auto shape4 = tl::tpuv7::NormalizeLocalShape(op->extents, "PPL codegen");
   std::string bv_shape = Shape4ToDim4Literal(shape4);
   std::vector<int> shapes;
   shapes.push_back(static_cast<int>(shape4[1]));
   shapes.push_back(static_cast<int>(shape4[3]));
   std::string op_dtype = TargetDTypeName(op->dtype);
   int64_t tensor_size =
-      tl::bm1690::TpuAlignSizeBytesFromShape4(shape4, op->dtype);
+      tl::tpuv7::TpuAlignSizeBytesFromShape4(shape4, op->dtype);
   ICHECK_LE(tensor_size, std::numeric_limits<int>::max());
   this->PrintIndent();
   auto addr =
@@ -2213,7 +2233,7 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
   // an RVT function silently lose rvt_api.h when a later ordinary PrimFunc is
   // emitted in the same module.
   rvt_direct_call_count_ = 0;
-  ppl_extern_count_ = 0;
+  tpukernel_extern_count_ = 0;
   ReserveKeywordsAsUnique();
   auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
   f_attrs = f->attrs;

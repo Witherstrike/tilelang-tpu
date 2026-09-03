@@ -113,6 +113,7 @@ tilelang_file_glob(GLOB TILE_LANG_SRCS
   # webgpu doesn't have system dependency
   src/target/codegen_webgpu.cc
   # sophgo tpu
+  src/target/tpu_target_kind.cc
   src/target/codegen_ppl.cc
   src/target/rt_mod_ppl.cc
 )

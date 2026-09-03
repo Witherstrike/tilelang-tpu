@@ -12,7 +12,11 @@ from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.engine.param import KernelParam, CompiledArtifact
-from tilelang.engine.tpu_config import resolve_tpu_compile_config
+from tilelang.engine.tpu_config import (
+    bind_tpu_target,
+    get_tpu_target_chip,
+    resolve_tpu_compile_config,
+)
 from tilelang.utils.target import determine_target
 from tilelang.engine.phase import (
     LowerAndLegalize,
@@ -50,6 +54,91 @@ def get_device_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]
 
 def get_host_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]:
     return lambda func: not get_device_call(is_device_c)(func)
+
+
+# PPL calls describe the traditional TPU-Kernel command stream.  The complete
+# ``tpu_`` vendor namespace belongs to that same ABI (BDC/GDMA/HAU/SDMA/VSDMA/
+# CDMA and its synchronization helpers), so a hand-written call_extern cannot
+# evade the model boundary by bypassing the ``ppl.`` facade.
+_TPUKERNEL_EXTERN_PREFIXES = ("ppl.", "tpu_")
+_RVT_EXTERN_PREFIX = "rvt_"
+
+
+def _tpu_extern_programming_model(call: tir.Call) -> Optional[str]:
+    """Classify a known TPU ``tir.call_extern`` without guessing other calls."""
+    if getattr(call.op, "name", None) != "tir.call_extern" or not call.args:
+        return None
+    name = getattr(call.args[0], "value", None)
+    if not isinstance(name, str):
+        return None
+    if name.startswith(_RVT_EXTERN_PREFIX):
+        return "rv"
+    if name.startswith(_TPUKERNEL_EXTERN_PREFIXES):
+        return "tpukernel"
+    return None
+
+
+def _collect_tpu_externs(mod: tvm.IRModule):
+    """Return classified TPU externs without treating arbitrary calls as TPU.
+
+    This is intentionally limited to the vendor namespaces above.  The result
+    is used both to validate a selected TPU programming model and to prevent a
+    legacy TPU program from silently lowering as C/CUDA/HIP after
+    ``target='auto'`` no longer guesses a TPU.
+    """
+    externs = []
+    for global_var, function in mod.functions.items():
+        if not isinstance(function, tir.PrimFunc):
+            continue
+
+        def visit(node):
+            if not isinstance(node, tir.Call):
+                return
+            model = _tpu_extern_programming_model(node)
+            if model is not None:
+                name = getattr(node.args[0], "value", "<unknown>")
+                externs.append((global_var.name_hint, str(name), model))
+
+        tir.stmt_functor.post_order_visit(function.body, visit)
+    return externs
+
+
+def _reject_tpu_externs_for_non_tpu_target(mod: tvm.IRModule, target: Target) -> None:
+    """Fail closed instead of emitting TPU externs into an unrelated backend."""
+    externs = _collect_tpu_externs(mod)
+    if not externs:
+        return
+    rendered = ", ".join(
+        f"{func}: {name} ({model})" for func, name, model in externs)
+    raise ValueError(
+        f"TPU externs cannot lower for target={target.kind.name!r}: {rendered}. "
+        "Use an explicit TPU target such as 'tpu -mcpu=sg2260e' and select "
+        "device_mode='tpukernel' for ppl./tpu_* calls or device_mode='rv' "
+        "for rvt_* calls.")
+
+
+def _validate_tpu_programming_model(mod: tvm.IRModule, tpu_config) -> None:
+    """Reject known extern families that disagree with the selected TPU mode.
+
+    The C++ source guards remain a final safety net, but diagnosing this from
+    final TIR avoids cross-compiling a kernel that was explicitly requested for
+    the wrong programming model.  Unknown externs are deliberately not
+    classified here; they retain the normal codegen diagnostics.
+    """
+    incompatible = [
+        (func, name, model)
+        for func, name, model in _collect_tpu_externs(mod)
+        if model != tpu_config.programming_model
+    ]
+
+    if incompatible:
+        rendered = ", ".join(
+            f"{func}: {name} ({model})" for func, name, model in incompatible)
+        raise ValueError(
+            f"TPU device_mode={tpu_config.programming_model!r} cannot lower "
+            f"externs from a different programming model: {rendered}. "
+            "Use device_mode='tpukernel' for ppl./tpu_* "
+            "calls or device_mode='rv' for rvt_* calls.")
 
 
 @tvm.register_func("tilelang_callback_cuda_compile", override=True)
@@ -200,8 +289,8 @@ def lower(
     runtime_only=False,
     enable_host_codegen=False,
     enable_device_compile=False,
-    chip: str = "bm1690",
-    device_mode: str = "atomic",
+    chip: Optional[str] = None,
+    device_mode: str = "tpukernel",
     runtime_mode: Optional[str] = None,
 ) -> CompiledArtifact:
     '''
@@ -211,8 +300,6 @@ def lower(
         own device codegen implementation in jit.
     '''
 
-    tpu_config = resolve_tpu_compile_config(
-        chip=chip, device_mode=device_mode, runtime_mode=runtime_mode)
     mod = func_or_mod
     params = None
     if isinstance(func_or_mod, tir.PrimFunc):
@@ -227,6 +314,23 @@ def lower(
 
     target_host = tvm.target.Target.canon_target(target_host)
     target = tvm.target.Target(target, target_host)
+    is_tpu = target.kind.name == "tpu"
+    tpu_config = None
+    if is_tpu:
+        # TPU target selection is resolved at the backend boundary.  Do not
+        # manufacture a BM1690 configuration while lowering CUDA/HIP/etc.;
+        # those backends keep their own target and codegen paths.
+        target_chip = get_tpu_target_chip(target)
+        tpu_config = resolve_tpu_compile_config(
+            chip=chip,
+            device_mode=device_mode,
+            runtime_mode=runtime_mode,
+            target_chip=target_chip,
+        )
+        target = bind_tpu_target(target, tpu_config, target_host)
+        _validate_tpu_programming_model(mod, tpu_config)
+    else:
+        _reject_tpu_externs_for_non_tpu_target(mod, target)
 
     _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
     _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
@@ -239,20 +343,25 @@ def lower(
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     device_mod = tir.transform.Filter(_is_device_call)(mod)
 
-    codegen_mod = tvm._ffi.get_global_func("target.build.tilelang_ppl")(mod,)  # target)
-    # return device_mod
-    # host_mod = tir.transform.Filter(_is_host_call)(mod)
-    # device_mod = tir.transform.Filter(_is_device_call)(mod)
+    if is_tpu:
+        # PPL codegen needs the full module because TPU host/device ownership
+        # is represented by the generated PPL ABI rather than TVM's ordinary
+        # device module split.
+        kernel_source = tvm._ffi.get_global_func("target.build.tilelang_ppl")(mod, target)
+        return CompiledArtifact(
+            host_mod, device_mod, params, kernel_source, tpu_config=tpu_config)
 
-    # codegen_mod = device_codegen(
-    #     device_mod, target) if enable_device_compile else device_codegen_without_compile(
-    #         device_mod, target)
+    # Preserve the normal TileLang backend dispatch.  TPU capability/config
+    # logic is intentionally absent from this branch, just as CUDA and HIP
+    # target choices are isolated from one another.
+    codegen_mod = (
+        device_codegen(device_mod, target)
+        if enable_device_compile else device_codegen_without_compile(device_mod, target)
+    )
+    if enable_host_codegen:
+        host_rt_mod = host_codegen(host_mod, target_host)
+        host_rt_mod.import_module(codegen_mod)
+        return CompiledArtifact(
+            host_rt_mod, device_mod, params, codegen_mod.get_source(), rt_mod=host_rt_mod)
 
-    # if enable_host_codegen:
-    #     host_mod = host_codegen(host_mod, target_host)
-    #     host_mod.import_module(codegen_mod)
-    #     return CompiledArtifact(
-    #         host_mod, device_mod, params, codegen_mod.get_source(), rt_mod=host_mod)
-
-    return CompiledArtifact(
-        host_mod, device_mod, params, codegen_mod, tpu_config=tpu_config)
+    return CompiledArtifact(host_mod, device_mod, params, codegen_mod.get_source())

@@ -4,8 +4,12 @@
 #include "tpu_defs.h"
 #endif
 
-#ifdef __bm1690__
-// 基于 tpuv7-runtime 的runtime的头文件，适用于 bm1690
+#if defined(__sg2260__) || defined(__sg2260e__)
+#define TILELANG_TPUV7_RUNTIME 1
+#endif
+
+#ifdef TILELANG_TPUV7_RUNTIME
+// TPUv7 runtime is shared by BM1690 and SG2260E PPL targets.
 #include <tpuv7_rt.h>
 #endif
 
@@ -24,7 +28,7 @@ bm_handle_t handle;
 tpu_kernel_module_t tpu_module;
 #endif
 
-#ifdef __bm1690__
+#ifdef TILELANG_TPUV7_RUNTIME
 // 定义 runtime stream
 tpuRtStream_t stream;
 // 定义 kernel module 的句柄
@@ -43,7 +47,7 @@ int main() {
   // size_t data_size = N * C * H * W * DtypeSize(DT_BFP16);
   size_t input_size = N * C * H * W * DtypeSize(DT_BFP16);
   size_t output_size = N * C * H * W * DtypeSize(DT_BFP16);
-#ifdef __bm1690__
+#ifdef TILELANG_TPUV7_RUNTIME
   // tpuv7_runimte的状态变量
   tpuRtStatus_t ret;
   // 计算设备runtime初始化

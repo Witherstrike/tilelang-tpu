@@ -13,10 +13,14 @@ from tilelang.jit.adapter import (
     CtypesKernelAdapter,
     CythonKernelAdapter,
 )
-from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
+from tilelang.utils.target import determine_target, AVALIABLE_TARGETS, is_tpu_target_spec
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.engine.param import KernelParam, CompiledArtifact
-from tilelang.engine.tpu_config import resolve_tpu_compile_config
+from tilelang.engine.tpu_config import (
+    bind_tpu_target,
+    get_tpu_target_chip,
+    resolve_tpu_compile_config,
+)
 
 
 class JITKernel(object):
@@ -47,8 +51,8 @@ class JITKernel(object):
         verbose: bool = False,
         pass_configs: Optional[Dict[str, Any]] = None,
         from_database: bool = False,
-        chip: str = "bm1690",
-        device_mode: Literal["atomic", "rv"] = "atomic",
+        chip: Optional[str] = None,
+        device_mode: Literal["tpukernel", "rv", "atomic"] = "tpukernel",
         runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
         mode: Optional[Literal["pcie", "cmodel"]] = None,
     ):
@@ -78,29 +82,33 @@ class JITKernel(object):
             Whether to create a TorchFunction from a database.
         """
         self.execution_backend = execution_backend
-        self.target = target
         self.target_host = target_host
         self.verbose = verbose
 
         if pass_configs is None:
             pass_configs = {}
         self.pass_configs = pass_configs
-        self.tpu_config = resolve_tpu_compile_config(
-            chip=chip,
-            device_mode=device_mode,
-            runtime_mode=runtime_mode,
-            mode=mode,
-        )
-        # Compatibility for callers that still inspect the old attribute.
-        self.mode = self.tpu_config.runtime_mode
-
         # If the target is specified as a string, validate it and convert it to a TVM Target.
         if isinstance(target, str):
-            assert target in AVALIABLE_TARGETS, f"Invalid target: {target}"
+            assert target in AVALIABLE_TARGETS or is_tpu_target_spec(target), \
+                f"Invalid target: {target}"
             target = determine_target(target)
 
         # Ensure the target is always a TVM Target object.
         target = Target(target)
+        self.tpu_config = None
+        if target.kind.name == "tpu":
+            self.tpu_config = resolve_tpu_compile_config(
+                chip=chip,
+                device_mode=device_mode,
+                runtime_mode=runtime_mode,
+                mode=mode,
+                target_chip=get_tpu_target_chip(target),
+            )
+            target = bind_tpu_target(target, self.tpu_config)
+        self.target = target
+        # TPU runtime mode is not meaningful for CUDA/HIP/CPU backends.
+        self.mode = self.tpu_config.runtime_mode if self.tpu_config is not None else None
 
         # Validate the execution backend.
         assert execution_backend in [
@@ -138,8 +146,8 @@ class JITKernel(object):
         out_idx: Union[List[int], int],
         execution_backend: Literal["dlpack", "ctypes", "cython"],
         pass_configs: Optional[Dict[str, Any]] = None,
-        chip: str = "bm1690",
-        device_mode: Literal["atomic", "rv"] = "atomic",
+        chip: Optional[str] = None,
+        device_mode: Literal["tpukernel", "rv", "atomic"] = "tpukernel",
         runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
         mode: Optional[Literal["pcie", "cmodel"]] = None,
     ):
@@ -214,6 +222,13 @@ class JITKernel(object):
         # Compile the function with TVM, optimizing with shared memory lowering.
         enable_host_codegen = execution_backend == "dlpack"
         enable_device_compile = execution_backend == "dlpack"
+        lower_kwargs = {}
+        if self.tpu_config is not None:
+            lower_kwargs.update(
+                chip=self.tpu_config.chip,
+                device_mode=self.tpu_config.device_mode,
+                runtime_mode=self.tpu_config.runtime_mode,
+            )
         with tvm.transform.PassContext(opt_level=3, config=pass_configs):
             artifact = tilelang.lower(
                 tilelang_func,
@@ -221,9 +236,7 @@ class JITKernel(object):
                 target_host=target_host,
                 enable_host_codegen=enable_host_codegen,
                 enable_device_compile=enable_device_compile,
-                chip=self.tpu_config.chip,
-                device_mode=self.tpu_config.device_mode,
-                runtime_mode=self.tpu_config.runtime_mode)
+                **lower_kwargs)
 
         self.artifact = artifact
 

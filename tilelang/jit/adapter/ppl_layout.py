@@ -7,9 +7,12 @@ import json
 from pathlib import Path
 from typing import Tuple
 
+from tilelang.engine.tpu_config import get_tpu_chip_spec
+
 
 @dataclass(frozen=True)
 class PPLLayout:
+    root: Path
     logical_chip: str
     arch: str
     max_core_num: int
@@ -24,7 +27,14 @@ class PPLLayout:
     ppl_helper_source: Path
     emulator_library: Path
     firmware_archive: Path
-    toolchain_dir: Path
+    toolchains_root: Path
+
+    @property
+    def runtime_identity(self) -> Tuple[str, str, str]:
+        """Canonical SDK/runtime paths that must not change in one process."""
+        return tuple(
+            str(path.resolve())
+            for path in (self.root, self.runtime_lib, self.backend_lib))
 
     @property
     def include_dirs(self) -> Tuple[Path, ...]:
@@ -44,6 +54,10 @@ class PPLLayout:
 
     def require_rvt_api(self) -> Path:
         """Return the RVT header or explain why ``device_mode=\"rv\"`` is invalid."""
+        spec = get_tpu_chip_spec(self.logical_chip)
+        if not spec.supports("rv"):
+            raise ValueError(
+                f"TPU chip {spec.name!r} does not support the RV programming model")
         header = self.rvt_api_header
         if not header.is_file():
             raise FileNotFoundError(
@@ -51,16 +65,25 @@ class PPLLayout:
                 f"rvt_api.h: {header}")
         return header
 
+    def pcie_cross_gcc(self) -> Path:
+        """Find the one PPL-provided PCIe compiler without pinning an SDK version.
 
-_PPL_17_CHIP_DEFINITIONS = {
-    "tpub_7_1": ("__tpub_7_1__", "__sg2260__"),
-    "tpub_7_1_e": ("__tpub_7_1_e__", "__sg2260e__"),
-}
-
-_PPL_17_MAX_CORE_NUM = {
-    "tpub_7_1": 8,
-    "tpub_7_1_e": 4,
-}
+        CModel users do not need a cross compiler, so discovery is intentionally
+        delayed until a PCIe build.  More than one candidate is an ambiguity,
+        not a reason to silently select an arbitrary SDK revision.
+        """
+        candidates = tuple(sorted(
+            self.toolchains_root.glob("*/bin/riscv64-unknown-linux-gnu-gcc")))
+        if not candidates:
+            raise FileNotFoundError(
+                "PPL PCIe cross compiler is missing; expected "
+                f"riscv64-unknown-linux-gnu-gcc under {self.toolchains_root}")
+        if len(candidates) != 1:
+            rendered = "\n  ".join(str(candidate) for candidate in candidates)
+            raise ValueError(
+                "PPL PCIe cross compiler selection is ambiguous; expected one candidate:\n  "
+                + rendered)
+        return candidates[0]
 
 
 def _require_paths(layout: PPLLayout) -> PPLLayout:
@@ -88,6 +111,8 @@ def resolve_ppl_layout(ppl_root: str, logical_chip: str = "bm1690") -> PPLLayout
     layout. Keeping one layout avoids silently compiling a kernel with a
     legacy header/library mixture after the SDK has been upgraded.
     """
+    chip_spec = get_tpu_chip_spec(logical_chip)
+    logical_chip = chip_spec.name
     root = Path(ppl_root).expanduser().resolve()
     chip_map_path = root / "deps/chip/chip_map.json"
     if not chip_map_path.is_file():
@@ -106,17 +131,21 @@ def resolve_ppl_layout(ppl_root: str, logical_chip: str = "bm1690") -> PPLLayout
     arch = chip_map[logical_chip]
     if not isinstance(arch, str):
         raise ValueError(f"Invalid architecture for chip {logical_chip!r} in {chip_map_path}")
+    if arch != chip_spec.ppl_arch:
+        raise ValueError(
+            "PPL SDK chip map disagrees with TileLang's validated capability "
+            f"for {logical_chip!r}: expected {chip_spec.ppl_arch!r}, got {arch!r}")
 
     chip_root = root / "deps/chip" / arch
     runtime_root = root / "deps/runtime/tpuv7-runtime"
     common_root = root / "deps/common"
-    definitions = _PPL_17_CHIP_DEFINITIONS.get(arch, (f"__{arch}__",))
     return _require_paths(
         PPLLayout(
+            root=root,
             logical_chip=logical_chip,
             arch=arch,
-            max_core_num=_PPL_17_MAX_CORE_NUM.get(arch, 1),
-            compile_definitions=definitions,
+            max_core_num=chip_spec.physical_core_count,
+            compile_definitions=chip_spec.ppl_compile_definitions,
             kernel_include=chip_root / "TPU1686/kernel/include",
             kernel_common_include=common_root / "dev/kernel",
             device_utils_include=common_root / "dev/utils/include",
@@ -127,6 +156,5 @@ def resolve_ppl_layout(ppl_root: str, logical_chip: str = "bm1690") -> PPLLayout
             ppl_helper_source=common_root / "dev/utils/src/ppl_helper.c",
             emulator_library=chip_root / "lib/libtpuv7_emulator.so",
             firmware_archive=chip_root / "lib/libfirmware_core.a",
-            toolchain_dir=root / "third_party/toolchains_dir"
-            / "Xuantie-900-gcc-linux-5.10.4-glibc-x86_64-V2.6.1",
+            toolchains_root=root / "third_party/toolchains_dir",
         ))

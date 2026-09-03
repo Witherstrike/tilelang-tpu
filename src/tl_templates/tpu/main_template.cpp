@@ -7,11 +7,36 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <vector>
 
 tpuRtStream_t stream = nullptr;
 tpuRtKernelModule_t tpu_module = nullptr;
+static std::mutex tilelang_tpu_profile_mutex;
+static int tilelang_tpu_expected_device_id = -1;
+
+// LibraryGenerator calls this immediately after dlopen, before tilelang_tpu_run
+// can initialize the vendor runtime.  Keep the expected device inside main.so
+// as well as Python's process-wide profile: a caller changing the environment
+// between dlopen and dispatch must fail before tpuRtInit/tpuRtSetDevice.
+extern "C" int tilelang_tpu_bind_device(int expected_device_id) {{
+  if (expected_device_id < 0) {{
+    return -1;
+  }}
+#ifdef USING_CMODEL
+  if (expected_device_id != 0) {{
+    return -2;
+  }}
+#endif
+  std::lock_guard<std::mutex> lock(tilelang_tpu_profile_mutex);
+  if (tilelang_tpu_expected_device_id >= 0 &&
+      tilelang_tpu_expected_device_id != expected_device_id) {{
+    return -3;
+  }}
+  tilelang_tpu_expected_device_id = expected_device_id;
+  return 0;
+}}
 
 static int tilelang_tpu_device_id() {{
 #ifdef USING_CMODEL
@@ -68,6 +93,15 @@ int init() {{
   const int device_id = tilelang_tpu_device_id();
   if (device_id < 0) {{
     return -2;
+  }}
+  {{
+    std::lock_guard<std::mutex> lock(tilelang_tpu_profile_mutex);
+    if (tilelang_tpu_expected_device_id < 0 ||
+        tilelang_tpu_expected_device_id != device_id) {{
+      // Do not allow an environment change after LibraryGenerator.load_lib()
+      // to choose another board (or make a CModel library look like PCIe).
+      return -10;
+    }}
   }}
   tpuRtStatus_t ret = tpuRtInit();
   if (ret != tpuRtSuccess) {{

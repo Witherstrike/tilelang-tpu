@@ -5,8 +5,9 @@
 The bindings deliberately mirror ``rvt_api.h`` instead of attempting to turn
 TileLang buffers into RVT CR/TR/GR descriptors automatically.  Use them with
 ``device_mode=\"rv\"`` and configure descriptors/registers according to the
-PPL RVT ABI.  Existing ``ppl.*`` TileLang externs remain on the atomic PPL
-path until a separate target-aware RV lowering is implemented.
+PPL RVT ABI. Existing ``ppl.*`` TileLang externs remain on the
+``device_mode=\"tpukernel\"`` PPL path until a separate target-aware RV lowering
+is implemented.
 """
 
 import re

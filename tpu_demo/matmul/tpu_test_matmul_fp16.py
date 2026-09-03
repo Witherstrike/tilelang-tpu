@@ -34,9 +34,8 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 kernel = tilelang.compile(
     matmul(64, 64, 64, 32, 32, 32),
     out_idx=-1,
-    target="tpu",
-    chip="sg2260e",
-    device_mode="atomic",
+    target="tpu -mcpu=sg2260e",
+    device_mode="tpukernel",
     runtime_mode="cmodel",
 )
 
@@ -61,4 +60,3 @@ print(f"最大差异: {max_diff}")
 print(f"平均差异: {avg_diff}")
 print("check close:")
 print(torch.allclose(c, ref, atol=1e-2, rtol=1e-2))
-

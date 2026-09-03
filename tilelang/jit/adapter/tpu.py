@@ -4,7 +4,8 @@
 
 import ctypes
 import threading
-from typing import Callable, Dict, List, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -12,6 +13,87 @@ from .utils import is_tpu_target
 
 
 _TPU_EXECUTION_LOCK = threading.RLock()
+
+
+@dataclass(frozen=True)
+class _TPURuntimeProfile:
+    """One process-global vendor runtime identity.
+
+    The vendor API exposed by generated ``main.so`` has no verified process
+    teardown call.  A process must therefore not switch simulator/PCIe mode,
+    chip topology, programming model, PCIe device, or PPL SDK/runtime identity
+    after its first TPU library is loaded.
+    """
+
+    runtime_mode: str
+    chip: str
+    core_count: int
+    programming_model: str
+    device_id: int
+    sdk_identity: Tuple[str, str, str]
+
+
+_TPU_RUNTIME_PROFILE: Optional[_TPURuntimeProfile] = None
+
+
+def reserve_tpu_runtime_profile(
+        tpu_config, device_id: int,
+        sdk_identity: Optional[Tuple[str, str, str]] = None) -> None:
+    """Reserve the vendor runtime identity before loading a TPU library.
+
+    CModel and PCIe share process-global vendor runtime state.  Since the
+    generated host module has no verified `tpuRtDeInit` lifecycle, letting a
+    process switch runtime mode, chip/core topology, programming model, PCIe
+    device, or the PPL runtime libraries can reuse stale state despite
+    unloading a module.  Fail closed before ``ctypes.CDLL``; use a fresh
+    process for every different profile.
+    """
+    if not isinstance(device_id, int) or device_id < 0:
+        raise ValueError(f"TPU runtime device id must be a non-negative int, got {device_id!r}")
+    if sdk_identity is None:
+        # Only compatibility/testing callers should omit this. LibraryGenerator
+        # always supplies a validated PPLLayout identity before actual dlopen.
+        sdk_identity = ("<unresolved-ppl-sdk>",) * 3
+    if len(sdk_identity) != 3:
+        raise ValueError("TPU runtime SDK identity must contain root, runtime, and backend paths")
+    profile = _TPURuntimeProfile(
+        runtime_mode=tpu_config.runtime_mode,
+        chip=tpu_config.chip,
+        core_count=tpu_config.chip_spec.physical_core_count,
+        programming_model=tpu_config.programming_model,
+        device_id=device_id,
+        sdk_identity=sdk_identity,
+    )
+    global _TPU_RUNTIME_PROFILE
+    with _TPU_EXECUTION_LOCK:
+        if _TPU_RUNTIME_PROFILE is None:
+            _TPU_RUNTIME_PROFILE = profile
+        elif _TPU_RUNTIME_PROFILE != profile:
+            raise RuntimeError(
+                "TileLang TPU runtime is already reserved for "
+                f"runtime={_TPU_RUNTIME_PROFILE.runtime_mode}, "
+                f"chip={_TPU_RUNTIME_PROFILE.chip}, "
+                f"cores={_TPU_RUNTIME_PROFILE.core_count}, "
+                f"programming_model={_TPU_RUNTIME_PROFILE.programming_model}, "
+                f"device={_TPU_RUNTIME_PROFILE.device_id}, "
+                f"sdk={_TPU_RUNTIME_PROFILE.sdk_identity[0]}; cannot load "
+                f"runtime={profile.runtime_mode}, chip={profile.chip}, "
+                f"cores={profile.core_count}, "
+                f"programming_model={profile.programming_model}, "
+                f"device={profile.device_id}, sdk={profile.sdk_identity[0]} "
+                "in the same process. "
+                "Use a fresh process for another TPU runtime profile.")
+
+
+def reserve_tpu_cmodel_profile(tpu_config) -> None:
+    """Compatibility wrapper for CModel-only callers.
+
+    New loading code must use :func:`reserve_tpu_runtime_profile` so the same
+    safety rule also covers CModel-to-PCIe transitions.
+    """
+    if tpu_config.runtime_mode != "cmodel":
+        return
+    reserve_tpu_runtime_profile(tpu_config, device_id=0)
 
 
 def reject_unverified_tpu_database_artifact(target) -> None:

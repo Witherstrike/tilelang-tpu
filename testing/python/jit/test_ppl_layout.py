@@ -43,6 +43,12 @@ def test_resolve_ppl_17_layout(tmp_path):
     assert layout.firmware_archive == (
         tmp_path / f"deps/chip/{arch}/lib/libfirmware_core.a"
     )
+    assert layout.root == tmp_path.resolve()
+    assert layout.runtime_identity == (
+        str(tmp_path.resolve()),
+        str((tmp_path / "deps/runtime/tpuv7-runtime/lib").resolve()),
+        str((tmp_path / f"deps/chip/{arch}/lib").resolve()),
+    )
 
 
 def test_resolve_sg2260e_core_count(tmp_path):
@@ -92,3 +98,34 @@ def test_rejects_unknown_chip_in_ppl_17_layout(tmp_path):
 
     with pytest.raises(ValueError, match="sg2260e"):
         resolve_ppl_layout(str(tmp_path), "sg2260e")
+
+
+def test_rejects_chip_map_that_disagrees_with_the_capability_registry(tmp_path):
+    _make_ppl_17_layout(
+        tmp_path, logical_chip="sg2260e", arch="tpub_7_1")
+
+    with pytest.raises(ValueError, match="disagrees with TileLang's validated capability"):
+        resolve_ppl_layout(str(tmp_path), "sg2260e")
+
+
+def test_pcie_cross_compiler_is_discovered_without_a_pinned_sdk_version(tmp_path):
+    _make_ppl_17_layout(tmp_path, logical_chip="sg2260e", arch="tpub_7_1_e")
+    gcc = tmp_path / (
+        "third_party/toolchains_dir/any-ppl-release/bin/"
+        "riscv64-unknown-linux-gnu-gcc")
+    _touch(gcc)
+
+    layout = resolve_ppl_layout(str(tmp_path), "sg2260e")
+    assert layout.pcie_cross_gcc() == gcc
+
+
+def test_pcie_cross_compiler_rejects_ambiguous_sdk_toolchains(tmp_path):
+    _make_ppl_17_layout(tmp_path)
+    for release in ("first", "second"):
+        _touch(tmp_path / (
+            f"third_party/toolchains_dir/{release}/bin/"
+            "riscv64-unknown-linux-gnu-gcc"))
+
+    layout = resolve_ppl_layout(str(tmp_path))
+    with pytest.raises(ValueError, match="selection is ambiguous"):
+        layout.pcie_cross_gcc()

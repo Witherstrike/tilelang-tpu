@@ -1,18 +1,17 @@
-# TPU Template Build Artifacts
+# TPU JIT templates
 
-`src/tl_templates/tpu` produces a set of temporary build artifacts during compilation. The current implementation writes these generated files directly into the template directory instead of a separate build output directory.
+This directory contains checked-in source templates only. A TPU JIT build
+creates `kernel.c`, `kernel.cpp`, `kernel.h`, `libkernel.so`, `main.cpp`, and
+`main.so` in a private temporary directory owned by its `LibraryGenerator`.
+It never writes generated artifacts back here.
 
-Output location:
+The generated host source receives the absolute path to its matching private
+`libkernel.so` through the compile-time `TILELANG_PPL_KERNEL_PATH` definition.
+There is no process-global `PPL_KERNEL_PATH` fallback for JIT execution.
+Consequently, a prebuilt TPU `main.so` cannot be loaded through the generic
+cache/database path until TileLang ships a manifest that bundles and validates
+its private device library, PPL SDK/runtime identity, chip, programming model,
+and runtime configuration.
 
-- `src/tl_templates/tpu/`
-
-The following generated files are intentionally ignored:
-
-- `src/tl_templates/tpu/kernel.c`
-- `src/tl_templates/tpu/kernel.cpp`
-- `src/tl_templates/tpu/kernel.h`
-- `src/tl_templates/tpu/libkernel.so`
-- `src/tl_templates/tpu/main.cpp`
-- `src/tl_templates/tpu/main.so`
-
-These files are generated as part of code emission, interface generation, and shared library linking, and should not be committed to Git.
+The artifact names remain in `.gitignore` only to prevent stale files produced
+by old/manual workflows from being committed; they are not JIT output paths.

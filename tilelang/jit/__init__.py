@@ -14,7 +14,7 @@ from tvm.target import Target
 
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.jit.kernel import JITKernel
-from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
+from tilelang.utils.target import determine_target, AVALIABLE_TARGETS, is_tpu_target_spec
 from tilelang.cache import cached
 from logging import getLogger
 
@@ -50,7 +50,8 @@ def jit(
     target : Union[str, Target], optional
         The compilation target for TVM. If set to "auto", an appropriate target
         will be inferred automatically. Otherwise, must be one of the supported
-        strings in AVALIABLE_TARGETS or a TVM Target instance.
+        strings in AVALIABLE_TARGETS, a TPU target such as
+        ``"tpu -mcpu=sg2260e"``, or a TVM Target instance.
 
     Returns
     -------
@@ -61,12 +62,13 @@ def jit(
     Raises
     ------
     AssertionError
-        If the provided target is an invalid string not present in AVALIABLE_TARGETS.
+        If the provided target is an unsupported target string.
     """
 
     # If the target is specified as a string, ensure it is valid and convert to a TVM Target.
     if isinstance(target, str):
-        assert target in AVALIABLE_TARGETS, f"Invalid target: {target}"
+        assert target in AVALIABLE_TARGETS or is_tpu_target_spec(target), \
+            f"Invalid target: {target}"
         target = determine_target(target)
 
     target = Target(target)
@@ -117,8 +119,8 @@ def compile(
     target_host: Union[str, Target] = None,
     verbose: bool = False,
     pass_configs: Optional[Dict[str, Any]] = None,
-    chip: str = "bm1690",
-    device_mode: Literal["atomic", "rv"] = "atomic",
+    chip: Optional[str] = None,
+    device_mode: Literal["tpukernel", "rv", "atomic"] = "tpukernel",
     runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
     mode: Optional[Literal["pcie", "cmodel"]] = None,
 ) -> JITKernel:

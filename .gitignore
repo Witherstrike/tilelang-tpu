@@ -101,6 +101,9 @@ tilelang/jit/adapter/cython/.cycache
 /src/tl_templates/tpu/main.cpp
 /src/tl_templates/tpu/main.so
 
-# Local SDK/PDF investigation artifacts. Keep them available to developers
-# without making generated OCR, page images, or probes part of the source tree.
-/research/
+# Local SDK/PDF investigation artifacts stay untracked. The maintained backend
+# gap assessment is source documentation and is deliberately the only tracked
+# exception under research/.
+/research/*
+!/research/upstream-gap/
+!/research/upstream-gap/README.md

@@ -17,8 +17,8 @@
  * under the License.
  */
 
-#ifndef TVM_TL_BM1690_LMEM_H_
-#define TVM_TL_BM1690_LMEM_H_
+#ifndef TVM_TL_TPUV7_LMEM_H_
+#define TVM_TL_TPUV7_LMEM_H_
 
 #include <tvm/tir/expr.h>
 
@@ -28,7 +28,10 @@
 
 namespace tvm {
 namespace tl {
-namespace bm1690 {
+// BM1690 and SG2260E use this common TPUv7 local-memory layout.  Chip-specific
+// differences (PPL SDK target, ISA capability, and physical core count) live
+// in the Python TPUChipSpec registry, not in this shared allocator geometry.
+namespace tpuv7 {
 
 constexpr int64_t kLaneNum = 64;
 constexpr int64_t kEuBytes = 64;
@@ -105,8 +108,8 @@ inline int64_t TpuAlignSizeBytes(const Array<PrimExpr> &shape, DataType dtype,
                                      dtype);
 }
 
-} // namespace bm1690
+} // namespace tpuv7
 } // namespace tl
 } // namespace tvm
 
-#endif // TVM_TL_BM1690_LMEM_H_
+#endif // TVM_TL_TPUV7_LMEM_H_

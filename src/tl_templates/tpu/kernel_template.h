@@ -1,6 +1,6 @@
 #pragma once
-#if !defined(__bm1690__) && !defined(__sg2260__) && !defined(__sg2260e__)
-#define __bm1690__
+#if !defined(__sg2260__) && !defined(__sg2260e__)
+#error "TPU chip macro is required; compile generated wrappers through PPLLayout/LibraryGenerator"
 #endif
 
 #include <stdint.h>

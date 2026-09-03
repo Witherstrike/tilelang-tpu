@@ -40,7 +40,7 @@ namespace codegen {
 
 class CodeGenTileLangPPL final : public CodeGenC {
 public:
-  CodeGenTileLangPPL();
+  CodeGenTileLangPPL(std::string target_chip, std::string target_programming_model);
   std::string Finish();
   // override behavior
   void PrintFuncPrefix(std::ostream &os) final;
@@ -126,11 +126,14 @@ private:
                               int32_t size);
   int32_t gemm_idx_ = 0;
   // Set while emitting a direct RVT extern. Finish() then emits a hard
-  // compile-time guard so rvt_* cannot accidentally be used with the atomic
-  // PPL configuration.
+  // compile-time guard so rvt_* cannot accidentally be used with the
+  // TPU-Kernel PPL configuration.
   bool uses_rvt_api_{false};
+  bool uses_tpukernel_api_{false};
   int rvt_direct_call_count_{0};
-  int ppl_extern_count_{0};
+  int tpukernel_extern_count_{0};
+  std::string target_chip_;
+  std::string target_programming_model_;
 
   DictAttrs f_attrs;
   std::vector<std::pair<tir::Var, Range>> loop_var_ranges_;

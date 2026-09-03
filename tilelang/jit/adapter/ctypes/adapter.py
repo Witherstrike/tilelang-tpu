@@ -17,7 +17,12 @@ from tilelang.jit.adapter.tpu import (
     make_tpu_forward,
     reject_unverified_tpu_database_artifact,
 )
-from tilelang.engine.tpu_config import TPUCompileConfig, resolve_tpu_compile_config
+from tilelang.engine.tpu_config import (
+    bind_tpu_target,
+    get_tpu_target_chip,
+    TPUCompileConfig,
+    resolve_tpu_compile_config,
+)
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 
@@ -95,7 +100,13 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
         self.target = Target.canon_target(determine_target(target))
         self.verbose = verbose
-        self.tpu_config = tpu_config or resolve_tpu_compile_config()
+        self.tpu_config = None
+        if is_tpu_target(self.target):
+            self.tpu_config = tpu_config or resolve_tpu_compile_config(
+                target_chip=get_tpu_target_chip(self.target))
+            self.target = bind_tpu_target(self.target, self.tpu_config)
+        elif tpu_config is not None:
+            raise ValueError("TPU configuration can only be used with target='tpu'")
         self.lib_generator = LibraryGenerator(self.target, tpu_config=self.tpu_config)
         self.wrapper = TLWrapper(
             self.target, tpu_workspace_dir=self.lib_generator.tpu_workspace_dir)
@@ -158,7 +169,13 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
         adapter.target = Target.canon_target(determine_target(target))
         adapter.verbose = verbose
-        adapter.tpu_config = tpu_config or resolve_tpu_compile_config()
+        adapter.tpu_config = None
+        if is_tpu_target(adapter.target):
+            adapter.tpu_config = tpu_config or resolve_tpu_compile_config(
+                target_chip=get_tpu_target_chip(adapter.target))
+            adapter.target = bind_tpu_target(adapter.target, adapter.tpu_config)
+        elif tpu_config is not None:
+            raise ValueError("TPU configuration can only be used with target='tpu'")
         reject_unverified_tpu_database_artifact(adapter.target)
         adapter.lib_generator = LibraryGenerator(adapter.target, tpu_config=adapter.tpu_config)
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
