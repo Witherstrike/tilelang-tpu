@@ -181,9 +181,10 @@ class LibraryGenerator(object):
 
     @staticmethod
     def _ppl_compile_flags(layout: PPLLayout, src_dir: str):
-        definitions = [f"-D{definition}" for definition in layout.compile_definitions]
-        if layout.release == "1.7":
-            definitions.append("-DTILELANG_PPL_HELPER_HAS_GET_DTYPE")
+        definitions = [
+            *(f"-D{definition}" for definition in layout.compile_definitions),
+            "-DTILELANG_PPL_HELPER_HAS_GET_DTYPE",
+        ]
         includes = [f"-I{path}" for path in layout.include_dirs]
         include_dir = os.path.join(src_dir, "include")
         if os.path.isdir(include_dir):
@@ -229,7 +230,7 @@ class LibraryGenerator(object):
         self._run_tpu_command(
             ["g++", "-shared", "-fPIC", "-Wl,--no-undefined", "-o",
              os.path.join(src_dir, "main.so"), kernel_host_o, main_o,
-             f"-L{layout.runtime_lib}", "-L/opt/tpuv7/tpuv7-current/lib",
+             f"-L{layout.runtime_lib}",
              f"-Wl,-rpath,{layout.runtime_lib}", "-ltpuv7_rt", "-lpthread"],
             "Link PCIe main.so", timeout)
         os.environ["PPL_KERNEL_PATH"] = libkernel
@@ -254,7 +255,7 @@ class LibraryGenerator(object):
         # non-existent cores before the first kernel can complete.
         os.environ["TPU_RT_CORE_NUM"] = str(layout.max_core_num)
 
-        logger.info("Compiling TPU cmodel kernel for %s (%s layout)", layout.arch, layout.release)
+        logger.info("Compiling TPU cmodel kernel for PPL 1.7 architecture %s", layout.arch)
         self._prepare_cmodel_kernel_source(kernel_c)
         self._run_tpu_command(
             ["/usr/bin/c++", *common, "-std=c++17", "-c",

@@ -1,6 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-"""Resolve SDK paths across the legacy and PPL 1.7 release layouts."""
+"""Resolve paths in the supported PPL 1.7 SDK release layout."""
 
 from dataclasses import dataclass
 import json
@@ -10,7 +10,6 @@ from typing import Tuple
 
 @dataclass(frozen=True)
 class PPLLayout:
-    release: str
     logical_chip: str
     arch: str
     max_core_num: int
@@ -60,6 +59,7 @@ def _require_paths(layout: PPLLayout) -> PPLLayout:
         "chip backend libraries": layout.backend_lib,
         "ppl_helper.c": layout.ppl_helper_source,
         "TPUv7 emulator": layout.emulator_library,
+        "firmware archive": layout.firmware_archive,
     }
     missing = [f"{name}: {path}" for name, path in required.items() if not path.exists()]
     if missing:
@@ -68,58 +68,51 @@ def _require_paths(layout: PPLLayout) -> PPLLayout:
 
 
 def resolve_ppl_layout(ppl_root: str, logical_chip: str = "bm1690") -> PPLLayout:
-    """Return paths for either a PPL 1.7 release or the legacy SDK layout."""
+    """Return the PPL 1.7 toolchain paths for ``logical_chip``.
+
+    TileLang-TPU deliberately supports only the PPL 1.7 ``deps/`` release
+    layout. Keeping one layout avoids silently compiling a kernel with a
+    legacy header/library mixture after the SDK has been upgraded.
+    """
     root = Path(ppl_root).expanduser().resolve()
     chip_map_path = root / "deps/chip/chip_map.json"
-    if chip_map_path.is_file():
-        chip_map = json.loads(chip_map_path.read_text(encoding="utf-8"))
-        if logical_chip not in chip_map:
-            raise ValueError(f"Chip {logical_chip!r} is not present in {chip_map_path}")
-        arch = chip_map[logical_chip]
-        chip_root = root / "deps/chip" / arch
-        runtime_root = root / "deps/runtime/tpuv7-runtime"
-        common_root = root / "deps/common"
-        definitions = _PPL_17_CHIP_DEFINITIONS.get(arch, (f"__{arch}__",))
-        return _require_paths(
-            PPLLayout(
-                release="1.7",
-                logical_chip=logical_chip,
-                arch=arch,
-                max_core_num=_PPL_17_MAX_CORE_NUM.get(arch, 1),
-                compile_definitions=definitions,
-                kernel_include=chip_root / "TPU1686/kernel/include",
-                kernel_common_include=common_root / "dev/kernel",
-                device_utils_include=common_root / "dev/utils/include",
-                host_include=common_root / "host/include",
-                runtime_include=runtime_root / "include",
-                runtime_lib=runtime_root / "lib",
-                backend_lib=chip_root / "lib",
-                ppl_helper_source=common_root / "dev/utils/src/ppl_helper.c",
-                emulator_library=chip_root / "lib/libtpuv7_emulator.so",
-                firmware_archive=chip_root / "lib/libfirmware_core.a",
-                toolchain_dir=root / "third_party/toolchains_dir"
-                / "Xuantie-900-gcc-linux-5.10.4-glibc-x86_64-V2.6.1",
-            ))
+    if not chip_map_path.is_file():
+        raise FileNotFoundError(
+            "PPL 1.7 SDK layout is required; expected chip map at "
+            f"{chip_map_path}. The legacy PPL runtime/ layout is unsupported."
+        )
 
-    chip_root = root / "runtime" / logical_chip
-    emulator_root = chip_root / "tpuv7-runtime-emulator"
+    try:
+        chip_map = json.loads(chip_map_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid PPL 1.7 chip map: {chip_map_path}") from exc
+    if not isinstance(chip_map, dict) or logical_chip not in chip_map:
+        raise ValueError(f"Chip {logical_chip!r} is not present in {chip_map_path}")
+
+    arch = chip_map[logical_chip]
+    if not isinstance(arch, str):
+        raise ValueError(f"Invalid architecture for chip {logical_chip!r} in {chip_map_path}")
+
+    chip_root = root / "deps/chip" / arch
+    runtime_root = root / "deps/runtime/tpuv7-runtime"
+    common_root = root / "deps/common"
+    definitions = _PPL_17_CHIP_DEFINITIONS.get(arch, (f"__{arch}__",))
     return _require_paths(
         PPLLayout(
-            release="legacy",
             logical_chip=logical_chip,
-            arch=logical_chip,
-            max_core_num=8 if logical_chip == "bm1690" else 1,
-            compile_definitions=(f"__{logical_chip}__",),
+            arch=arch,
+            max_core_num=_PPL_17_MAX_CORE_NUM.get(arch, 1),
+            compile_definitions=definitions,
             kernel_include=chip_root / "TPU1686/kernel/include",
-            kernel_common_include=root / "runtime/kernel",
-            device_utils_include=root / "runtime/customize/include",
-            host_include=root / "runtime/customize/include",
-            runtime_include=emulator_root / "include",
-            runtime_lib=emulator_root / "lib",
+            kernel_common_include=common_root / "dev/kernel",
+            device_utils_include=common_root / "dev/utils/include",
+            host_include=common_root / "host/include",
+            runtime_include=runtime_root / "include",
+            runtime_lib=runtime_root / "lib",
             backend_lib=chip_root / "lib",
-            ppl_helper_source=root / "runtime/customize/src/ppl_helper.c",
-            emulator_library=emulator_root / "lib/libtpuv7_emulator.so",
-            firmware_archive=chip_root / "lib" / f"lib{logical_chip}.a",
+            ppl_helper_source=common_root / "dev/utils/src/ppl_helper.c",
+            emulator_library=chip_root / "lib/libtpuv7_emulator.so",
+            firmware_archive=chip_root / "lib/libfirmware_core.a",
             toolchain_dir=root / "third_party/toolchains_dir"
             / "Xuantie-900-gcc-linux-5.10.4-glibc-x86_64-V2.6.1",
         ))
