@@ -1,4 +1,7 @@
 #include <tpuv7_rt.h>
+#ifdef TILELANG_TPU_PCIE
+#include <tpuDNN.h>
+#endif
 #include "kernel.h"
 #include <algorithm>
 #include <cerrno>
@@ -15,6 +18,81 @@ tpuRtStream_t stream = nullptr;
 tpuRtKernelModule_t tpu_module = nullptr;
 static std::mutex tilelang_tpu_profile_mutex;
 static int tilelang_tpu_expected_device_id = -1;
+#ifdef TILELANG_TPU_PCIE
+static bool tilelang_tpu_pcie_profile_consumed = false;
+#endif
+
+static bool tilelang_tpu_env_is_one(const char* name) {{
+  const char* value = std::getenv(name);
+  return value != nullptr && std::strcmp(value, "1") == 0;
+}}
+
+#ifdef TILELANG_TPU_PCIE
+static bool tilelang_tpu_parse_profile_integer(
+    const char* name, int minimum, int* result) {{
+  const char* value = std::getenv(name);
+  if (value == nullptr || *value == '\0') {{
+    return false;
+  }}
+  char* end = nullptr;
+  errno = 0;
+  const long parsed = std::strtol(value, &end, 10);
+  if (errno != 0 || end == value || *end != '\0' || parsed < minimum ||
+      parsed > std::numeric_limits<int>::max()) {{
+    return false;
+  }}
+  *result = static_cast<int>(parsed);
+  return true;
+}}
+
+// PPL 1.7's PCIe profiler records commands through a TPUDNN handle wrapping
+// the same runtime stream and module used by the kernel launch.  Keep this
+// path dormant unless the isolated profiler supplies every explicit gate.
+static int tilelang_tpu_begin_pcie_profile(tpudnnHandle_t* handle) {{
+  if (!tilelang_tpu_env_is_one("TILELANG_TPU_PROFILE_SESSION")) {{
+    return 0;
+  }}
+  const char* runtime_mode = std::getenv("TILELANG_TPU_PROFILE_RUNTIME_MODE");
+  if (runtime_mode == nullptr || std::strcmp(runtime_mode, "pcie") != 0 ||
+      !tilelang_tpu_env_is_one("TILELANG_TPU_ALLOW_PCIE_LOAD") ||
+      !tilelang_tpu_env_is_one("TILELANG_TPU_ALLOW_PCIE_PROFILE") ||
+      !tilelang_tpu_env_is_one("BMLIB_ENABLE_ALL_PROFILE")) {{
+    std::cerr << "Incomplete TileLang PCIe profiling authorization.\n";
+    return -11;
+  }}
+  {{
+    std::lock_guard<std::mutex> lock(tilelang_tpu_profile_mutex);
+    if (tilelang_tpu_pcie_profile_consumed) {{
+      std::cerr << "A PCIe profiling artifact permits exactly one run.\n";
+      return -16;
+    }}
+    // Consume the attempt before touching TPUDNN. A failed recorder setup is
+    // not safe to retry in the same process/runtime instance.
+    tilelang_tpu_pcie_profile_consumed = true;
+  }}
+  int record_size = 0;
+  int book_keeping = 0;
+  if (!tilelang_tpu_parse_profile_integer(
+          "PROFILE_RECORD_SIZE", 1, &record_size) ||
+      !tilelang_tpu_parse_profile_integer(
+          "PROFILE_BOOK_KEEPING", 0, &book_keeping)) {{
+    std::cerr << "Invalid TileLang PCIe profiling record configuration.\n";
+    return -12;
+  }}
+  *handle = tpudnnHandleFromStream(
+      tilelang_tpu_expected_device_id, stream, tpu_module);
+  if (*handle == nullptr) {{
+    return -13;
+  }}
+  if (tpudnnEnableProfile(*handle, record_size, book_keeping) !=
+      TPUDNN_STATUS_SUCCESS) {{
+    tpudnnDestroy(*handle);
+    *handle = nullptr;
+    return -14;
+  }}
+  return 1;
+}}
+#endif
 
 // LibraryGenerator calls this immediately after dlopen, before tilelang_tpu_run
 // can initialize the vendor runtime.  Keep the expected device inside main.so
@@ -152,6 +230,12 @@ extern "C" int tilelang_tpu_run(void** args) {{
   if (status != 0) {{
     return status;
   }}
+  const bool profile_session =
+      tilelang_tpu_env_is_one("TILELANG_TPU_PROFILE_SESSION");
+#ifdef TILELANG_TPU_PCIE
+  tpudnnHandle_t profile_handle = nullptr;
+  bool pcie_profile_enabled = false;
+#endif
 
   // Device pointers are initialized so cleanup remains safe after a partial
   // allocation or transfer failure.
@@ -167,9 +251,30 @@ extern "C" int tilelang_tpu_run(void** args) {{
       break;
     }}
 
+#ifdef TILELANG_TPU_PCIE
+    const int profile_state = tilelang_tpu_begin_pcie_profile(&profile_handle);
+    if (profile_state < 0) {{
+      status = profile_state;
+      break;
+    }}
+    pcie_profile_enabled = profile_state > 0;
+#endif
+
     auto start = std::chrono::high_resolution_clock::now();
 {kernel_call}
     auto end = std::chrono::high_resolution_clock::now();
+#ifdef TILELANG_TPU_PCIE
+    if (pcie_profile_enabled) {{
+      const tpudnnStatus_t sync_status = tpudnnSync(profile_handle);
+      const tpudnnStatus_t disable_status = tpudnnDisableProfile(profile_handle);
+      pcie_profile_enabled = false;
+      if (sync_status != TPUDNN_STATUS_SUCCESS ||
+          disable_status != TPUDNN_STATUS_SUCCESS) {{
+        status = -15;
+        break;
+      }}
+    }}
+#endif
     if (rst != 0) {{
       std::cerr << "kernel_launch failed: " << rst << "\n";
       status = rst;
@@ -186,8 +291,11 @@ extern "C" int tilelang_tpu_run(void** args) {{
     // Benchmarking is opt-in. Its default is zero extra launches for both
     // CModel and PCIe, so a first PCIe smoke remains exactly one dispatch.
     int measure_runs = 0;
-    if (const char* value = std::getenv("TILELANG_TPU_BENCHMARK_RUNS")) {{
-      measure_runs = std::max(0, std::atoi(value));
+    if (!profile_session) {{
+      const char* value = std::getenv("TILELANG_TPU_BENCHMARK_RUNS");
+      if (value != nullptr) {{
+        measure_runs = std::max(0, std::atoi(value));
+      }}
     }}
     if (measure_runs > 0) {{
       const int warmup_runs = std::min(5, measure_runs);
@@ -242,5 +350,11 @@ extern "C" int tilelang_tpu_run(void** args) {{
 
 {free_statements}
   post();
+#ifdef TILELANG_TPU_PCIE
+  if (profile_handle != nullptr) {{
+    tpudnnDestroy(profile_handle);
+    profile_handle = nullptr;
+  }}
+#endif
   return status;
 }}

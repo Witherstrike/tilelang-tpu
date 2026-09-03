@@ -26,7 +26,9 @@ from tilelang.jit.adapter.tpu_profiling import (
     parse_cmodel_raw_instruction_dumps,
     parse_perfai_instruction_timings,
     parse_perfai_timeline_events,
+    parse_pcie_decoded_instruction_timings,
     run_tpu_cmodel_profile,
+    run_tpu_pcie_profile,
 )
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS, is_tpu_target_spec
 from tilelang.cache import cached

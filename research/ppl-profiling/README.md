@@ -1,224 +1,283 @@
 # TileLang-TPU 的 PPL 指令 Profiling 设计与实现
 
-> 本文记录 PPL 1.7 profiling 机制、TileLang-TPU 的接入边界，以及验收标准。
-> 这里的“指令耗时”专指 PerfAI 解码出的 TPU 命令引擎时间线；CModel 原始 dump
-> 本身不包含可靠的 begin/end 时间，不能把它伪装成耗时数据。
+本文说明为什么需要独立 profiling 模块、PPL 1.7 的真实工作机制、TileLang-TPU 的
+CModel/PCIe 实现、使用方式、安全边界与 2026-09-03 的实测结论。
 
-## 1. 结论
+这里严格区分三类时间：host wall time、原始命令记录、解码后的设备指令时间。只有最后一类
+可以回答“某条 TIU/GDMA 指令用了多久”。
 
-TileLang 不应把 PPL 的 `ppl_compile.py --profiling` 或 `--autotune` 原样塞进 JIT。
-TileLang 已经直接生成 PPL `kernel.c`，不是 PPL 前端的 `.pl` 输入；PPL 的前端开关会
-调用原生 `ppl-compile --autotune`，生成 PPL 专属的 autotune host glue。直接复用该开关会
-重复/错配代码生成，而不会给现有 TileLang host ABI 正确添加 profiling。
+## 1. 当前结论
 
-可复用的是 PPL 的运行时协议：
+| 路径 | 已实现 | 本机证据 | 仍有限制 |
+| --- | --- | --- | --- |
+| SG2260E + TPU-Kernel + CModel | `FILE_DUMP_CMD`、四核设置、raw/.txt 解析、可选 PerfAI | 64×64 FP16 matmul 数值通过；24 个 raw 工件、78 条文本命令 | 本机 SDK 未附 CModel PerfAI，因此没有 CModel 真实逐指令时间 |
+| SG2260E + RV + CModel | 同一隔离收集框架 | `rvt_kernel_start → rvt_sync_all` 成功；24 个 raw 工件、48 条控制命令 | 这是控制路径，不是 RV tensor arithmetic 数值证明 |
+| SG2260E + TPU-Kernel + PCIe | TPUDNN recorder、单次 dispatch、raw 收集、`bigTpuProfile` JSON 投影 | device 0 数值通过；四核 PMU 记录；真实解码 36 条设备命令 | 只验证一个 matmul；profiling 开销下的 host 时间不能作 kernel 性能值 |
+| SG2260E + RV + PCIe | 与 TPU-Kernel 共用 TPUDNN host 路径 | RV 控制 kernel 成功；四核 recorder 工件生成 | decoder 会去掉系统控制命令，因而该 case 没有 tensor 指令 timing；仍需 descriptor 完整的 RV 数值 case |
+
+因此，profiling 已经在 CModel 和 PCIe 两端实际发挥作用。PCIe 端还完成了真实逐指令解码；
+RV 控制 case 证明了 RV host/recorder 路径，不应被夸大成 RV tensor 指令性能验证。
+
+## 2. 为什么不能直接给 JIT 加 `--profiling`
+
+PPL 1.7 的 `ppl_compile.py --profiling` 已是 `--autotune` 的兼容别名。它做的不只是“编译时
+打开一个宏”，而是完整的 PPL 前端流程：生成 autotune host glue、编译、运行、收集和后处理。
+
+TileLang 已直接生成 PPL `kernel.c`、host wrapper 与 `main.so`，输入不是 PPL `.pl`。照搬该
+开关会重复或错配 codegen，也无法自动把 TPUDNN profile session 接到 TileLang 自己的
+`tpuRtKernelLaunch` 上。
+
+正确的迁移边界是复用 PPL 的运行时协议：
 
 ```text
-fresh CModel test worker
-  └─ FILE_DUMP_CMD=<relative label>
-       └─ CModel raw BD/GDMA/SDMA dump + .txt sidecar
-            └─ explicit external PerfAI AutoRunner
-                 └─ PerfWeb/profile_data.js
-                      ├─ all timeline events
-                      └─ recognized TPU command lanes → per-command duration
+CModel:
+  fresh worker + FILE_DUMP_CMD
+    → BD/GDMA/SDMA raw 与文本 sidecar
+      → 可选 PerfAI AutoRunner
+        → profile_data.js → 逐命令时间
+
+PCIe / TPUv7:
+  fresh worker + 三重授权
+    → tpudnnHandleFromStream(现有 device/stream/module)
+      → tpudnnEnableProfile
+        → 恰好一次 TileLang run/launch/sync
+      → tpudnnDisableProfile
+    → cdm_profile_data_dev*
+      → 已安装的 bigTpuProfile 离线解码
+        → TileLang 稳定 JSON → 逐命令时间
 ```
 
-首版实现提供独立的 `TPUInstructionProfiler`，而不是复用 CUDA-only 的
-`tilelang.profiler.Profiler`。后者依赖 CUDA Event 与 `torch.cuda.synchronize()`，不适合
-TPU runtime。
+这也是独立 `TPUInstructionProfiler` 的原因。现有通用 `tilelang.profiler.Profiler` 依赖
+CUDA Event 和 `torch.cuda.synchronize()`；把它用于 TPU 会混淆 runtime、同步和计时含义。
 
-## 2. 对 PPL `--profiling` 的审阅
+## 3. 模块职责与实现原理
 
-本机 PPL 1.7 的 `python/tool/ppl_compile.py` 有以下行为：
+| 组件 | 职责 |
+| --- | --- |
+| `tilelang/jit/adapter/tpu_profiling.py` | 配置校验、隔离 worker、deadline、raw 工件发现、CModel/PCIe 解码结果归一化 |
+| `tilelang/jit/_tpu_profile_supervisor.py` | Linux parent-death 与整进程组清理，防止 vendor worker 成为孤儿 |
+| `tilelang/jit/_tpu_pcie_profile_decoder.py` | 离线调用已安装的 `bigTpuProfile`；绝不自动安装包；输出稳定 JSON |
+| `src/tl_templates/tpu/main_template.cpp` | PCIe profile 会话内建立 TPUDNN handle，执行 enable/sync/disable；普通运行不启用 |
+| `tilelang/jit/adapter/ppl_layout.py` | 解析 PPL 1.7 SDK，并明确分开 CModel runtime 与安装在 `/opt` 的 PCIe board runtime |
+| `tilelang/jit/adapter/libgen.py` | PCIe host 链接 board `libtpuv7_rt.so` 与 PPL chip backend 的 `libtpudnn.so` |
+| `testing/python/jit/tpu_profile_worker.py` | 在子进程中 fresh-compile、加载、数值验证和 dispatch，不复用外部 `main.so` |
 
-| PPL 行为 | 实际含义 | TileLang 处理 |
-| --- | --- | --- |
-| `--profiling` | 已弃用的 `--autotune` 入口。 | 不新增同名 JIT 编译选项。 |
-| `--profiling` / `--autotune` | 先运行 native `ppl-compile --autotune`，再 build 与 profile。 | 不移植前端 codegen；TileLang 自己已经生成 kernel/host 源。 |
-| CModel autotuner | 一次 call + sync 前设置 `FILE_DUMP_CMD`，之后清除。 | 在一个新的 CModel 子进程中设置相同环境契约。 |
-| CModel 后处理 | 在 PerfAI 中运行 `AutoRunner.sh -d <raw-dir> -e <chip>`。 | 仅在用户明确提供可执行 PerfAI 时运行；绝不自动安装 Python 包或下载工具。 |
-| PCIe autotuner | TPUv7 用 `tpudnnEnableProfile`/sync/`tpudnnDisableProfile`。 | 当前不实现、更不执行 PCIe profile；见第 6 节。 |
+### 3.1 统一配置，而不是另建芯片表
 
-PPL 的 `profiling_parser.py` 只打印 `summary_data` 聚合项。逐命令数据实际在 PerfAI
-的 `PerfWeb/profile_data.js` 的 `time_data` 中；因此本实现解析该时间线，而不把总时间
-误当成单条指令耗时。
+`TPUProfilingConfig` 内部使用 `TPUCompileConfig` 校验并规范化三条独立轴：
 
-## 3. 接口与数据模型
+- `chip`: `bm1690` / `sg2260e`；
+- `device_mode`: `tpukernel` / `rv`；旧 `atomic` 只在 API 边界兼容并立即归一化；
+- `runtime_mode`: `cmodel` / `pcie`。
+
+核数同样来自 `TPUChipSpec`：BM1690 为 8，SG2260E 为 4。profiling 不维护第二份映射。
+
+### 3.2 CModel 收集
+
+CModel worker 在自己的 cwd 中运行，使用安全的相对 `FILE_DUMP_CMD=<label>`。profiler 同时
+设置 `TPU_RT_CORE_NUM=4`（SG2260E）、`TILELANG_TPU_BENCHMARK_RUNS=0`，并删除父环境中
+可能遗留的全部 PCIe 授权。raw `.txt` 只提供 engine/core/command-id/opcode；它没有可靠
+begin/end，模块不会伪造 duration。
+
+如果显式配置 `perfai_root` 或 `PPL_PERFAI_ROOT`，则运行
+`AutoRunner.sh -d <session-dir> -e <vendor-chip>`。解析器保留完整 `timeline_events`，并只把
+`bd/bdc/tiu/gdma/sdma/vsdma/cdma/dma` 通道放入 `instruction_timings`，避免把 CPU、layer
+或 subnet 行冒充硬件指令。
+
+### 3.3 PCIe 收集
+
+PCIe 必须同时满足：
+
+1. `TILELANG_TPU_ALLOW_PCIE_LOAD=1`；
+2. `TILELANG_TPU_ALLOW_PCIE_PROFILE=1`；
+3. `TILELANG_TPU_DEVICE_ID=<非负整数>`。
+
+`run_pcie()` 再注入 `BMLIB_ENABLE_ALL_PROFILE=1`、`PROFILE_RECORD_SIZE`、
+`PROFILE_BOOK_KEEPING` 和内部的 `TILELANG_TPU_PROFILE_SESSION=1`。只设置前三个 vendor
+环境变量并不能 profiling；真正的 recorder 生命周期在生成的 host 中：
+
+```text
+H2D 完成
+  → tpudnnHandleFromStream(device_id, stream, tpu_module)
+  → tpudnnEnableProfile(record_size, book_keeping)
+  → kernel call（内部 launch + sync）
+  → tpudnnSync
+  → tpudnnDisableProfile
+  → D2H / cleanup
+```
+
+profile artifact 在同一 `main.so` 中只能消费一次。第一次 recorder 建立失败也不允许在同一
+runtime 实例中重试；要重新 fresh-compile 并启动新 worker。这把“恰好一次”从测试约定提升为
+host ABI 的 fail-closed 约束。
+
+### 3.4 为什么 PCIe runtime 必须与 SDK CModel runtime 分开
+
+PPL 1.7 `deps/runtime/tpuv7-runtime/lib/libtpuv7_rt.so` 依赖
+`libcdm_daemon_emulator.so`，是 SDK 的模拟器链；PCIe 执行使用
+`/opt/tpuv7/tpuv7-current/lib/libtpuv7_rt.so`。头文件和 `libtpudnn.so` 仍来自统一的 PPL
+1.7 `deps/` 布局。
+
+首次板端验证暴露了旧 TileLang PCIe link 仍固定 SDK runtime、并强制链接
+`libcdm_daemon_emulator`：日志进入 AP/CModel 内存初始化并以 255 退出。修正后：
+
+- PCIe 编译延迟检查安装的 board runtime；可用
+  `TILELANG_TPU_PCIE_RUNTIME_PATH` 指向非标准安装的 `lib` 目录；
+- 明确拒绝把该变量指回 SDK CModel runtime；
+- PCIe `main.so` 的 RPATH 是 board runtime + PPL chip backend；
+- 不再链接 `libcdm_daemon_emulator.so`；
+- 编译时解析出的 runtime identity 随私有 artifact 固化，加载时不因环境变化而漂移。
+
+这一修复也是 PCIe profiling 能真实工作的必要条件，不只是链接整理。
+
+### 3.5 PCIe 离线解码与版本兼容
+
+PPL 1.7 的 `autotune.py` 假定旧版 `bigTpuProfile` 有 `to_txt()`，并在缺包时自动调用 pip。
+当前可获得的 `bigTpuProfile 0.3.4` 已改为 `parse()` 返回结构化 `ProfileResult`，而其内置
+PerfAI Web 文件并不完整。TileLang 因而采用两层兼容：
+
+- 新 API：直接读取 `bd_events/gdma_events/sdma_events/cdma_events`，写
+  `tilelang_pcie_profile.json`；
+- 旧 API：若存在 `to_txt()` 和 PerfAI Web，则保留 PPL 1.7 的导出链并解析
+  `profile_data.js`。
+
+两条路径都不自动安装或升级包。稳定 JSON 保存 engine、begin/end、`ns` 单位、core、command
+id、opcode，以及 vendor 的原始 info/detail/metadata。这样上层报告不依赖 PerfAI UI 的文件
+布局变化。
+
+## 4. 使用方法
+
+### 4.1 CModel
 
 ```python
-from tilelang.jit import (
-    TPUInstructionProfiler,
-    TPUProfilingConfig,
-)
+from tilelang.jit import TPUInstructionProfiler, TPUProfilingConfig
 
 config = TPUProfilingConfig(
     chip="sg2260e",
-    device_mode="tpukernel",      # 或 rv；与物理 chip 组合会校验
+    device_mode="rv",             # 或 tpukernel
     runtime_mode="cmodel",
-    output_dir="/tmp/tilelang-profiles",  # 每次运行创建新子目录
-    label="matmul",
+    output_dir="./profiles",
+    label="rv-control",
     timeout_s=60,
-    perfai_root="/opt/PerfAI",    # 可选；不提供时保留 raw trace
+    perfai_root="/path/to/PerfAI",  # 可选
 )
 report = TPUInstructionProfiler(config).run_cmodel(
-    command=["/path/to/python", "/path/to/fresh_compile_worker.py"],
+    ["/path/to/python", "/path/to/fresh_worker.py"],
+    environment={"PPL_PROJECT_ROOT": "/path/to/ppl-1.7"},
+)
+```
+
+### 4.2 PCIe
+
+```python
+config = TPUProfilingConfig(
+    chip="sg2260e",
+    device_mode="tpukernel",      # 或 rv
+    runtime_mode="pcie",
+    output_dir="./profiles",
+    label="matmul-on-board",
+    timeout_s=60,
+)
+report = TPUInstructionProfiler(config).run_pcie(
+    ["/path/to/python", "/path/to/fresh_worker.py"],
     environment={
         "PPL_PROJECT_ROOT": "/path/to/ppl-1.7",
-        "PYTHONPATH": "...",
-        "LD_LIBRARY_PATH": "...",
+        "TILELANG_TPU_ALLOW_PCIE_LOAD": "1",
+        "TILELANG_TPU_ALLOW_PCIE_PROFILE": "1",
+        "TILELANG_TPU_DEVICE_ID": "0",
     },
 )
 ```
 
-`command` 是可信的测试 worker：它必须在子进程内 fresh-compile 并加载自己的私有
-TileLang TPU artifact，不能加载缓存/数据库/其他 JIT 实例遗留的 `main.so`。profiler
-会写入 `TILELANG_TPU_PROFILE_CHIP`、`...DEVICE_MODE`、`...RUNTIME_MODE`，供受控 test
-worker 显式传给 `tilelang.compile`；它不尝试从任意外部命令反向推断实际编译配置。
+`command` 必须是可信 worker，并在该子进程中编译/加载自己的私有 TileLang artifact。profiler
+无法阻止恶意命令主动 `setsid()` 或 daemonize；这类逃离受控进程组的行为不受支持。
 
-`TPUProfileReport` 分三层保存证据：
+未指定 `output_dir` 时，结果保存在当前工作目录的 `tilelang-tpu-profiles/<label>-*`，不再默认
+写入 `/tmp`。每次会话创建新子目录，不删除历史报告。
 
-| 字段 | 可信含义 |
+## 5. 报告字段与状态
+
+| 字段 | 含义 |
 | --- | --- |
-| `raw_trace_files` / `raw_instructions` | CModel 原始命令及其 core、command id、opcode；没有制造耗时。 |
-| `timeline_events` | PerfAI 的完整时间线，包含 host、subnet、layer、TPU 命令等。 |
-| `instruction_timings` | 仅 `bd/bdc/tiu/gdma/sdma/vsdma/cdma/dma` 命令通道；包含 begin、end、duration、unit 和原始字段。 |
+| `raw_trace_files` | CModel raw 文件，或 PCIe 的 `cdm_profile_data_dev*` 文件/目录 |
+| `raw_instructions` | CModel 文本 sidecar 中可识别的命令；没有时间值 |
+| `decoded_report_paths` | PCIe `bigTpuProfile` 的稳定 JSON 投影 |
+| `perfai_report_paths` | CModel/旧 PCIe 链的 `profile_data.js` |
+| `timeline_events` | 可用时间线的完整事件；PCIe 稳定 JSON 当前只含设备命令 |
+| `instruction_timings` | 设备命令的 engine/core/id/opcode/begin/end/duration/unit |
 
-不同 PerfAI 版本的附加列不完全相同。解析器保留完整 `fields`，并只在列名或 PPL
-历史格式 `func_type="bd_id=…"`/`"gdma_id=…"` 足够明确时投影 `core_id`、`command_id`
-和 `opcode`。命令关联是 best-effort；跨 core 或多次 launch 时不能只按 id 做全局唯一键。
+常见 `parser_status`：
 
-## 4. CModel 安全与可复现性
+- `ready`：真实 decoder 报告存在且至少有一条设备命令；
+- `not-requested`：`postprocess=False`；
+- `unavailable`：外部 decoder 不存在；raw 仍保留；
+- `no-raw-trace`：worker 成功但 recorder 没有产物；
+- `no-device-command-events`：decoder 成功，但 case 只有被过滤的控制/系统命令；
+- `busy` / `timed-out` / `deadline-exhausted`：并发锁或总 deadline 阻止后处理；
+- `failed` / `missing-report` / `invalid-report`：外部工具或 schema 错误。
 
-每次 profile 会话都使用独立临时结果目录和 cwd；父进程的 cwd 和环境变量不会改变。
-Linux 上它还使用下列受监督的进程树，而不是让 CModel/PerfAI worker 成为无父孤儿：
+## 6. 进程安全、并发和清理
 
 ```text
-outer watchdog
+外层 timeout
   └─ pytest / profiler P
-       └─ private-session supervisor S (PR_SET_PDEATHSIG=SIGTERM)
-            └─ fresh worker 或 AutoRunner（与 S 同一 private process group）
-                 └─ 常规 compiler / emulator / parser 子孙
+       └─ supervisor S（PR_SET_PDEATHSIG=SIGTERM，private process group）
+            └─ fresh JIT worker 或离线 decoder
+                 └─ compiler / runtime / parser 子孙
 ```
 
-`S` 位于 `tilelang/jit/_tpu_profile_supervisor.py`。这是 Linux-only 的安全契约：没有
-`PR_SET_PDEATHSIG` 的平台会拒绝启动 detached profile worker。它在 exec 后以预期的 P pid 做
-`getppid → prctl(PR_SET_PDEATHSIG) → getppid` 双检、安装信号处理器后再复检，关闭父进程
-在 setup 期间退出的竞态。P 的内部超时向 S 的 process group 发 `SIGTERM`；P 被外层
-watchdog 杀掉时，内核也向 S 发 `SIGTERM`。两种情况都会由 S 对**自己的整个 group**发
-`SIGKILL`，因此 worker 与普通子孙会一起停止。普通 profile command 的约束是不得主动
-`setsid()`、daemonize 或逃离 process group；这类主动脱离的后代不能由标准 `killpg` 保证
-清理，不能作为受支持的 worker 形态。
+内部 `timeout_s` 是 worker、CModel PerfAI 锁等待、AutoRunner 或 PCIe decoder 共用的绝对
+wall-clock deadline，不为每阶段重新计时。超时、KeyboardInterrupt 或父进程死亡时，
+supervisor 终止自己的整个进程组；opt-in 硬件测试在第一项失败后 `pytest.exit`，不继续下一项。
 
-一个 `timeout_s` 是 worker、PerfAI workspace lock 与 AutoRunner 这些**受监督外部进程
-阶段**共用的 absolute wall-clock deadline，不是每个阶段各有一次 60 秒；raw dump 的本地
-解析和日志写入发生在子进程已停止后，不把它伪称为严格受该预算约束。`KeyboardInterrupt`/
-测试取消等非正常 Python 路径也会先请求同样的 supervisor 清理。会话还会：
+CModel PerfAI 的 `auto_build` 是共享可变目录。TileLang 用按 PerfAI root 命名的 Linux 抽象
+Unix socket 串行化自身会话；socket 随进程退出自动释放，不产生旧版 `/tmp/*.lock` 残留。
 
-- 固定 `TILELANG_TPU_BENCHMARK_RUNS=0`，确保一次编译/一次 dispatch，避免 benchmark
-  循环污染 dump；
-- 设置与 chip 对应的 `TPU_RT_CORE_NUM`（BM1690 为 8，SG2260E 为 4）；
-- 清除继承的 `TILELANG_TPU_ALLOW_PCIE_LOAD`、`TILELANG_TPU_ALLOW_PCIE_PROFILE`、
-  `TILELANG_TPU_DEVICE_ID` 与 `BMLIB_ENABLE_ALL_PROFILE`，使 CModel worker 不能因父
-  环境意外沿用板卡授权；
-- 要求 `FILE_DUMP_CMD` 是相对、安全 label。实测 CModel 对绝对路径 label 不产生预期
-  raw dump，因此必须借由私有 cwd 定位输出。
+验证构建、pytest 基目录、下载到隔离目录的 decoder 依赖及 raw 工件均是中间证据，不纳入
+Git；完成报告后必须整体清理。仓库只保留实现、测试和本 README。
 
-PerfAI 不存在或未显式配置时，状态为 `unavailable`，但 raw artifacts 和 worker 日志会被
-保留。不要在这种情况下报告“每条指令耗时已经得到”。本机 PPL 1.7 包没有
-`third_party/PerfAI/AutoRunner.sh`，所以真实 PerfAI 耗时尚待外部工具到位后验收。
+## 7. 2026-09-03 验证记录
 
-PPL 自身在 PerfAI cwd 中使用 `auto_build`。TileLang 不复制其 `rm -rf auto_build` 行为；
-它会按 resolved PerfAI root 建立 host-temporary inter-process lock，串行化同机 TileLang
-profile session。直接运行 PPL/其他工具的用户仍必须与该 root 排他，直到 AutoRunner 的
-并发/工作目录契约在该版本中被实测确认。
+### 7.1 CModel
 
-## 5. 当前测试与验收标准
+- TPU-Kernel 64×64 FP16 matmul：数值 `allclose` 通过；24 个 raw 工件；78 条命令
+  （BD 30、GDMA 34、SDMA 14）。
+- RV control：`rvt_kernel_start → rvt_sync_all` 成功；24 个 raw 工件；48 条控制命令
+  （BD/GDMA/SDMA 各 16）。
 
-新增的 unit tests 覆盖：
+### 7.2 PCIe device 0
 
-- raw binary + `.txt` sidecar 的解析，包含 BD/GDMA command id/opcode；
-- CModel 私有 cwd、4-core 设置、PCIe gate 清理与 benchmark=0；
-- 显式 PerfAI fixture 的时间线解析、host 事件过滤、历史 `func_type` ID 格式；
-- RV 模式映射到 vendor PerfAI 名 `sg2260erv`（它不是新的 TileLang chip）；
-- 非法 BM1690+RV 配置、NaN/Infinity timeout、PCIe device id 越界；
-- CModel worker 超时后的进程组终止；
-- worker + PerfAI、worker + 被占用 PerfAI lock 共用一个总 deadline；
-- Linux parent-death 回归：强杀 controller 后，supervisor 同 group 的 worker 与普通
-  `sleep` 子孙都停止，避免 detached session 遗留。
+- TPU-Kernel matmul：数值通过；recorder 显示 core 0 为 TIU/GDMA/SDMA = 22/26/6，
+  core 1–3 各为 6/6/6；生成目录式 `cdm_profile_data_dev0-0/`。
+- 同一真实工件由 `bigTpuProfile 0.3.4` 解码为 36 条非系统设备命令：BDC 16、GDMA 20；
+  opcode 为 `tensorLd` 16、`MM2_NN` 8、`copy` 4、`data_convert` 4、`tensorSt` 4。
+  一次端到端复验的单条 duration 范围为 11–520 ns，合计 6358 ns。
+- RV control：板端成功；recorder 显示 core 0 为 8/8/8，core 1–3 各为 6/6/6；生成同样
+  的目录式 raw 工件。结构化 decoder 去掉系统/控制命令后为 0 条，这是 control-only case
+  的预期结果，不是 profiling 失效。
+- 端到端 `run_pcie → TPUDNN → raw directory → bigTpuProfile → stable JSON → report` 通过。
 
-已接入的真实 CModel case 默认不运行，避免普通 pytest 意外启动 vendor emulator。准备好
-PPL、TileLang runtime 和 pytest 后，使用外层 watchdog 显式启用：
+host 打印的单次时间约 8 ms，包含 runtime 调用和 profiling 开销，不能与上述设备命令 ns
+直接求和或当成无扰动性能。性能结论需要关闭 profiling 后的重复测量与统计设计。
 
-```bash
-setsid --wait timeout --kill-after=5s 60s \
-  env TILELANG_TPU_RUN_CMODEL_PROFILE=1 \
-      PPL_PROJECT_ROOT=/path/to/ppl-1.7 \
-      pytest testing/python/jit/test_tpu_profiling.py \
-      -k 'sg2260e and cmodel_profile_worker'
-```
+### 7.3 工程回归
 
-这两个 case 调用 `tpu_profile_worker.py`；worker 会读取 profile session 的
-`chip/device_mode/runtime_mode`，将其显式传给 `tilelang.compile`，然后在自己的进程内
-fresh-compile。它不是从环境猜测 target，也不会使用已有 JIT artifact。
+- layout、JIT adapter、RVT codegen/link 与 profiling 测试合计 `66 passed, 4 skipped`；skip
+  项仅是未显式授权的真实 CModel/PCIe 用例。
+- 随后显式启用两条 CModel 真实用例，结果为 `2 passed`：TPU-Kernel matmul 完成数值比较，
+  RV control 完成实际初始化、发射、同步和 raw 收集。
+- PCIe 真实用例使用外层 process-group timeout 与内部 supervisor；TPU-Kernel、RV control
+  均成功，因此未触发“首个失败即终止后续板端测试”的保护分支。完成后确认无 profiler、
+  pytest 或 vendor worker 残留进程。
 
-这条外层命令是最终 watchdog；profiling supervisor 是其内层父死亡联动。若 opt-in CModel
-worker 发生 `TPUProfilingError`，测试 helper 会在 worker tree 已清理后调用 `pytest.exit`，
-不继续执行后续 opt-in emulator case；若 pytest 本身失去响应，外层 watchdog 仍会杀掉其父
-进程并通过 supervisor 联动停止 child group。不要以手写 `setsid`/daemon worker 替代受控
-worker，也不要把此 CModel 机制推广为 PCIe dispatch。
+## 8. 尚未完成的工作
 
-本分支已经通过受控 worker 做了两次真实、隔离的 CModel 验证：
-
-| worker | 已验证证据 | 未覆盖范围 |
-| --- | --- | --- |
-| `tpukernel-matmul` | fresh-compile SG2260E FP16 64×64 matmul，数值 `allclose=True`；在新增 supervisor + 外层 60s watchdog 下复验，产生 24 个 raw artifact，解析 78 条命令（BD 30、GDMA 34、SDMA 14）。 | 无真实 PerfAI，因此没有 measured duration；不代表其他 dtype/shape、异步、多核或 PCIe。 |
-| `rv-control` | fresh-compile `rvt_kernel_start → rvt_sync_all`，worker 成功返回；在新增 supervisor + 外层 60s watchdog 下复验，产生 24 个 raw artifact，解析 48 条控制命令（BD/GDMA/SDMA 各 16）。 | 不是 RV tensor arithmetic 或 descriptor 数值验证。 |
-
-这证明 `FILE_DUMP_CMD` 与现有直接 `tpuRtKernelLaunch` host path 能收集 CModel 原始指令
-流；它不证明 PerfAI duration 解码，也不代表 RV tensor 数值或 PCIe profile 已成功。
-
-正式验收应依次满足：
-
-1. 受控 worker fresh-compile SG2260E TPU-Kernel 小算子，数值比对通过，且 `raw_instructions`
-   非空；
-2. 在已安装、独占的 PerfAI 上，`instruction_timings` 非空且带合理的 unit；
-3. RV 先只验 `rvt_kernel_start → rvt_sync_all` 的 CModel 控制路径和 trace；在 CR/TR/GR
-   descriptor 的数值链完整前，不把 `rvt_fadd` 当做 tensor 数值测试；
-4. PCIe 只做 profile host variant 的静态 compile/link；获得人工一次性授权后才单次板端
-   dispatch，并由新进程/超时看门狗控制。
-
-## 6. PCIe：明确未实现
-
-`pcie_profile_environment_overrides()` 目前只做三重授权的预检，并返回 **environment overrides**：
-`BMLIB_ENABLE_ALL_PROFILE=1`、`PROFILE_RECORD_SIZE`、`PROFILE_BOOK_KEEPING`。它不返回完整
-环境，也不加载库、初始化设备或发射 kernel。
-
-这不是逐指令 PCIe profile 实现。PPL 的 TPUv7 路径还需要 TPUDNN handle 与
-`tpudnnEnableProfile(handle, record_size, book_keeping)` / launch / sync /
-`tpudnnDisableProfile`，并通过 `bigTpuProfile` + PerfAI 解码 `cdm_profile_data_dev*`。
-当前 TileLang host 直接调用 `tpuRtKernelLaunch`，没有这段 TPUDNN session，也没有链接对应
-profile host variant。因此必须保持 PCIe `run` API 不存在；任何“只设置环境变量即可看到
-PCIe 指令耗时”的说法都是错误的。
-
-未来 PCIe 任务应是独立的、可审计的 host variant：在 `dlopen` 前同时要求
-`TILELANG_TPU_ALLOW_PCIE_LOAD=1`、`TILELANG_TPU_ALLOW_PCIE_PROFILE=1`、合法 device id；
-新进程中只执行一次 launch，超时杀整个进程组，先静态验证再经人工授权实际运行，且绝不在
-TileLang 中自动 `pip install` PPL 的外部解析器。
-
-## 7. 已完成的双后端提升与剩余工作
-
-本功能先在 main 派生分支独立研发，再合并至 SG2260E 双后端分支。提升时已经完成：
-
-1. `TPUProfilingConfig` 直接使用 `TPUCompileConfig` / `TPUChipSpec` 规范化 chip、
-   `atomic → tpukernel` 兼容别名、programming model、runtime 和 physical core count；
-   profiling 不再维护第二份能力表；
-2. 保留双后端 `tilelang.jit.compile()` 的 `chip`、`device_mode`、`runtime_mode` 传递与
-   target 规范化，只增加 profiling public exports；
-3. 增加 `testing/python/jit/tpu_profile_worker.py`。它只接受 profiler 注入的 CModel 三轴
-   选择，清楚拒绝 PCIe 环境，且在子进程内 fresh-compile 受控 case；
-4. 增加 opt-in pytest CModel cases：`TILELANG_TPU_RUN_CMODEL_PROFILE=1` 才会运行真实
-   worker，常规单测不会意外启动模拟器；
-5. 同步更新 `research/upstream-gap/README.md` 的证据等级与缺口。
-
-仍待完成的是外部 PerfAI 的真实 SG2260E 输出兼容验收，以及 PCIe 的独立 TPUDNN profile
-host variant。两项都不能由当前 fixture、raw trace 或静态链接替代。
+1. 获得与本机 SG2260E raw schema 匹配的 CModel PerfAI，验证真实 CModel
+   `profile_data.js`，而不只依赖 fixture。
+2. 实现最小 RV tensor 数值链：descriptor/register 配置、DMA load、一条算术、DMA store；
+   然后才能报告 RV tensor instruction timing。
+3. 扩充 PCIe 数值矩阵（dtype、tail、copy/fill/elementwise/reduce），每项必须先有 CModel
+   基线，再单次板端验证。
+4. 为 profile artifact 增加正式 manifest（resolved target、SDK、board runtime、kernel、输入
+   shape/dtype）；在此之前不要用不同构建之间的 timing 做自动回归判定。
+5. 将 profiling duration 与普通 benchmark 分层：profiling 用于定位指令，benchmark 用于低
+   扰动统计；不能让 autotune 直接消费一次有 recorder 开销的 host wall time。

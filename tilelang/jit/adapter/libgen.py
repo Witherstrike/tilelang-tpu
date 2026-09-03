@@ -44,6 +44,7 @@ class LibraryGenerator(object):
         # The latter requires a bundled, validated manifest and is deliberately
         # not supported yet.
         self._tpu_compiled_libpath: Optional[str] = None
+        self._tpu_compiled_runtime_identity = None
         if is_tpu_target(self.target):
             target_chip = get_tpu_target_chip(self.target)
             self.tpu_config = tpu_config or resolve_tpu_compile_config(
@@ -78,7 +79,8 @@ class LibraryGenerator(object):
         is loadable.  Cache/database rehydration stays fail-closed until it
         carries and validates such a manifest.
         """
-        if self._ppl_layout is None or self._tpu_compiled_libpath is None:
+        if self._ppl_layout is None or self._tpu_compiled_libpath is None or \
+                self._tpu_compiled_runtime_identity is None:
             raise RuntimeError(
                 "TPU library loading only accepts an artifact compiled by this "
                 "LibraryGenerator instance; prebuilt TPU artifacts require a "
@@ -89,7 +91,7 @@ class LibraryGenerator(object):
                 "TPU library loading rejected a path that was not produced by "
                 "this LibraryGenerator instance; rebuild the kernel instead of "
                 "loading a prebuilt TPU artifact.")
-        return self._ppl_layout.runtime_identity
+        return self._tpu_compiled_runtime_identity
 
     # Assume currently we only support CUDA compilation
     def load_lib(self, lib_path: Optional[str] = None):
@@ -202,6 +204,7 @@ class LibraryGenerator(object):
         elif is_tpu_target(target):
             assert self.tpu_config is not None
             self._tpu_compiled_libpath = None
+            self._tpu_compiled_runtime_identity = None
             import os
             # 设置环境变量
             PPL_TOP = os.environ.get("PPL_PROJECT_ROOT", None)
@@ -209,6 +212,7 @@ class LibraryGenerator(object):
                 raise EnvironmentError("PPL_PROJECT_ROOT environment variable is not set.")
             ppl_layout = resolve_ppl_layout(PPL_TOP, self.tpu_config.chip)
             self._ppl_layout = ppl_layout
+            assert self.mode is not None
 
             if self.tpu_config.device_mode == "rv":
                 # RVT is a direct PPL ABI bridge: the generated PPL source
@@ -217,8 +221,14 @@ class LibraryGenerator(object):
                 # than a silent fallback to the TPU-Kernel path.
                 ppl_layout.require_rvt_api()
 
+            runtime_identity = ppl_layout.runtime_identity_for(self.mode)
+
             if self.mode=="pcie":
-                self.tpu_compile_pcie(timeout=timeout, layout=ppl_layout)
+                self.tpu_compile_pcie(
+                    timeout=timeout,
+                    layout=ppl_layout,
+                    pcie_runtime_lib=runtime_identity[1],
+                )
             elif self.mode=="cmodel":
                 self.tpu_compile_cmodel(timeout=timeout, layout=ppl_layout)
             else:
@@ -226,6 +236,7 @@ class LibraryGenerator(object):
             self.srcpath = self._ensure_tpu_workspace()
             self.libpath = os.path.join(self.srcpath, "main.so")
             self._tpu_compiled_libpath = os.path.realpath(self.libpath)
+            self._tpu_compiled_runtime_identity = runtime_identity
             return
 
         else:
@@ -260,6 +271,7 @@ class LibraryGenerator(object):
             self.libpath = None
             self.srcpath = None
             self._tpu_compiled_libpath = None
+            self._tpu_compiled_runtime_identity = None
             return
         if self.libpath:
             os.remove(self.libpath)
@@ -320,7 +332,7 @@ class LibraryGenerator(object):
             includes.append(f"-I{include_dir}")
         return definitions, includes
 
-    def tpu_compile_pcie(self, timeout, layout: PPLLayout):
+    def tpu_compile_pcie(self, timeout, layout: PPLLayout, pcie_runtime_lib: str):
         cross_gcc = str(layout.pcie_cross_gcc())
 
         src_dir = self._ensure_tpu_workspace()
@@ -348,6 +360,7 @@ class LibraryGenerator(object):
 
         host_common = definitions + includes + [
             "-O3", "-DNDEBUG", "-std=c++17", "-fPIC",
+            "-DTILELANG_TPU_PCIE",
             f'-DTILELANG_PPL_KERNEL_PATH="{libkernel}"',
         ]
         kernel_host_o = os.path.join(src_dir, "kernel_host.o")
@@ -361,10 +374,9 @@ class LibraryGenerator(object):
         self._run_tpu_command(
             ["g++", "-shared", "-fPIC", "-Wl,--no-undefined", "-o",
              os.path.join(src_dir, "main.so"), kernel_host_o, main_o,
-             f"-L{layout.runtime_lib}",
-             f"-Wl,--disable-new-dtags,-rpath,{layout.runtime_lib}",
-             "-ltpuv7_rt", "-Wl,--no-as-needed", "-lcdm_daemon_emulator",
-             "-Wl,--as-needed", "-lpthread"],
+             f"-L{pcie_runtime_lib}", f"-L{layout.backend_lib}",
+             f"-Wl,--disable-new-dtags,-rpath,{pcie_runtime_lib}:{layout.backend_lib}",
+             "-ltpuv7_rt", "-ltpudnn", "-lpthread"],
             "Link PCIe main.so", timeout)
 
     def tpu_compile_cmodel(self, timeout, layout: PPLLayout):

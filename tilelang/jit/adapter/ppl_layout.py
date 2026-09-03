@@ -4,6 +4,7 @@
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 from typing import Tuple
 
@@ -22,8 +23,10 @@ class PPLLayout:
     device_utils_include: Path
     host_include: Path
     runtime_include: Path
+    tpudnn_include: Path
     runtime_lib: Path
     backend_lib: Path
+    tpudnn_library: Path
     ppl_helper_source: Path
     emulator_library: Path
     firmware_archive: Path
@@ -31,10 +34,50 @@ class PPLLayout:
 
     @property
     def runtime_identity(self) -> Tuple[str, str, str]:
-        """Canonical SDK/runtime paths that must not change in one process."""
+        """Canonical CModel SDK/runtime paths kept for compatibility."""
         return tuple(
             str(path.resolve())
             for path in (self.root, self.runtime_lib, self.backend_lib))
+
+    def pcie_runtime_lib(self) -> Path:
+        """Resolve the installed board runtime, never the SDK CModel runtime.
+
+        PPL 1.7 compiles against headers in ``deps/`` but prepends the installed
+        ``/opt/tpuv7/tpuv7-current/lib`` for PCIe execution.  The SDK's own
+        ``deps/runtime/tpuv7-runtime/lib/libtpuv7_rt.so`` depends on
+        ``libcdm_daemon_emulator.so`` and therefore cannot drive the board.
+        An explicit override supports non-standard driver installations.
+        """
+
+        raw_path = os.environ.get(
+            "TILELANG_TPU_PCIE_RUNTIME_PATH",
+            "/opt/tpuv7/tpuv7-current/lib",
+        )
+        runtime_lib = Path(raw_path).expanduser().resolve()
+        if runtime_lib == self.runtime_lib.resolve():
+            raise ValueError(
+                "TILELANG_TPU_PCIE_RUNTIME_PATH resolves to PPL's SDK CModel "
+                "runtime. PCIe must use the installed TPUv7 board runtime.")
+        runtime_so = runtime_lib / "libtpuv7_rt.so"
+        if not runtime_so.is_file():
+            raise FileNotFoundError(
+                "TPUv7 PCIe board runtime is missing; expected "
+                f"{runtime_so}. Install the matching TPUv7 driver runtime or "
+                "set TILELANG_TPU_PCIE_RUNTIME_PATH to its lib directory.")
+        return runtime_lib
+
+    def runtime_identity_for(self, runtime_mode: str) -> Tuple[str, str, str]:
+        """Return the SDK/runtime identity for one validated host mode."""
+
+        if runtime_mode == "cmodel":
+            runtime_lib = self.runtime_lib
+        elif runtime_mode == "pcie":
+            runtime_lib = self.pcie_runtime_lib()
+        else:
+            raise ValueError(f"Unsupported TPU runtime mode: {runtime_mode!r}")
+        return tuple(
+            str(path.resolve())
+            for path in (self.root, runtime_lib, self.backend_lib))
 
     @property
     def include_dirs(self) -> Tuple[Path, ...]:
@@ -45,6 +88,7 @@ class PPLLayout:
                 self.device_utils_include,
                 self.host_include,
                 self.runtime_include,
+                self.tpudnn_include,
             ) if path.is_dir())
 
     @property
@@ -92,8 +136,10 @@ def _require_paths(layout: PPLLayout) -> PPLLayout:
         "device helper headers": layout.device_utils_include,
         "host headers": layout.host_include,
         "TPUv7 runtime headers": layout.runtime_include,
+        "TPUDNN profiling headers": layout.tpudnn_include,
         "TPUv7 runtime libraries": layout.runtime_lib,
         "chip backend libraries": layout.backend_lib,
+        "TPUDNN profiling library": layout.tpudnn_library,
         "ppl_helper.c": layout.ppl_helper_source,
         "TPUv7 emulator": layout.emulator_library,
         "firmware archive": layout.firmware_archive,
@@ -151,8 +197,10 @@ def resolve_ppl_layout(ppl_root: str, logical_chip: str = "bm1690") -> PPLLayout
             device_utils_include=common_root / "dev/utils/include",
             host_include=common_root / "host/include",
             runtime_include=runtime_root / "include",
+            tpudnn_include=chip_root / "TPU1686/tpuDNN/include",
             runtime_lib=runtime_root / "lib",
             backend_lib=chip_root / "lib",
+            tpudnn_library=chip_root / "lib/libtpudnn.so",
             ppl_helper_source=common_root / "dev/utils/src/ppl_helper.c",
             emulator_library=chip_root / "lib/libtpuv7_emulator.so",
             firmware_archive=chip_root / "lib/libfirmware_core.a",

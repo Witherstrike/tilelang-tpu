@@ -1,11 +1,11 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-"""Fresh-compile CModel workers used by the TPU instruction-profile tests.
+"""Fresh-compile workers used by the TPU instruction-profile tests.
 
 This file intentionally is not named ``test_*.py``: it is invoked by
 ``TPUInstructionProfiler`` in a new process and owns the complete JIT
-compile/load/dispatch lifecycle.  It never accepts PCIe mode and never loads a
-prebuilt TileLang TPU shared object.
+compile/load/dispatch lifecycle.  It never loads a prebuilt TileLang TPU shared
+object; PCIe is accepted only when the profiler supplies every safety gate.
 """
 
 from __future__ import annotations
@@ -20,23 +20,35 @@ import tilelang.language as T
 
 
 def _profile_selection():
-    """Read the profiler's explicit CModel selection contract."""
+    """Read the profiler's explicit chip/programming-model/runtime contract."""
 
     if os.environ.get("TILELANG_TPU_PROFILE_SESSION") != "1":
         raise RuntimeError("tpu_profile_worker must run through TPUInstructionProfiler.")
     chip = os.environ.get("TILELANG_TPU_PROFILE_CHIP")
     device_mode = os.environ.get("TILELANG_TPU_PROFILE_DEVICE_MODE")
     runtime_mode = os.environ.get("TILELANG_TPU_PROFILE_RUNTIME_MODE")
-    if not chip or not device_mode or runtime_mode != "cmodel":
-        raise RuntimeError("missing or invalid TileLang TPU CModel profile selection.")
+    if not chip or not device_mode or runtime_mode not in ("cmodel", "pcie"):
+        raise RuntimeError("missing or invalid TileLang TPU profile selection.")
     if os.environ.get("TILELANG_TPU_BENCHMARK_RUNS") != "0":
         raise RuntimeError("instruction profiling requires exactly one TileLang launch.")
-    for name in (
-            "TILELANG_TPU_ALLOW_PCIE_LOAD",
-            "TILELANG_TPU_ALLOW_PCIE_PROFILE",
-            "TILELANG_TPU_DEVICE_ID"):
-        if name in os.environ:
-            raise RuntimeError(f"CModel profile worker inherited forbidden PCIe setting {name}.")
+    if runtime_mode == "cmodel":
+        for name in (
+                "TILELANG_TPU_ALLOW_PCIE_LOAD",
+                "TILELANG_TPU_ALLOW_PCIE_PROFILE",
+                "TILELANG_TPU_DEVICE_ID"):
+            if name in os.environ:
+                raise RuntimeError(
+                    f"CModel profile worker inherited forbidden PCIe setting {name}.")
+    else:
+        for name in (
+                "TILELANG_TPU_ALLOW_PCIE_LOAD",
+                "TILELANG_TPU_ALLOW_PCIE_PROFILE",
+                "BMLIB_ENABLE_ALL_PROFILE"):
+            if os.environ.get(name) != "1":
+                raise RuntimeError(f"PCIe profile worker is missing safety gate {name}=1.")
+        device_id = os.environ.get("TILELANG_TPU_DEVICE_ID", "")
+        if not device_id.isdecimal():
+            raise RuntimeError("PCIe profile worker requires a numeric device ID.")
     return chip, device_mode, runtime_mode
 
 
@@ -79,7 +91,7 @@ def _tpukernel_matmul(chip: str, device_mode: str, runtime_mode: str) -> None:
     reference = torch.matmul(a, b).half()
     if not torch.allclose(c, reference, atol=1e-2, rtol=1e-2):
         difference = float(torch.max(torch.abs(reference - c)))
-        raise RuntimeError(f"TPU-Kernel CModel matmul mismatch; max abs difference={difference}")
+        raise RuntimeError(f"TPU-Kernel matmul mismatch; max abs difference={difference}")
 
 
 def _rv_control(chip: str, device_mode: str, runtime_mode: str) -> None:

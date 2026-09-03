@@ -18,6 +18,7 @@ def _make_ppl_17_layout(tmp_path, logical_chip="bm1690", arch="tpub_7_1"):
     )
     for directory in (
         f"deps/chip/{arch}/TPU1686/kernel/include",
+        f"deps/chip/{arch}/TPU1686/tpuDNN/include",
         f"deps/chip/{arch}/lib",
         "deps/common/dev/kernel",
         "deps/common/dev/utils/include",
@@ -29,6 +30,7 @@ def _make_ppl_17_layout(tmp_path, logical_chip="bm1690", arch="tpub_7_1"):
     _touch(tmp_path / "deps/common/dev/utils/src/ppl_helper.c")
     _touch(tmp_path / f"deps/chip/{arch}/lib/libtpuv7_emulator.so")
     _touch(tmp_path / f"deps/chip/{arch}/lib/libfirmware_core.a")
+    _touch(tmp_path / f"deps/chip/{arch}/lib/libtpudnn.so")
 
 
 def test_resolve_ppl_17_layout(tmp_path):
@@ -42,6 +44,12 @@ def test_resolve_ppl_17_layout(tmp_path):
     assert layout.compile_definitions == ("__tpub_7_1__", "__sg2260__")
     assert layout.firmware_archive == (
         tmp_path / f"deps/chip/{arch}/lib/libfirmware_core.a"
+    )
+    assert layout.tpudnn_include == (
+        tmp_path / f"deps/chip/{arch}/TPU1686/tpuDNN/include"
+    )
+    assert layout.tpudnn_library == (
+        tmp_path / f"deps/chip/{arch}/lib/libtpudnn.so"
     )
     assert layout.root == tmp_path.resolve()
     assert layout.runtime_identity == (
@@ -129,3 +137,22 @@ def test_pcie_cross_compiler_rejects_ambiguous_sdk_toolchains(tmp_path):
     layout = resolve_ppl_layout(str(tmp_path))
     with pytest.raises(ValueError, match="selection is ambiguous"):
         layout.pcie_cross_gcc()
+
+
+def test_pcie_runtime_is_separate_from_the_sdk_cmodel_runtime(tmp_path, monkeypatch):
+    _make_ppl_17_layout(tmp_path)
+    layout = resolve_ppl_layout(str(tmp_path))
+    board_runtime = tmp_path / "installed-board-runtime/lib"
+    _touch(board_runtime / "libtpuv7_rt.so")
+    monkeypatch.setenv("TILELANG_TPU_PCIE_RUNTIME_PATH", str(board_runtime))
+
+    assert layout.pcie_runtime_lib() == board_runtime.resolve()
+    assert layout.runtime_identity_for("pcie") == (
+        str(tmp_path.resolve()),
+        str(board_runtime.resolve()),
+        str((tmp_path / "deps/chip/tpub_7_1/lib").resolve()),
+    )
+
+    monkeypatch.setenv("TILELANG_TPU_PCIE_RUNTIME_PATH", str(layout.runtime_lib))
+    with pytest.raises(ValueError, match="SDK CModel runtime"):
+        layout.pcie_runtime_lib()

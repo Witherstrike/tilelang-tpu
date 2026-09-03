@@ -255,6 +255,7 @@ def test_rvt_cmodel_compile_is_private_if_sdk_is_configured():
         assert b"tilelang_tpu_bind_device" in (workspace / "main.cpp").read_bytes()
         assert b"tilelang_tpu_expected_device_id != device_id" in (
             workspace / "main.cpp").read_bytes()
+        assert b"tpudnnEnableProfile" not in main_path.read_bytes()
     finally:
         generator.remove_lib()
 
@@ -293,6 +294,13 @@ def test_tpukernel_pcie_compile_is_private_if_sdk_is_configured():
         header = (workspace / "kernel.h").read_text(encoding="utf-8")
         assert "__bm1690__" not in header
         assert "TPU chip macro is required" in header
+        main_source = (workspace / "main.cpp").read_text(encoding="utf-8")
+        assert "tpudnnHandleFromStream" in main_source
+        assert "tpudnnEnableProfile" in main_source
+        assert "tpudnnDisableProfile" in main_source
+        assert b"libtpudnn.so" in (workspace / "main.so").read_bytes()
+        assert b"libcdm_daemon_emulator.so" not in (
+            workspace / "main.so").read_bytes()
     finally:
         generator.remove_lib()
 
@@ -327,5 +335,9 @@ def test_rvt_pcie_compile_is_private_without_loading_if_sdk_is_configured():
         assert kernel_path.is_file() and main_path.is_file()
         assert b"rvt_fadd" in (workspace / "kernel.c").read_bytes()
         assert str(kernel_path).encode() in main_path.read_bytes()
+        assert b"tpudnnEnableProfile" in main_path.read_bytes()
+        assert b"tpudnnDisableProfile" in main_path.read_bytes()
+        assert b"libtpudnn.so" in main_path.read_bytes()
+        assert b"libcdm_daemon_emulator.so" not in main_path.read_bytes()
     finally:
         generator.remove_lib()

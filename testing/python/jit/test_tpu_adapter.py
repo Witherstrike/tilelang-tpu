@@ -46,6 +46,9 @@ class _FakePPLLayout:
     def __init__(self, runtime_identity):
         self.runtime_identity = runtime_identity
 
+    def runtime_identity_for(self, runtime_mode):
+        return self.runtime_identity
+
 
 _TEST_SDK_IDENTITY = ("/test/ppl", "/test/ppl/runtime", "/test/ppl/backend")
 
@@ -61,6 +64,7 @@ def _mark_verified_tpu_artifact(generator, lib_path="/tmp/not-loaded.so",
     generator._ppl_layout = _FakePPLLayout(sdk_identity)
     generator.libpath = lib_path
     generator._tpu_compiled_libpath = os.path.realpath(lib_path)
+    generator._tpu_compiled_runtime_identity = sdk_identity
 
 
 def _two_tensor_params():
