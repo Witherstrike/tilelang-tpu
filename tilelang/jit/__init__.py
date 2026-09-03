@@ -14,6 +14,20 @@ from tvm.target import Target
 
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.jit.kernel import JITKernel
+from tilelang.jit.adapter.tpu_profiling import (
+    TPUInstructionProfiler,
+    TPUInstructionTiming,
+    TPUProfileReport,
+    TPUProfilingConfig,
+    TPUProfilingCommandError,
+    TPUProfilingError,
+    TPUProfilingTimeoutError,
+    TPURawInstruction,
+    parse_cmodel_raw_instruction_dumps,
+    parse_perfai_instruction_timings,
+    parse_perfai_timeline_events,
+    run_tpu_cmodel_profile,
+)
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
 from tilelang.cache import cached
 from logging import getLogger
