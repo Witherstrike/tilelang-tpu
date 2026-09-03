@@ -32,7 +32,8 @@ In short, this repository is about bringing TileLang's programming model to SOPH
 ## Requirements
 
 - Linux and Python 3
-- SOPHGO TPU toolchain environment (requires PPL version <= 1.4.195)
+- SOPHGO PPL 1.7 SDK (the `deps/` release layout; legacy `runtime/` layouts are
+  not supported)
 - Access to BM1690 hardware or a working `cmodel` setup
 
 ## Key TPU Paths
