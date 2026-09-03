@@ -107,3 +107,5 @@ tilelang/jit/adapter/cython/.cycache
 /research/*
 !/research/upstream-gap/
 !/research/upstream-gap/README.md
+!/research/ppl-profiling/
+!/research/ppl-profiling/README.md

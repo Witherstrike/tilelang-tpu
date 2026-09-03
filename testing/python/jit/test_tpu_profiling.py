@@ -3,6 +3,7 @@
 """Unit tests for the isolated PPL-style TPU instruction profile worker."""
 
 from pathlib import Path
+import os
 import stat
 import sys
 
@@ -115,7 +116,7 @@ def test_cmodel_profile_runs_explicit_perfai_and_returns_instruction_durations(t
     )
 
     report = TPUInstructionProfiler(config).run_cmodel(
-        _fake_trace_worker(config.label, device_mode="rv"),
+        _fake_trace_worker(config.label),
         environment={"TILELANG_PROFILE_TEST_TOKEN": "inherited"},
     )
 
@@ -174,7 +175,7 @@ def test_rv_profile_uses_the_vendor_perfai_target_spelling(tmp_path):
     )
 
     report = TPUInstructionProfiler(config).run_cmodel(
-        _fake_trace_worker(config.label),
+        _fake_trace_worker(config.label, device_mode="rv"),
         environment={"TILELANG_PROFILE_TEST_TOKEN": "inherited"},
     )
 
@@ -188,6 +189,10 @@ def test_profile_config_rejects_invalid_chip_mode_and_nonfinite_timeout():
         TPUProfilingConfig(chip="sg2260e", timeout_s=float("nan"))
     with pytest.raises(ValueError, match="positive number"):
         TPUProfilingConfig(chip="sg2260e", timeout_s=float("inf"))
+    with pytest.warns(DeprecationWarning, match="device_mode='atomic'"):
+        config = TPUProfilingConfig(chip="sg2260e", device_mode="atomic")
+    assert config.device_mode == "tpukernel"
+    assert config.compile_config.chip_spec.physical_core_count == 4
 
 
 def test_cmodel_profile_timeout_terminates_the_worker_process_group(tmp_path):
@@ -210,17 +215,17 @@ def test_pcie_profile_environment_requires_two_acknowledgements():
         TPUProfilingConfig(chip="sg2260e", runtime_mode="pcie"))
 
     with pytest.raises(TPUProfilingError, match="ALLOW_PCIE_LOAD"):
-        profiler.prepare_pcie_environment({})
+        profiler.pcie_profile_environment_overrides({})
     with pytest.raises(TPUProfilingError, match="ALLOW_PCIE_PROFILE"):
-        profiler.prepare_pcie_environment({"TILELANG_TPU_ALLOW_PCIE_LOAD": "1"})
+        profiler.pcie_profile_environment_overrides({"TILELANG_TPU_ALLOW_PCIE_LOAD": "1"})
     with pytest.raises(TPUProfilingError, match="DEVICE_ID"):
-        profiler.prepare_pcie_environment({
+        profiler.pcie_profile_environment_overrides({
             "TILELANG_TPU_ALLOW_PCIE_LOAD": "1",
             "TILELANG_TPU_ALLOW_PCIE_PROFILE": "1",
             "TILELANG_TPU_DEVICE_ID": str(2**31),
         })
 
-    environment = profiler.prepare_pcie_environment({
+    environment = profiler.pcie_profile_environment_overrides({
         "TILELANG_TPU_ALLOW_PCIE_LOAD": "1",
         "TILELANG_TPU_ALLOW_PCIE_PROFILE": "1",
         "TILELANG_TPU_DEVICE_ID": "0",
@@ -238,3 +243,78 @@ def test_cmodel_runner_rejects_a_pcie_configuration_before_spawning(tmp_path):
 
     with pytest.raises(TPUProfilingError, match="not dispatched"):
         profiler.run_cmodel([sys.executable, "-c", "raise SystemExit(0)"])
+
+
+def _profile_worker_command(case: str):
+    worker = Path(__file__).with_name("tpu_profile_worker.py")
+    return [sys.executable, str(worker), "--case", case]
+
+
+def _profile_worker_environment():
+    """Keep the real worker self-contained after profiler changes its cwd."""
+
+    repo_root = Path(__file__).resolve().parents[3]
+    inherited_pythonpath = os.environ.get("PYTHONPATH", "")
+    pythonpath = os.pathsep.join(
+        item for item in (str(repo_root), inherited_pythonpath) if item)
+    return {
+        "PPL_PROJECT_ROOT": os.environ["PPL_PROJECT_ROOT"],
+        "PYTHONPATH": pythonpath,
+    }
+
+
+@pytest.mark.skipif(
+    os.environ.get("TILELANG_TPU_RUN_CMODEL_PROFILE") != "1",
+    reason="set TILELANG_TPU_RUN_CMODEL_PROFILE=1 for the isolated CModel profile worker",
+)
+def test_sg2260e_tpukernel_cmodel_profile_worker_collects_real_raw_trace(tmp_path):
+    """Opt-in end-to-end test: fresh compile, numerical check, and raw command dump."""
+
+    if not os.environ.get("PPL_PROJECT_ROOT"):
+        pytest.skip("PPL_PROJECT_ROOT is not configured")
+    config = TPUProfilingConfig(
+        chip="sg2260e",
+        device_mode="tpukernel",
+        output_dir=tmp_path,
+        label="sg2260e-tpukernel-matmul",
+        timeout_s=60,
+    )
+
+    report = TPUInstructionProfiler(config).run_cmodel(
+        _profile_worker_command("tpukernel-matmul"),
+        environment=_profile_worker_environment(),
+    )
+
+    assert "TPU_PROFILE_WORKER_OK case=tpukernel-matmul" in report.stdout_path.read_text(
+        encoding="utf-8")
+    assert report.has_raw_trace
+    assert report.raw_instructions
+    # The local SDK may not bundle PerfAI; raw-only is an intentional result.
+    assert report.parser_status in ("unavailable", "ready", "no-device-command-events")
+
+
+@pytest.mark.skipif(
+    os.environ.get("TILELANG_TPU_RUN_CMODEL_PROFILE") != "1",
+    reason="set TILELANG_TPU_RUN_CMODEL_PROFILE=1 for the isolated CModel profile worker",
+)
+def test_sg2260e_rv_cmodel_profile_worker_runs_control_path(tmp_path):
+    """Opt-in RV control-path test, intentionally not an RV tensor numeric claim."""
+
+    if not os.environ.get("PPL_PROJECT_ROOT"):
+        pytest.skip("PPL_PROJECT_ROOT is not configured")
+    config = TPUProfilingConfig(
+        chip="sg2260e",
+        device_mode="rv",
+        output_dir=tmp_path,
+        label="sg2260e-rv-control",
+        timeout_s=60,
+        postprocess=False,
+    )
+
+    report = TPUInstructionProfiler(config).run_cmodel(
+        _profile_worker_command("rv-control"),
+        environment=_profile_worker_environment(),
+    )
+
+    assert "TPU_PROFILE_WORKER_OK case=rv-control" in report.stdout_path.read_text(
+        encoding="utf-8")

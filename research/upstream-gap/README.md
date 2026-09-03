@@ -189,6 +189,9 @@ RVT 是 capability 条件，不是第三种物理芯片：只有在 `chip="sg226
 | --- | --- | --- | --- |
 | BM1690 / SG2260E 的 PPL 1.7 arch 与物理核数选择 | **[静态]** | PPL 1.7 layout resolver 从 chip map 得到 `tpub_7_1`/8 与 `tpub_7_1_e`/4，并检查核心 SDK 工件。 | 不证明交叉编译器、任一 op 的数值正确性或板端可用性。 |
 | SG2260E 传统 TPU-Kernel matmul，CModel | **[实测]** | 隔离 matmul 已完成数值比对。 | 仅是该测试范围、单核发射；不代表所有 `ppl.*` op、尾块、异步或 PCIe。 |
+| SG2260E TPU-Kernel CModel 指令 trace | **[实测]** | 新进程 fresh-compile 的 FP16 64×64 matmul 完成数值比对；`FILE_DUMP_CMD` 留下 24 个 raw artifact，解析 78 条命令（BD 30、GDMA 34、SDMA 14）。 | 本机无 PerfAI，raw dump 不含 measured duration；不代表每条指令耗时、其他 op 或 PCIe。 |
+| SG2260E RVT CModel profile control worker | **[控制路径]** | fresh-compile `rvt_kernel_start → rvt_sync_all` 成功返回，并留下 24 个 raw artifact / 48 条命令（BD/GDMA/SDMA 各 16）。 | 不证明 RV descriptor、DMA、tensor arithmetic 或数值结果。 |
+| TPU PCIe 指令 profiling | **[计划]** | 只有三重授权的 environment-overrides 预检；没有 TPUDNN profile host variant，也没有板端 dispatch。 | 不能由 `BMLIB_ENABLE_ALL_PROFILE` 单独推断出逐指令 profile。 |
 | SG2260E 传统 TPU-Kernel，PCIe | **[静态]** | 已对 `ppl.fill/copy` 的最小 kernel 完成交叉编译、链接，未加载 `main.so`、未初始化板端。 | 不代表 PCIe ABI、数值或板端稳定性；尚无硬件成功结论。 |
 | 历史 PPL host demos 的 TPUv7 宏 | **[静态]** | 示例 host source 已从误导性的 `__bm1690__` 条件改为 PPL 1.7 的 `__sg2260__` 或 `__sg2260e__` 共同 TPUv7 runtime 条件。 | 没有逐个编译或运行这些历史 demo；不能把宏修正写成每个 demo 的 SG2260E 支持。 |
 | TPU runtime/profile 与产物来源隔离 | **[静态]** | `LibraryGenerator.load_lib()` 仅接受本实例编译的私有 `main.so`，并在任何 CModel/PCIe `dlopen` 前预留 `(runtime, chip, physical_core_count, programming_model, device, PPL SDK/runtime paths)`；BM/SG、CModel/PCIe、RVT/TPU-Kernel、PCIe device 或 SDK path 切换会失败。 | 不是签名的持久 manifest；不代表多核 kernel 已发射，也不替代每个 kernel 的数值测试。 |
@@ -297,6 +300,30 @@ chip/model/runtime/device 的 manifest，以及 database rehydrate 时 TPU 配�
 因此这不是“性能优化以后再补”的细节，而是 P0 安全契约：只有 manifest 打包、加载前
 校验和跨进程测试都完成后，才能开启 TPU 持久缓存。
 
+### 4.6 Profiling 是运行时诊断会话，不是编译 mode 或普通 benchmark
+
+PPL 的历史 `--profiling` 已是 `--autotune` 的弃用入口；它会让 PPL 前端生成 autotune
+host glue。TileLang 直接生成 PPL C/host code，不能把该开关照搬为一个 JIT 编译 flag。
+当前实现把 profiling 放在独立 `TPUInstructionProfiler`：它接受已经规范化的
+`TPUCompileConfig`，在新进程、私有 cwd、单次 launch（`TILELANG_TPU_BENCHMARK_RUNS=0`）
+中设置 CModel 的 `FILE_DUMP_CMD`，并把 worker 的 `(chip, programming model, cmodel)`
+选择显式传入 fresh compile。这样既不会污染常规 JIT artifact，也不会把 CUDA Event 的
+通用 `Profiler` 误用于 TPU。
+
+raw CModel `.txt` sidecar 可以可靠提供 engine/core/command-id/opcode，但没有时间戳。
+只有用户明确提供的 PerfAI `AutoRunner.sh` 生成 `PerfWeb/profile_data.js` 后，才能得到
+per-command `begin/end/duration`；同一 PerfAI root 的 TileLang session 会以 host-temporary
+lock 串行化，避免 PPL 可变 `auto_build` 互相覆盖；解析器会保留完整 timeline，同时只将 BD/BDC/TIU/GDMA/
+SDMA 等命令通道列为 `instruction_timings`，避免把 CPU、subnet 或 layer timeline 当作
+硬件指令。本机 SDK 不带 PerfAI，故当前 status 是“真实 raw trace 已验证、duration parser
+已由 fixture 验证、真实 duration 未验证”。
+
+PCIe 是另一条未完成的 host ABI：PPL TPUv7 需要 TPUDNN handle 的
+`tpudnnEnableProfile → launch/sync → tpudnnDisableProfile` 以及外部解析链；TileLang
+当前直接 `tpuRtKernelLaunch`。因此 `pcie_profile_environment_overrides()` 只做
+`ALLOW_PCIE_LOAD`、`ALLOW_PCIE_PROFILE`、device-id 三重预检并返回变量增量，绝不初始化或
+发射板卡。完整设计与验收路径见 `research/ppl-profiling/README.md`。
+
 ## 5. 二层算子覆盖与缺口
 
 下表刻意区分标准二层 API 与历史 PPL 兼容扩展。“静态 handler”只表示当前后端存在
@@ -315,7 +342,7 @@ chip/model/runtime/device 的 manifest，以及 database rehydrate 时 TPU 配�
 | gather / topk | 有特殊 PPL handler **[静态]**。 | 无。 | **P2**：补 index dtype、边界、稳定性、workspace 和 CModel 矩阵。 |
 | async copy、pipeline、同步 | 当前没有可验证的 TPU 依赖 IR；PPL 标记不等于调度模型。 | 有 raw control/sync 入口 **[控制路径]**，不是调度器。 | **P2**：以 DMA/compute dependency token 建模，不能复用 CUDA/Ascend barrier 语义。 |
 | 多核、原子型归约、scan | 未验证。 | 未验证。 | **P2–P3**：在单核语义与输出分片证明之后再做。 |
-| 诊断、profiling、autotune | 缺少统一的后端能力矩阵与失败产物。 | 同左。 | **P1**：保留 IR、生成源、PPL 命令与运行状态；不支持项应编译期失败。 |
+| 诊断、profiling、autotune | CModel raw 指令 trace 已有隔离 worker；真实 PerfAI duration 仍未验证。 | 控制路径 raw trace 已有；无 RV tensor timing 证据。 | **P1**：固化 PerfAI schema adapter 与 artifact manifest；**P2**：TPUDNN PCIe profile host variant，禁止把 autotune 前端 flag 当通用 JIT 选项。 |
 
 ## 6. 分阶段路线图
 
@@ -472,9 +499,14 @@ CModel 控制路径成功都不能绕过下一道门。
 - `src/tl_templates/tpu/kernel_template.cpp`：当前单核发射事实的直接来源。
 - `src/tl_templates/tpu/main_template.cpp`、`tilelang/jit/adapter/tpu.py`：CModel 核数设置、
   PCIe 许可/device-id 闸门、加载后 device 绑定校验与 host 运行时边界。
+- `tilelang/jit/adapter/tpu_profiling.py`：隔离 CModel 指令 trace、PerfAI data-only parser、
+  timeout/process-group 清理，以及明确不 dispatch 的 PCIe override preflight。
 - `testing/python/jit/test_tpu_config.py`、`testing/python/jit/test_ppl_layout.py`、
-  `testing/python/jit/test_tpu_rvt.py`、`testing/python/jit/test_tpu_adapter.py`：capability、
-  PPL layout、模型围栏、PCIe 加载闸门与 RVT 静态/私有编译覆盖的边界。
+  `testing/python/jit/test_tpu_rvt.py`、`testing/python/jit/test_tpu_adapter.py`、
+  `testing/python/jit/test_tpu_profiling.py`、`testing/python/jit/tpu_profile_worker.py`：capability、
+  PPL layout、模型围栏、PCIe 加载闸门、RVT 静态/私有编译与 opt-in CModel trace 覆盖的边界。
+- `research/ppl-profiling/README.md`：PPL `--profiling` 审阅、实现边界、实测证据和 PCIe
+  profile 的后续设计。
 
 ### 上游 TileLang
 

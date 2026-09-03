@@ -106,8 +106,9 @@ PerfAI 不存在或未显式配置时，状态为 `unavailable`，但 raw artifa
 `third_party/PerfAI/AutoRunner.sh`，所以真实 PerfAI 耗时尚待外部工具到位后验收。
 
 PPL 自身在 PerfAI cwd 中使用 `auto_build`。TileLang 不复制其 `rm -rf auto_build` 行为；
-实际接入的 PerfAI root 必须是本 profile 进程独占的工作目录，直到 AutoRunner 的并发/工作
-目录契约在该版本中被实测确认。
+它会按 resolved PerfAI root 建立 host-temporary inter-process lock，串行化同机 TileLang
+profile session。直接运行 PPL/其他工具的用户仍必须与该 root 排他，直到 AutoRunner 的
+并发/工作目录契约在该版本中被实测确认。
 
 ## 5. 当前测试与验收标准
 
@@ -120,10 +121,30 @@ PPL 自身在 PerfAI cwd 中使用 `auto_build`。TileLang 不复制其 `rm -rf 
 - 非法 BM1690+RV 配置、NaN/Infinity timeout、PCIe device id 越界；
 - CModel worker 超时后的进程组终止。
 
-实际 SG2260E TPU-Kernel CModel matmul 已曾在隔离进程中取得数值 `allclose=True`，并生成
-BD/GDMA/SDMA raw dump（可解析 78 条命令）。这证明 `FILE_DUMP_CMD` 与现有直接
-`tpuRtKernelLaunch` host path 能收集 CModel 原始指令流；它不证明 PerfAI duration 解码，
-也不代表 RV tensor 数值或 PCIe profile 已成功。
+已接入的真实 CModel case 默认不运行，避免普通 pytest 意外启动 vendor emulator。准备好
+PPL、TileLang runtime 和 pytest 后，使用外层 watchdog 显式启用：
+
+```bash
+setsid --wait timeout --kill-after=5s 60s \
+  env TILELANG_TPU_RUN_CMODEL_PROFILE=1 \
+      PPL_PROJECT_ROOT=/path/to/ppl-1.7 \
+      pytest testing/python/jit/test_tpu_profiling.py \
+      -k 'sg2260e and cmodel_profile_worker'
+```
+
+这两个 case 调用 `tpu_profile_worker.py`；worker 会读取 profile session 的
+`chip/device_mode/runtime_mode`，将其显式传给 `tilelang.compile`，然后在自己的进程内
+fresh-compile。它不是从环境猜测 target，也不会使用已有 JIT artifact。
+
+本分支已经通过受控 worker 做了两次真实、隔离的 CModel 验证：
+
+| worker | 已验证证据 | 未覆盖范围 |
+| --- | --- | --- |
+| `tpukernel-matmul` | fresh-compile SG2260E FP16 64×64 matmul，数值 `allclose=True`；产生 24 个 raw artifact，解析 78 条命令（BD 30、GDMA 34、SDMA 14）。 | 无真实 PerfAI，因此没有 measured duration；不代表其他 dtype/shape、异步、多核或 PCIe。 |
+| `rv-control` | fresh-compile `rvt_kernel_start → rvt_sync_all`，worker 成功返回；产生 24 个 raw artifact，解析 48 条控制命令（BD/GDMA/SDMA 各 16）。 | 不是 RV tensor arithmetic 或 descriptor 数值验证。 |
+
+这证明 `FILE_DUMP_CMD` 与现有直接 `tpuRtKernelLaunch` host path 能收集 CModel 原始指令
+流；它不证明 PerfAI duration 解码，也不代表 RV tensor 数值或 PCIe profile 已成功。
 
 正式验收应依次满足：
 
@@ -137,7 +158,7 @@ BD/GDMA/SDMA raw dump（可解析 78 条命令）。这证明 `FILE_DUMP_CMD` �
 
 ## 6. PCIe：明确未实现
 
-`prepare_pcie_environment()` 目前只做三重授权的预检，并返回 **environment overrides**：
+`pcie_profile_environment_overrides()` 目前只做三重授权的预检，并返回 **environment overrides**：
 `BMLIB_ENABLE_ALL_PROFILE=1`、`PROFILE_RECORD_SIZE`、`PROFILE_BOOK_KEEPING`。它不返回完整
 环境，也不加载库、初始化设备或发射 kernel。
 
@@ -153,15 +174,20 @@ PCIe 指令耗时”的说法都是错误的。
 新进程中只执行一次 launch，超时杀整个进程组，先静态验证再经人工授权实际运行，且绝不在
 TileLang 中自动 `pip install` PPL 的外部解析器。
 
-## 7. 与双后端架构的合并要求
+## 7. 已完成的双后端提升与剩余工作
 
-本功能先在 main 派生分支独立研发。提升至 SG2260E 双后端分支时必须：
+本功能先在 main 派生分支独立研发，再合并至 SG2260E 双后端分支。提升时已经完成：
 
-1. 用该分支已有 `TPUCompileConfig` / `TPUChipSpec` 作为 chip、mode、core count 的唯一来源，
-   消除 profiling 模块中为 main 研发阶段保留的临时能力表；
-2. 保留双后端分支 `tilelang.jit.compile()` 的 `chip`、`device_mode`、`runtime_mode` 参数
-   和 target 规范化逻辑，只合并 profiling exports；
-3. 增加一个受控 fresh-compile test worker，实际读取 profile 环境并把三轴参数传给
-   `tilelang.compile`；
-4. 在 `research/upstream-gap/README.md` 同步当前证据等级，不能把 fixture 或静态链接写成
-   板端/逐指令性能成功。
+1. `TPUProfilingConfig` 直接使用 `TPUCompileConfig` / `TPUChipSpec` 规范化 chip、
+   `atomic → tpukernel` 兼容别名、programming model、runtime 和 physical core count；
+   profiling 不再维护第二份能力表；
+2. 保留双后端 `tilelang.jit.compile()` 的 `chip`、`device_mode`、`runtime_mode` 传递与
+   target 规范化，只增加 profiling public exports；
+3. 增加 `testing/python/jit/tpu_profile_worker.py`。它只接受 profiler 注入的 CModel 三轴
+   选择，清楚拒绝 PCIe 环境，且在子进程内 fresh-compile 受控 case；
+4. 增加 opt-in pytest CModel cases：`TILELANG_TPU_RUN_CMODEL_PROFILE=1` 才会运行真实
+   worker，常规单测不会意外启动模拟器；
+5. 同步更新 `research/upstream-gap/README.md` 的证据等级与缺口。
+
+仍待完成的是外部 PerfAI 的真实 SG2260E 输出兼容验收，以及 PCIe 的独立 TPUDNN profile
+host variant。两项都不能由当前 fixture、raw trace 或静态链接替代。

@@ -22,7 +22,9 @@ load its own private TileLang JIT artifact.
 from __future__ import annotations
 
 import ast
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+import hashlib
 import json
 import math
 import os
@@ -31,21 +33,14 @@ import re
 import signal
 import subprocess
 import tempfile
+import time
 from typing import Any, Mapping, MutableMapping, Optional, Sequence, Tuple, Union
+
+from tilelang.engine.tpu_config import TPUCompileConfig
 
 
 PathLike = Union[str, os.PathLike]
 
-_SUPPORTED_CHIPS = ("bm1690", "sg2260e")
-_SUPPORTED_DEVICE_MODES = ("tpukernel", "rv")
-_SUPPORTED_CHIP_DEVICE_MODES = {
-    "bm1690": ("tpukernel",),
-    "sg2260e": ("tpukernel", "rv"),
-}
-_CMODEL_CORE_COUNTS = {
-    "bm1690": 8,
-    "sg2260e": 4,
-}
 _DEVICE_COMMAND_ENGINES = frozenset((
     "bd", "bdc", "tiu", "gdma", "sdma", "vsdma", "cdma", "dma",
 ))
@@ -72,12 +67,16 @@ class TPUProfilingCommandError(TPUProfilingError):
     """The isolated profile worker exited unsuccessfully."""
 
 
+class _PerfAIWorkspaceBusy(RuntimeError):
+    """The vendor PerfAI work directory is already owned by another session."""
+
+
 @dataclass(frozen=True)
 class TPUProfilingConfig:
     """Configuration for one isolated TPU instruction-profile session.
 
     ``runtime_mode='pcie'`` is accepted only to create the environment contract
-    through :meth:`TPUInstructionProfiler.prepare_pcie_environment`.  Dispatch
+    through :meth:`TPUInstructionProfiler.pcie_profile_environment_overrides`. Dispatch
     is deliberately not implemented by this module: a PCIe profile must have
     a separately reviewed TPUDNN host-launch path and an explicitly supervised
     worker.
@@ -95,20 +94,6 @@ class TPUProfilingConfig:
     profile_book_keeping: int = 1
 
     def __post_init__(self) -> None:
-        chip = self.chip.strip().lower() if isinstance(self.chip, str) else self.chip
-        if chip not in _SUPPORTED_CHIPS:
-            raise ValueError(
-                f"Unsupported TPU profiling chip {self.chip!r}; "
-                f"expected one of: {', '.join(_SUPPORTED_CHIPS)}")
-        if self.device_mode not in _SUPPORTED_DEVICE_MODES:
-            raise ValueError(
-                f"Unsupported TPU profiling device mode {self.device_mode!r}; "
-                f"expected 'tpukernel' or 'rv'.")
-        if self.device_mode not in _SUPPORTED_CHIP_DEVICE_MODES[chip]:
-            supported = ", ".join(_SUPPORTED_CHIP_DEVICE_MODES[chip])
-            raise ValueError(
-                f"TPU profiling chip {chip!r} does not support device_mode="
-                f"{self.device_mode!r}; supported modes: {supported}.")
         if self.runtime_mode not in ("cmodel", "pcie"):
             raise ValueError(
                 f"Unsupported TPU profiling runtime mode {self.runtime_mode!r}; "
@@ -125,7 +110,27 @@ class TPUProfilingConfig:
             raise ValueError("TPU profile_record_size must be a positive integer.")
         if not isinstance(self.profile_book_keeping, int) or self.profile_book_keeping < 0:
             raise ValueError("TPU profile_book_keeping must be a non-negative integer.")
-        object.__setattr__(self, "chip", chip)
+        # The dual-backend capability registry is the one authority for chip,
+        # programming model, legacy atomic normalization, and core topology.
+        # Profiling must not maintain a second copy of this table.
+        compile_config = TPUCompileConfig(
+            chip=self.chip,
+            device_mode=self.device_mode,
+            runtime_mode=self.runtime_mode,
+        )
+        object.__setattr__(self, "chip", compile_config.chip)
+        object.__setattr__(self, "device_mode", compile_config.device_mode)
+        object.__setattr__(self, "runtime_mode", compile_config.runtime_mode)
+
+    @property
+    def compile_config(self) -> TPUCompileConfig:
+        """Return the canonical dual-backend selection for this session."""
+
+        return TPUCompileConfig(
+            chip=self.chip,
+            device_mode=self.device_mode,
+            runtime_mode=self.runtime_mode,
+        )
 
 
 @dataclass(frozen=True)
@@ -240,6 +245,42 @@ def _write_parser_logs(output_dir: Path, stdout: str, stderr: str) -> Tuple[Path
     stdout_path.write_text(stdout, encoding="utf-8")
     stderr_path.write_text(stderr, encoding="utf-8")
     return stdout_path, stderr_path
+
+
+@contextmanager
+def _exclusive_perfai_workspace(perfai_root: Path, timeout_s: float):
+    """Serialize TileLang sessions that share PPL's mutable PerfAI workspace.
+
+    PPL's own driver runs AutoRunner from the PerfAI directory, whose
+    ``auto_build`` area is mutable.  Do not copy PPL's destructive cleanup;
+    instead, lock a host-temporary file keyed by the resolved root.  This is a
+    best-effort inter-process lock for TileLang sessions on the same machine;
+    users must still keep unrelated direct PPL invocations out of that root.
+    """
+
+    try:
+        import fcntl  # Linux is the supported TPU profiling host.
+    except ImportError:  # pragma: no cover - retained for import portability.
+        yield
+        return
+
+    token = hashlib.sha256(str(perfai_root).encode("utf-8")).hexdigest()[:20]
+    lock_path = Path(tempfile.gettempdir()) / f"tilelang-perfai-{token}.lock"
+    deadline = time.monotonic() + timeout_s
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise _PerfAIWorkspaceBusy(
+                        f"PerfAI workspace is busy: {perfai_root}")
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _find_perfai_root(config: TPUProfilingConfig,
@@ -518,7 +559,7 @@ class TPUInstructionProfiler:
     def __init__(self, config: TPUProfilingConfig):
         self.config = config
 
-    def prepare_pcie_environment(
+    def pcie_profile_environment_overrides(
             self, environment: Optional[Mapping[str, str]] = None) -> Mapping[str, str]:
         """Return only candidate environment overrides for a future PCIe worker.
 
@@ -533,7 +574,8 @@ class TPUInstructionProfiler:
         """
 
         if self.config.runtime_mode != "pcie":
-            raise ValueError("prepare_pcie_environment requires runtime_mode='pcie'.")
+            raise ValueError(
+                "pcie_profile_environment_overrides requires runtime_mode='pcie'.")
         resolved = _copy_environment(environment)
         if resolved.get("TILELANG_TPU_ALLOW_PCIE_LOAD") != "1":
             raise TPUProfilingError(
@@ -591,7 +633,8 @@ class TPUInstructionProfiler:
         # PPL's CModel driver sets this for SG2260E.  Make the topology
         # explicit for both supported chips so a worker does not inherit a
         # previous process's emulator-core setting.
-        worker_env["TPU_RT_CORE_NUM"] = str(_CMODEL_CORE_COUNTS[self.config.chip])
+        worker_env["TPU_RT_CORE_NUM"] = str(
+            self.config.compile_config.chip_spec.physical_core_count)
         # PPL's CModel flow uses FILE_DUMP_CMD, not BMLIB's PCIe recorder.
         worker_env.pop("BMLIB_ENABLE_ALL_PROFILE", None)
         # Never inherit a previously acknowledged board session into a CModel
@@ -658,36 +701,41 @@ class TPUInstructionProfiler:
                     "PerfAI was not invoked.")
             else:
                 runner = perfai_root / "AutoRunner.sh"
+                parser = None
                 try:
-                    parser_env = dict(worker_env)
-                    # This is a parser process, not a CModel worker. Keeping
-                    # the raw-dump label here could make a future AutoRunner
-                    # child accidentally write into the parsing directory.
-                    parser_env.pop("FILE_DUMP_CMD", None)
-                    parser = subprocess.Popen(
-                        ["bash", str(runner), "-d", str(output_dir), "-e",
-                         _perfai_chip_name(self.config)],
-                        cwd=perfai_root,
-                        env=parser_env,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        errors="replace",
-                        start_new_session=True,
-                    )
-                    try:
-                        parser_stdout_text, parser_stderr_text = parser.communicate(
-                            timeout=float(self.config.timeout_s))
-                    except subprocess.TimeoutExpired:
-                        _kill_process_group(parser)
-                        parser_stdout_text, parser_stderr_text = parser.communicate()
-                        parser_stdout, parser_stderr = _write_parser_logs(
-                            output_dir, parser_stdout_text, parser_stderr_text)
-                        parser_status = "timed-out"
-                        parser_message = (
-                            f"PerfAI AutoRunner.sh exceeded {self.config.timeout_s}s and its "
-                            f"process group was terminated. Logs: {parser_stdout}, {parser_stderr}")
-                        parser = None
+                    with _exclusive_perfai_workspace(perfai_root, float(self.config.timeout_s)):
+                        parser_env = dict(worker_env)
+                        # This is a parser process, not a CModel worker. Keeping
+                        # the raw-dump label here could make a future AutoRunner
+                        # child accidentally write into the parsing directory.
+                        parser_env.pop("FILE_DUMP_CMD", None)
+                        parser = subprocess.Popen(
+                            ["bash", str(runner), "-d", str(output_dir), "-e",
+                             _perfai_chip_name(self.config)],
+                            cwd=perfai_root,
+                            env=parser_env,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            errors="replace",
+                            start_new_session=True,
+                        )
+                        try:
+                            parser_stdout_text, parser_stderr_text = parser.communicate(
+                                timeout=float(self.config.timeout_s))
+                        except subprocess.TimeoutExpired:
+                            _kill_process_group(parser)
+                            parser_stdout_text, parser_stderr_text = parser.communicate()
+                            parser_stdout, parser_stderr = _write_parser_logs(
+                                output_dir, parser_stdout_text, parser_stderr_text)
+                            parser_status = "timed-out"
+                            parser_message = (
+                                f"PerfAI AutoRunner.sh exceeded {self.config.timeout_s}s and its "
+                                f"process group was terminated. Logs: {parser_stdout}, {parser_stderr}")
+                            parser = None
+                except _PerfAIWorkspaceBusy as exc:
+                    parser_status = "busy"
+                    parser_message = str(exc)
                 except OSError as exc:
                     parser_stdout, parser_stderr = _write_parser_logs(output_dir, "", str(exc))
                     parser_status = "failed"
