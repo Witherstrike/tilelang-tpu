@@ -32,6 +32,7 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any, Mapping, MutableMapping, Optional, Sequence, Tuple, Union
@@ -53,6 +54,8 @@ _RAW_TRACE_RE = re.compile(
     r"^(?P<label>[A-Za-z0-9][A-Za-z0-9_.-]*)-"
     r"(?P<launch>\d+)-(?P<group>\d+)\."
     r"(?P<engine>BD|GDMA|SDMA|VSDMA)\.(?P<core>\d+)\.txt$")
+
+_PROFILE_SUPERVISOR_PATH = Path(__file__).parent.parent / "_tpu_profile_supervisor.py"
 
 
 class TPUProfilingError(RuntimeError):
@@ -212,8 +215,59 @@ def _profile_output_dir(config: TPUProfilingConfig) -> Path:
     return Path(tempfile.mkdtemp(prefix=f"{config.label}-", dir=output_root))
 
 
+def _profile_deadline(timeout_s: float) -> float:
+    """Return the absolute deadline shared by worker, lock, and PerfAI."""
+
+    return time.monotonic() + timeout_s
+
+
+def _remaining_timeout(deadline: float) -> float:
+    """Return remaining wall-clock budget without ever extending a session."""
+
+    return max(0.0, deadline - time.monotonic())
+
+
+def _spawn_guarded_profile_process(command: Sequence[str], *, cwd: Path,
+                                   environment: Mapping[str, str]) -> subprocess.Popen:
+    """Spawn ``command`` below a parent-death-aware process-tree supervisor.
+
+    The direct child is a standalone Python supervisor in its own session.
+    It arms Linux parent-death ``SIGTERM`` immediately after exec, with a
+    double parent-PID check that closes the setup race, then keeps the real
+    worker/PerfAI command in its private process group.  Therefore an outer
+    timeout that terminates pytest cannot leave an ordinary CModel worker or
+    AutoRunner descendant running.
+    """
+
+    if not sys.platform.startswith("linux"):
+        raise TPUProfilingError(
+            "Safe TPU instruction profiling requires Linux PR_SET_PDEATHSIG; "
+            "refusing to create a detached profile worker on this platform.")
+    if not _PROFILE_SUPERVISOR_PATH.is_file():
+        raise TPUProfilingError(
+            f"TPU profile supervisor is missing: {_PROFILE_SUPERVISOR_PATH}")
+    return subprocess.Popen(
+        [sys.executable, str(_PROFILE_SUPERVISOR_PATH), "--parent-pid",
+         str(os.getpid()), "--", *command],
+        cwd=cwd,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        start_new_session=True,
+    )
+
+
 def _kill_process_group(process: subprocess.Popen) -> None:
-    """Stop a worker and all of its children without touching its parent shell."""
+    """Stop a guarded worker and all of its children without touching its parent shell.
+
+    The direct process is the lightweight supervisor.  ``SIGTERM`` makes its
+    handler kill the private group that contains the command and ordinary
+    descendants before exiting.  The SIGKILL fallback only covers a broken
+    supervisor and is intentionally not presented as a substitute for that
+    guarded path.
+    """
 
     try:
         os.killpg(process.pid, signal.SIGTERM)
@@ -248,7 +302,7 @@ def _write_parser_logs(output_dir: Path, stdout: str, stderr: str) -> Tuple[Path
 
 
 @contextmanager
-def _exclusive_perfai_workspace(perfai_root: Path, timeout_s: float):
+def _exclusive_perfai_workspace(perfai_root: Path, deadline: float):
     """Serialize TileLang sessions that share PPL's mutable PerfAI workspace.
 
     PPL's own driver runs AutoRunner from the PerfAI directory, whose
@@ -266,7 +320,6 @@ def _exclusive_perfai_workspace(perfai_root: Path, timeout_s: float):
 
     token = hashlib.sha256(str(perfai_root).encode("utf-8")).hexdigest()[:20]
     lock_path = Path(tempfile.gettempdir()) / f"tilelang-perfai-{token}.lock"
-    deadline = time.monotonic() + timeout_s
     with lock_path.open("a+", encoding="utf-8") as lock_file:
         while True:
             try:
@@ -616,6 +669,11 @@ class TPUInstructionProfiler:
         if not command:
             raise ValueError("TPU profiling command must not be empty.")
         normalized_command = tuple(os.fspath(item) for item in command)
+        # This is one wall-clock budget for the whole session, not a fresh
+        # timeout for each stage.  In particular, a contended PerfAI lock plus
+        # AutoRunner cannot extend a user-visible 60s CModel watchdog into a
+        # multi-minute operation.
+        deadline = _profile_deadline(float(self.config.timeout_s))
         output_dir = _profile_output_dir(self.config)
         worker_env = _copy_environment(environment)
         # This is the PPL CModel contract.  A relative label is required by the
@@ -645,30 +703,34 @@ class TPUInstructionProfiler:
         worker_env.pop("TILELANG_TPU_DEVICE_ID", None)
 
         try:
-            process = subprocess.Popen(
+            process = _spawn_guarded_profile_process(
                 normalized_command,
                 cwd=output_dir,
-                env=worker_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                errors="replace",
-                start_new_session=True,
+                environment=worker_env,
             )
-        except OSError as exc:
+        except (OSError, subprocess.SubprocessError, TPUProfilingError) as exc:
             stdout_path, stderr_path = _write_worker_logs(output_dir, "", str(exc))
             raise TPUProfilingCommandError(
                 f"Could not start CModel TPU profile worker. Logs: "
                 f"{stdout_path}, {stderr_path}") from exc
         try:
-            stdout, stderr = process.communicate(timeout=float(self.config.timeout_s))
+            remaining = _remaining_timeout(deadline)
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(normalized_command, 0)
+            stdout, stderr = process.communicate(timeout=remaining)
         except subprocess.TimeoutExpired:
             _kill_process_group(process)
             stdout, stderr = process.communicate()
             stdout_path, stderr_path = _write_worker_logs(output_dir, stdout, stderr)
             raise TPUProfilingTimeoutError(
-                f"CModel TPU profile worker exceeded {self.config.timeout_s}s and its "
-                f"process group was terminated. Logs: {stdout_path}, {stderr_path}")
+                f"CModel TPU profile session exceeded its total {self.config.timeout_s}s "
+                f"deadline and its worker process group was terminated. Logs: "
+                f"{stdout_path}, {stderr_path}")
+        except BaseException:
+            # KeyboardInterrupt, test-runner cancellation, and similar paths
+            # must not bypass the same process-tree cleanup as a timeout.
+            _kill_process_group(process)
+            raise
 
         stdout_path, stderr_path = _write_worker_logs(output_dir, stdout, stderr)
         if process.returncode != 0:
@@ -701,48 +763,84 @@ class TPUInstructionProfiler:
                     "PerfAI was not invoked.")
             else:
                 runner = perfai_root / "AutoRunner.sh"
-                parser = None
-                try:
-                    with _exclusive_perfai_workspace(perfai_root, float(self.config.timeout_s)):
-                        parser_env = dict(worker_env)
-                        # This is a parser process, not a CModel worker. Keeping
-                        # the raw-dump label here could make a future AutoRunner
-                        # child accidentally write into the parsing directory.
-                        parser_env.pop("FILE_DUMP_CMD", None)
-                        parser = subprocess.Popen(
-                            ["bash", str(runner), "-d", str(output_dir), "-e",
-                             _perfai_chip_name(self.config)],
-                            cwd=perfai_root,
-                            env=parser_env,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True,
-                            errors="replace",
-                            start_new_session=True,
-                        )
-                        try:
-                            parser_stdout_text, parser_stderr_text = parser.communicate(
-                                timeout=float(self.config.timeout_s))
-                        except subprocess.TimeoutExpired:
-                            _kill_process_group(parser)
-                            parser_stdout_text, parser_stderr_text = parser.communicate()
-                            parser_stdout, parser_stderr = _write_parser_logs(
-                                output_dir, parser_stdout_text, parser_stderr_text)
-                            parser_status = "timed-out"
-                            parser_message = (
-                                f"PerfAI AutoRunner.sh exceeded {self.config.timeout_s}s and its "
-                                f"process group was terminated. Logs: {parser_stdout}, {parser_stderr}")
-                            parser = None
-                except _PerfAIWorkspaceBusy as exc:
-                    parser_status = "busy"
-                    parser_message = str(exc)
-                except OSError as exc:
-                    parser_stdout, parser_stderr = _write_parser_logs(output_dir, "", str(exc))
-                    parser_status = "failed"
+                parser: Optional[subprocess.Popen] = None
+                parser_stdout: Optional[Path] = None
+                parser_stderr: Optional[Path] = None
+                remaining = _remaining_timeout(deadline)
+                if remaining <= 0:
+                    parser_status = "deadline-exhausted"
                     parser_message = (
-                        f"Could not start PerfAI AutoRunner.sh. Logs: "
-                        f"{parser_stdout}, {parser_stderr}")
-                    parser = None
+                        "The CModel worker used the total profile deadline; PerfAI was not "
+                        "started and raw command dumps were kept.")
+                else:
+                    try:
+                        # PPL's AutoRunner uses a mutable ``auto_build`` directory.
+                        # Both lock acquisition and the parser share the same absolute
+                        # deadline as the CModel worker; neither gets a second timeout.
+                        with _exclusive_perfai_workspace(perfai_root, deadline):
+                            remaining = _remaining_timeout(deadline)
+                            if remaining <= 0:
+                                parser_status = "deadline-exhausted"
+                                parser_message = (
+                                    "The total profile deadline expired while waiting for the "
+                                    "PerfAI workspace; AutoRunner was not started.")
+                            else:
+                                parser_env = dict(worker_env)
+                                # This is a parser process, not a CModel worker. Keeping
+                                # the raw-dump label here could make a future AutoRunner
+                                # child accidentally write into the parsing directory.
+                                parser_env.pop("FILE_DUMP_CMD", None)
+                                parser = _spawn_guarded_profile_process(
+                                    ["bash", str(runner), "-d", str(output_dir), "-e",
+                                     _perfai_chip_name(self.config)],
+                                    cwd=perfai_root,
+                                    environment=parser_env,
+                                )
+                                remaining = _remaining_timeout(deadline)
+                                if remaining <= 0:
+                                    _kill_process_group(parser)
+                                    parser_stdout_text, parser_stderr_text = parser.communicate()
+                                    parser_stdout, parser_stderr = _write_parser_logs(
+                                        output_dir, parser_stdout_text, parser_stderr_text)
+                                    parser_status = "deadline-exhausted"
+                                    parser_message = (
+                                        "The total profile deadline expired while AutoRunner was "
+                                        "starting; its process group was terminated. Logs: "
+                                        f"{parser_stdout}, {parser_stderr}")
+                                    parser = None
+                                else:
+                                    try:
+                                        parser_stdout_text, parser_stderr_text = parser.communicate(
+                                            timeout=remaining)
+                                    except subprocess.TimeoutExpired:
+                                        _kill_process_group(parser)
+                                        parser_stdout_text, parser_stderr_text = parser.communicate()
+                                        parser_stdout, parser_stderr = _write_parser_logs(
+                                            output_dir, parser_stdout_text, parser_stderr_text)
+                                        parser_status = "timed-out"
+                                        parser_message = (
+                                            "PerfAI AutoRunner.sh exceeded the remaining total profile "
+                                            "deadline and its process group was terminated. Logs: "
+                                            f"{parser_stdout}, {parser_stderr}")
+                                        parser = None
+                    except _PerfAIWorkspaceBusy as exc:
+                        parser_status = "busy"
+                        parser_message = (
+                            f"{exc}; the total profile deadline expired before AutoRunner could "
+                            "start.")
+                    except (OSError, subprocess.SubprocessError, TPUProfilingError) as exc:
+                        parser_stdout, parser_stderr = _write_parser_logs(output_dir, "", str(exc))
+                        parser_status = "failed"
+                        parser_message = (
+                            f"Could not start PerfAI AutoRunner.sh. Logs: "
+                            f"{parser_stdout}, {parser_stderr}")
+                        parser = None
+                    except BaseException:
+                        # Preserve cancellation semantics, but never leave an
+                        # AutoRunner process tree behind when pytest is stopped.
+                        if parser is not None:
+                            _kill_process_group(parser)
+                        raise
                 if parser is not None:
                     parser_stdout, parser_stderr = _write_parser_logs(
                         output_dir, parser_stdout_text, parser_stderr_text)

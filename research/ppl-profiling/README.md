@@ -89,8 +89,30 @@ worker 显式传给 `tilelang.compile`；它不尝试从任意外部命令反向
 
 ## 4. CModel 安全与可复现性
 
-每次 profile 会话都使用独立临时结果目录、独立 cwd 和新进程组。超时会先终止整个
-worker process group，再在必要时 SIGKILL；父进程的 cwd 和环境变量不会改变。会话还会：
+每次 profile 会话都使用独立临时结果目录和 cwd；父进程的 cwd 和环境变量不会改变。
+Linux 上它还使用下列受监督的进程树，而不是让 CModel/PerfAI worker 成为无父孤儿：
+
+```text
+outer watchdog
+  └─ pytest / profiler P
+       └─ private-session supervisor S (PR_SET_PDEATHSIG=SIGTERM)
+            └─ fresh worker 或 AutoRunner（与 S 同一 private process group）
+                 └─ 常规 compiler / emulator / parser 子孙
+```
+
+`S` 位于 `tilelang/jit/_tpu_profile_supervisor.py`。这是 Linux-only 的安全契约：没有
+`PR_SET_PDEATHSIG` 的平台会拒绝启动 detached profile worker。它在 exec 后以预期的 P pid 做
+`getppid → prctl(PR_SET_PDEATHSIG) → getppid` 双检、安装信号处理器后再复检，关闭父进程
+在 setup 期间退出的竞态。P 的内部超时向 S 的 process group 发 `SIGTERM`；P 被外层
+watchdog 杀掉时，内核也向 S 发 `SIGTERM`。两种情况都会由 S 对**自己的整个 group**发
+`SIGKILL`，因此 worker 与普通子孙会一起停止。普通 profile command 的约束是不得主动
+`setsid()`、daemonize 或逃离 process group；这类主动脱离的后代不能由标准 `killpg` 保证
+清理，不能作为受支持的 worker 形态。
+
+一个 `timeout_s` 是 worker、PerfAI workspace lock 与 AutoRunner 这些**受监督外部进程
+阶段**共用的 absolute wall-clock deadline，不是每个阶段各有一次 60 秒；raw dump 的本地
+解析和日志写入发生在子进程已停止后，不把它伪称为严格受该预算约束。`KeyboardInterrupt`/
+测试取消等非正常 Python 路径也会先请求同样的 supervisor 清理。会话还会：
 
 - 固定 `TILELANG_TPU_BENCHMARK_RUNS=0`，确保一次编译/一次 dispatch，避免 benchmark
   循环污染 dump；
@@ -119,7 +141,10 @@ profile session。直接运行 PPL/其他工具的用户仍必须与该 root 排
 - 显式 PerfAI fixture 的时间线解析、host 事件过滤、历史 `func_type` ID 格式；
 - RV 模式映射到 vendor PerfAI 名 `sg2260erv`（它不是新的 TileLang chip）；
 - 非法 BM1690+RV 配置、NaN/Infinity timeout、PCIe device id 越界；
-- CModel worker 超时后的进程组终止。
+- CModel worker 超时后的进程组终止；
+- worker + PerfAI、worker + 被占用 PerfAI lock 共用一个总 deadline；
+- Linux parent-death 回归：强杀 controller 后，supervisor 同 group 的 worker 与普通
+  `sleep` 子孙都停止，避免 detached session 遗留。
 
 已接入的真实 CModel case 默认不运行，避免普通 pytest 意外启动 vendor emulator。准备好
 PPL、TileLang runtime 和 pytest 后，使用外层 watchdog 显式启用：
@@ -136,12 +161,18 @@ setsid --wait timeout --kill-after=5s 60s \
 `chip/device_mode/runtime_mode`，将其显式传给 `tilelang.compile`，然后在自己的进程内
 fresh-compile。它不是从环境猜测 target，也不会使用已有 JIT artifact。
 
+这条外层命令是最终 watchdog；profiling supervisor 是其内层父死亡联动。若 opt-in CModel
+worker 发生 `TPUProfilingError`，测试 helper 会在 worker tree 已清理后调用 `pytest.exit`，
+不继续执行后续 opt-in emulator case；若 pytest 本身失去响应，外层 watchdog 仍会杀掉其父
+进程并通过 supervisor 联动停止 child group。不要以手写 `setsid`/daemon worker 替代受控
+worker，也不要把此 CModel 机制推广为 PCIe dispatch。
+
 本分支已经通过受控 worker 做了两次真实、隔离的 CModel 验证：
 
 | worker | 已验证证据 | 未覆盖范围 |
 | --- | --- | --- |
-| `tpukernel-matmul` | fresh-compile SG2260E FP16 64×64 matmul，数值 `allclose=True`；产生 24 个 raw artifact，解析 78 条命令（BD 30、GDMA 34、SDMA 14）。 | 无真实 PerfAI，因此没有 measured duration；不代表其他 dtype/shape、异步、多核或 PCIe。 |
-| `rv-control` | fresh-compile `rvt_kernel_start → rvt_sync_all`，worker 成功返回；产生 24 个 raw artifact，解析 48 条控制命令（BD/GDMA/SDMA 各 16）。 | 不是 RV tensor arithmetic 或 descriptor 数值验证。 |
+| `tpukernel-matmul` | fresh-compile SG2260E FP16 64×64 matmul，数值 `allclose=True`；在新增 supervisor + 外层 60s watchdog 下复验，产生 24 个 raw artifact，解析 78 条命令（BD 30、GDMA 34、SDMA 14）。 | 无真实 PerfAI，因此没有 measured duration；不代表其他 dtype/shape、异步、多核或 PCIe。 |
+| `rv-control` | fresh-compile `rvt_kernel_start → rvt_sync_all`，worker 成功返回；在新增 supervisor + 外层 60s watchdog 下复验，产生 24 个 raw artifact，解析 48 条控制命令（BD/GDMA/SDMA 各 16）。 | 不是 RV tensor arithmetic 或 descriptor 数值验证。 |
 
 这证明 `FILE_DUMP_CMD` 与现有直接 `tpuRtKernelLaunch` host path 能收集 CModel 原始指令
 流；它不证明 PerfAI duration 解码，也不代表 RV tensor 数值或 PCIe profile 已成功。

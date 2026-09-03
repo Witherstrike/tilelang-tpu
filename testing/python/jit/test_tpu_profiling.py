@@ -3,9 +3,14 @@
 """Unit tests for the isolated PPL-style TPU instruction profile worker."""
 
 from pathlib import Path
+import hashlib
 import os
+import signal
 import stat
+import subprocess
 import sys
+import tempfile
+import time
 
 import pytest
 
@@ -20,12 +25,14 @@ from tilelang.jit.adapter.tpu_profiling import (
 )
 
 
-def _fake_trace_worker(label: str, device_mode: str = "tpukernel"):
+def _fake_trace_worker(label: str, device_mode: str = "tpukernel", sleep_s: float = 0.0):
     """A child command that models the CModel's relative FILE_DUMP_CMD output."""
 
     source = (
         "import os\n"
+        "import time\n"
         "from pathlib import Path\n"
+        f"time.sleep({sleep_s!r})\n"
         "label = os.environ['FILE_DUMP_CMD']\n"
         "assert '/' not in label\n"
         "assert os.environ['TPU_RT_CORE_NUM'] == '4'\n"
@@ -46,7 +53,8 @@ def _fake_trace_worker(label: str, device_mode: str = "tpukernel"):
     return [sys.executable, "-c", source]
 
 
-def _create_fake_perfai(root: Path, expected_chip: str = "sg2260e") -> Path:
+def _create_fake_perfai(root: Path, expected_chip: str = "sg2260e",
+                        sleep_s: float = 0.0) -> Path:
     perfai_root = root / "PerfAI"
     perfai_root.mkdir()
     runner = perfai_root / "AutoRunner.sh"
@@ -62,6 +70,7 @@ def _create_fake_perfai(root: Path, expected_chip: str = "sg2260e") -> Path:
         "done\n"
         f"test \"${{chip}}\" = {expected_chip}\n"
         "test \"${TILELANG_PROFILE_TEST_TOKEN:-}\" = inherited\n"
+        f"sleep {sleep_s!r}\n"
         "mkdir -p \"${run_dir}/result_profiling/output/PerfWeb\"\n"
         "cat > \"${run_dir}/result_profiling/output/PerfWeb/profile_data.js\" <<'EOF'\n"
         "let categories = [\"cpu\", \"bdc\", \"gdma\"];\n"
@@ -210,6 +219,170 @@ def test_cmodel_profile_timeout_terminates_the_worker_process_group(tmp_path):
         TPUInstructionProfiler(config).run_cmodel(command)
 
 
+def test_profile_deadline_covers_worker_and_perfai_runtime(tmp_path):
+    """PerfAI gets only the budget left after the CModel profile worker."""
+
+    perfai_root = _create_fake_perfai(tmp_path, sleep_s=30)
+    config = TPUProfilingConfig(
+        chip="sg2260e",
+        output_dir=tmp_path / "profile",
+        label="deadline",
+        perfai_root=perfai_root,
+        timeout_s=1.0,
+    )
+
+    started = time.monotonic()
+    report = TPUInstructionProfiler(config).run_cmodel(
+        _fake_trace_worker(config.label, sleep_s=0.4),
+        environment={"TILELANG_PROFILE_TEST_TOKEN": "inherited"},
+    )
+    elapsed = time.monotonic() - started
+
+    assert report.parser_status == "timed-out"
+    # A pre-fix implementation allowed the worker's 1s timeout and a new 1s
+    # AutoRunner timeout to add. Give process startup margin, but require one
+    # shared 1s budget rather than roughly 1.4s here.
+    assert elapsed < 1.25
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="PerfAI lock timeout uses Linux flock on the supported TPU host",
+)
+def test_profile_deadline_covers_perfai_lock_wait(tmp_path):
+    """A contended mutable PerfAI workspace cannot add a second timeout."""
+
+    import fcntl
+
+    perfai_root = _create_fake_perfai(tmp_path)
+    token = hashlib.sha256(str(perfai_root.resolve()).encode("utf-8")).hexdigest()[:20]
+    lock_path = Path(tempfile.gettempdir()) / f"tilelang-perfai-{token}.lock"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, pathlib, sys, time; "
+                "handle = pathlib.Path(sys.argv[1]).open('a+'); "
+                "fcntl.flock(handle.fileno(), fcntl.LOCK_EX); "
+                "print('locked', flush=True); time.sleep(30)"
+            ),
+            str(lock_path),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "locked"
+        config = TPUProfilingConfig(
+            chip="sg2260e",
+            output_dir=tmp_path / "profile",
+            label="lock-deadline",
+            perfai_root=perfai_root,
+            timeout_s=1.0,
+        )
+        started = time.monotonic()
+        report = TPUInstructionProfiler(config).run_cmodel(
+            _fake_trace_worker(config.label, sleep_s=0.4),
+            environment={"TILELANG_PROFILE_TEST_TOKEN": "inherited"},
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        if holder.poll() is None:
+            holder.terminate()
+        holder.wait(timeout=5)
+
+    assert report.parser_status == "busy"
+    assert elapsed < 1.25
+
+
+def _wait_for_file(path: Path, timeout_s: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not path.is_file():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"Timed out waiting for {path}")
+        time.sleep(0.02)
+
+
+def _pid_is_running(pid: int) -> bool:
+    """Treat a reparented zombie as stopped for the no-orphan assertion."""
+
+    stat_path = Path(f"/proc/{pid}/stat")
+    try:
+        fields = stat_path.read_text(encoding="utf-8").split()
+    except FileNotFoundError:
+        return False
+    return len(fields) > 2 and fields[2] != "Z"
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="parent-death guard is a Linux TPU profiling safety contract",
+)
+def test_parent_death_guard_kills_worker_and_ordinary_descendant(tmp_path):
+    """Killing the profiler parent must not orphan its detached profile group."""
+
+    worker_pids_path = tmp_path / "worker-pids.txt"
+    supervisor_pid_path = tmp_path / "supervisor-pid.txt"
+    supervisor_path = (
+        Path(__file__).resolve().parents[3] / "tilelang" / "jit" /
+        "_tpu_profile_supervisor.py"
+    )
+    target_source = (
+        "import os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "Path(sys.argv[1]).write_text(f'{os.getpid()} {grandchild.pid} {os.getpgrp()}')\n"
+        "time.sleep(30)\n"
+    )
+    controller_source = (
+        "import os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        f"target_source = {target_source!r}\n"
+        "supervisor = subprocess.Popen([\n"
+        "    sys.executable, sys.argv[1], '--parent-pid', str(os.getpid()), '--',\n"
+        "    sys.executable, '-c', target_source, sys.argv[2],\n"
+        "], start_new_session=True)\n"
+        "Path(sys.argv[3]).write_text(str(supervisor.pid))\n"
+        "time.sleep(30)\n"
+    )
+    controller = subprocess.Popen([
+        sys.executable,
+        "-c",
+        controller_source,
+        str(supervisor_path),
+        str(worker_pids_path),
+        str(supervisor_pid_path),
+    ])
+    supervisor_pid = None
+    try:
+        _wait_for_file(supervisor_pid_path)
+        _wait_for_file(worker_pids_path)
+        supervisor_pid = int(supervisor_pid_path.read_text(encoding="utf-8"))
+        worker_pid, descendant_pid, worker_pgid = map(
+            int, worker_pids_path.read_text(encoding="utf-8").split())
+        assert worker_pgid == supervisor_pid
+        assert os.getpgid(descendant_pid) == supervisor_pid
+
+        os.kill(controller.pid, signal.SIGKILL)
+        controller.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while _pid_is_running(worker_pid) or _pid_is_running(descendant_pid):
+            if time.monotonic() >= deadline:
+                raise AssertionError("parent-death guard left a profile process running")
+            time.sleep(0.02)
+    finally:
+        if controller.poll() is None:
+            controller.kill()
+            controller.wait(timeout=5)
+        if supervisor_pid is not None and _pid_is_running(supervisor_pid):
+            try:
+                os.killpg(supervisor_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def test_pcie_profile_environment_requires_two_acknowledgements():
     profiler = TPUInstructionProfiler(
         TPUProfilingConfig(chip="sg2260e", runtime_mode="pcie"))
@@ -263,6 +436,27 @@ def _profile_worker_environment():
     }
 
 
+def _run_opt_in_cmodel_profile_or_abort(config: TPUProfilingConfig, case: str):
+    """Stop this opt-in test session after a vendor-worker failure.
+
+    The profiler has already stopped the worker tree.  Ending pytest prevents
+    the next opt-in emulator case from running after a timeout, failed JIT
+    worker, or other vendor-runtime error; the outer ``timeout`` remains the
+    final guard if pytest itself becomes unresponsive.
+    """
+
+    try:
+        return TPUInstructionProfiler(config).run_cmodel(
+            _profile_worker_command(case),
+            environment=_profile_worker_environment(),
+        )
+    except TPUProfilingError as exc:
+        pytest.exit(
+            f"Aborting opt-in TPU CModel profile session after {case} failed: {exc}",
+            returncode=2,
+        )
+
+
 @pytest.mark.skipif(
     os.environ.get("TILELANG_TPU_RUN_CMODEL_PROFILE") != "1",
     reason="set TILELANG_TPU_RUN_CMODEL_PROFILE=1 for the isolated CModel profile worker",
@@ -280,10 +474,7 @@ def test_sg2260e_tpukernel_cmodel_profile_worker_collects_real_raw_trace(tmp_pat
         timeout_s=60,
     )
 
-    report = TPUInstructionProfiler(config).run_cmodel(
-        _profile_worker_command("tpukernel-matmul"),
-        environment=_profile_worker_environment(),
-    )
+    report = _run_opt_in_cmodel_profile_or_abort(config, "tpukernel-matmul")
 
     assert "TPU_PROFILE_WORKER_OK case=tpukernel-matmul" in report.stdout_path.read_text(
         encoding="utf-8")
@@ -311,10 +502,7 @@ def test_sg2260e_rv_cmodel_profile_worker_runs_control_path(tmp_path):
         postprocess=False,
     )
 
-    report = TPUInstructionProfiler(config).run_cmodel(
-        _profile_worker_command("rv-control"),
-        environment=_profile_worker_environment(),
-    )
+    report = _run_opt_in_cmodel_profile_or_abort(config, "rv-control")
 
     assert "TPU_PROFILE_WORKER_OK case=rv-control" in report.stdout_path.read_text(
         encoding="utf-8")
