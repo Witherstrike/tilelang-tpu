@@ -2,9 +2,10 @@
 
 TileLang-TPU is a TPU-oriented extension of TileLang for SOPHGO accelerators. It preserves the TileLang Python DSL while adding TPU lowering, TPU code generation, and JIT runtime integration, enabling TileLang kernels to be compiled and executed on TPU platforms.
 
-The project provides TPU support for BM1690 and SG2260E, including canonical
-`target="tpu -mcpu=<chip>"` selection, `runtime_mode="pcie|cmodel"`, TPU DSL
-intrinsics, generated host/device glue code, and TPU bring-up demos.
+The project provides TPU support for BM1690 and SG2260E. A complete TPU target
+selects both compile-time axes as
+`target="tpu -mcpu=<chip> -tpu-programming-model=<tpukernel|rv>"`; the separate
+`runtime_mode="cmodel|pcie"` selects how that program is hosted.
 ## Highlights
 
 - TileLang frontend with TPU target support
@@ -26,18 +27,19 @@ In short, this repository is about bringing TileLang's programming model to SOPH
 ## Current Status
 
 - The current mainline JIT path supports BM1690 and PPL 1.7 SG2260E.
-- `tilelang.compile(..., target="tpu -mcpu=sg2260e")` is wired into the repository.
+- `tilelang.compile(..., target="tpu -mcpu=sg2260e -tpu-programming-model=tpukernel")`
+  is wired into the repository.
 - CModel loading and PCIe static build paths are present; PCIe board dispatch
-  remains deliberately opt-in and is not claimed as validated here.
+  remains deliberately opt-in. Only the scoped results recorded under
+  `research/` are claimed; this is not blanket PCIe validation.
 - TPU demos are available under [`tpu_demo/`](./tpu_demo/).
 - This project is under active development, and pull requests are welcome.
 
 ## Requirements
 
 - Linux and Python 3
-- SOPHGO PPL 1.7 SDK (the `deps/` release layout; legacy `runtime/` layouts are
-  not supported)
-- Access to BM1690 hardware or a working `cmodel` setup
+- SOPHGO PPL 1.7 SDK
+- Access to supported hardware or a working `cmodel` setup
 
 ## Key TPU Paths
 
@@ -55,17 +57,7 @@ In short, this repository is about bringing TileLang's programming model to SOPH
 
 ```bash
 git submodule update --init --recursive
-cp patches/tvm.patch 3rdparty/tvm/tvm.patch
-cd 3rdparty/tvm
-git apply tvm.patch
-cd ../..
 ```
-
-`patches/tvm.patch` contains the current TPU lowering compatibility changes to
-TIR access/storage analysis. It is not a TPU target-kind patch: the target is
-registered by TileLang's own `src/target/tpu_target_kind.cc`, and
-`install_tpu.sh` deliberately does not overwrite `3rdparty/tvm/src/target/`
-or copy a replacement `target_kind.cc`.
 
 ### 2. Build and install
 
@@ -90,9 +82,9 @@ PPL_PROJECT_ROOT=/path/to/ppl-1.7 python tpu_demo/matmul/tpu_test_matmul_fp16.py
 ```
 
 The other historical demos are development examples, not a blanket SG2260E
-compatibility claim: review their target/chip/runtime selection before running
-them. Do not run a PCIe demo until its CModel numerical case has passed and an
-external watchdog is in place.
+support claim: review their complete Target and runtime selection before
+running them. Do not run a PCIe demo until its CModel numerical case has passed
+and an external watchdog is in place.
 
 For a more detailed setup guide, see [`tpu_demo/instruction.md`](./tpu_demo/instruction.md).
 
@@ -106,41 +98,45 @@ import tilelang
 kernel = tilelang.compile(
     my_kernel,
     out_idx=-1,
-    target="tpu -mcpu=sg2260e",
-    device_mode="tpukernel",
+    target=("tpu -mcpu=sg2260e "
+            "-tpu-programming-model=tpukernel"),
     runtime_mode="cmodel",
 )
 ```
 
-TPU selection has three independent axes: `target="tpu -mcpu=<chip>"` selects
-the physical chip, `device_mode="tpukernel|rv"` selects the device programming
-model, and `runtime_mode="cmodel|pcie"` selects the host runtime. Supported
-chips are `bm1690` (TPU-Kernel) and `sg2260e` (TPU-Kernel and RV). The older
-`chip=` argument remains accepted when it agrees with the target. The former
-`device_mode="atomic"` spelling is a deprecated alias for `"tpukernel"`; it
-never referred to `T.atomic_add`.
+Compilation and execution have separate identities. `TPUTargetSpec` is derived
+only from the complete TVM Target and contains `(chip, programming_model)`.
+`TPURuntimeConfig` contains only `runtime_mode`; it does not choose instructions
+or change device semantics. BM1690 has 8 physical cores and supports TPU-Kernel.
+SG2260E has 4 physical cores and supports TPU-Kernel and RV. Both chips share the
+TPUv7 LMEM geometry used by the current allocator, but their PPL architecture,
+core topology and programming-model capability remain explicit.
 
-`target="auto"` never guesses a TPU or falls back to bare `target="tpu"`.
-CUDA/HIP keep priority; otherwise it selects TPU only when both
-`TILELANG_TPU_CHIP=<bm1690|sg2260e>` and a validated PPL 1.7
-`PPL_PROJECT_ROOT` are explicitly supplied. Without that opt-in it uses the
-portable C backend, so a CPU-only process cannot silently become BM1690 PCIe
-work.
+A bare `target="tpu"`, a target missing either `-mcpu` or
+`-tpu-programming-model`, and an unsupported chip/model pair all fail before
+lowering. There is no second public selector for either compile-time axis.
 
-`device_mode="rv"` exposes a direct, low-level bridge to the PPL 1.7 RV Tensor
-ABI. `T.rvt_*` calls require explicit CR/TR/GR descriptor setup and do not turn
-existing `T.ppl_*` operations into RV instructions automatically. The generic
+`target="auto"` never selects a TPU or falls back to a bare TPU target. CUDA/HIP
+keep priority; otherwise it uses the portable C backend. Environment variables
+may locate the PPL SDK and runtime, but they never replace either compile-time
+field in the explicit TPU Target, so a CPU-only process cannot silently become a
+TPU job.
+
+Selecting `-tpu-programming-model=rv` exposes a direct, low-level bridge to the
+PPL 1.7 RV Tensor ABI. `T.rvt_*` calls require explicit CR/TR/GR descriptor setup.
+The generic
 `T.rvt_call` escape hatch only supports APIs whose C arguments are representable
 by TIR; APIs taking C structs by value need dedicated helpers first. Raw
 `T.rvt_*` and high-level `T.ppl_*` calls also cannot share one kernel, because
 their descriptor and command-stream ownership models are different.
 
-The SG2260E RVT CModel lifecycle path (`rvt_kernel_start` followed by
-`rvt_sync_all`) has been exercised in an isolated process. That is not tensor
-arithmetic validation: a numerical RVT op still needs explicit descriptor
-planning plus DMA load/store before it can be advertised as supported.
+The recorded SG2260E evidence covers FP32 add/sub/mul/div and a fixed-shape FP16
+matmul in both CModel and supervised PCIe runs; see the reports under
+`research/`. This scope must not be extrapolated to arbitrary dtype, shape,
+tail, multi-core execution, or raw `T.rvt_*` programs.
 
-SG2260E and RV default to `cmodel` when no runtime mode is supplied. PCIe
+All TPU JIT entry points default to the fail-safe `cmodel` runtime when no
+runtime mode is supplied. PCIe
 loading is fail-closed because loading the runtime can touch the board even
 before a dispatch. Only after a CModel numerical smoke test should a supervised
 PCIe bring-up explicitly set both variables below, select `runtime_mode="pcie"`,
@@ -156,7 +152,7 @@ TPU JIT compilation writes each kernel and its host wrapper to a private
 temporary workspace; it no longer depends on a process-global `PPL_KERNEL_PATH`
 or shared generated files under `src/tl_templates/tpu/`. TPU cache/database
 artifact loading is deliberately disabled until it can bundle that private
-kernel with a verified chip/device/runtime manifest. Before any TPU `dlopen`,
+kernel with a verified target/runtime manifest. Before any TPU `dlopen`,
 the runtime also reserves `(runtime, chip, core count, programming model,
 device, PPL SDK/runtime identity)` for the process; change any of those in a
 fresh process, not in a long-lived Python worker. Through the TileLang JIT

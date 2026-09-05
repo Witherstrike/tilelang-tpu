@@ -26,7 +26,7 @@ NUM_INDICES = 8
 kernel = tilelang.compile(
     gather_kernel(NUM_ROWS, HIDDEN_SIZE, NUM_INDICES),
     out_idx=-1,
-    target="tpu",
+    target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel",
 )
 
 param  = torch.randn(NUM_ROWS, HIDDEN_SIZE).float()

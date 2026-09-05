@@ -47,10 +47,9 @@ def deepseek_v3_mlp_bf16(
         work0: T.Tensor((Block_bs, Block_i), accum_dtype),
         work1: T.Tensor((Block_bs, Block_i), accum_dtype),
         coeff: T.Tensor((64, 32), accum_dtype),
-        table: T.Tensor((64, 192), accum_dtype)
     ):
         T.ppl_mul_C(x_neg, gate_in, T.float32(-1.0))
-        T.ppl_exp2(x_neg, work0, work1, coeff, table)
+        T.ppl_exp(x_neg, work0, work1, coeff)
         T.ppl_add(x_neg_exp_1, x_neg, ones)
         T.ppl_div(silu_out, gate_in, x_neg_exp_1)
 
@@ -96,7 +95,6 @@ def deepseek_v3_mlp_bf16(
             exp_work0 = T.alloc_shared((Block_bs, Block_i), accum_dtype)
             exp_work1 = T.alloc_shared((Block_bs, Block_i), accum_dtype)
             exp_coeff = T.alloc_shared((64, 32), accum_dtype)
-            exp_table = T.alloc_shared((64, 192), accum_dtype)
 
             # ---------- constants ----------
             T.ppl_fill(ones, T.float32(1.0))
@@ -108,17 +106,21 @@ def deepseek_v3_mlp_bf16(
             T.copy(down_weight[by*Block_h : (by+1)*Block_h, bz*Block_i : (bz+1)*Block_i], down_weight_block_bf16)
 
             # ---------- GATE_PROJ: bf16 GEMM ----------
-            T.ppl_gemm(x_block_bf16, gate_weight_block_bf16, gate_out_block_bf16, transpose_B=True)
+            T.ppl_gemm(
+                x_block_bf16, gate_weight_block_bf16, gate_out_block_bf16,
+                transpose_B=True, accumulate=False)
             # 转 fp32 做 SiLU
             T.copy(gate_out_block_bf16, gate_out_block_fp32)
             SiLU(
                 gate_out_block_fp32, silu_out_block_fp32,
                 x_neg, ones, x_neg_exp_1,
-                exp_work0, exp_work1, exp_coeff, exp_table
+                exp_work0, exp_work1, exp_coeff
             )
 
             # ---------- UP_PROJ: bf16 GEMM ----------
-            T.ppl_gemm(x_block_bf16, up_weight_block_bf16, up_out_block_bf16, transpose_B=True)
+            T.ppl_gemm(
+                x_block_bf16, up_weight_block_bf16, up_out_block_bf16,
+                transpose_B=True, accumulate=False)
             # 转 fp32 做逐元素乘
             T.copy(up_out_block_bf16, up_out_block_fp32)
 
@@ -131,7 +133,9 @@ def deepseek_v3_mlp_bf16(
             # ---------- DOWN_PROJ: bf16 GEMM ----------
             # gated_up_block_bf16: (Block_bs, Block_i)
             # down_weight_block_bf16: (Block_h, Block_i)  -> transpose_B=True to match (Block_i, Block_h)
-            T.ppl_gemm(gated_up_block_bf16, down_weight_block_bf16, down_out_block_bf16, transpose_B=True)
+            T.ppl_gemm(
+                gated_up_block_bf16, down_weight_block_bf16, down_out_block_bf16,
+                transpose_B=True, accumulate=False)
 
             # ---------- 写回 global output (bf16 -> global) ----------
             T.copy(down_out_block_bf16, output[bx*Block_bs : (bx+1)*Block_bs, by*Block_h : (by+1)*Block_h])
@@ -167,5 +171,3 @@ if __name__ == "__main__":
 
     with open(mlp_kernel_file_fixed, "w") as f:
         f.write(mod_fixed)
-
-

@@ -42,7 +42,7 @@ class CodeGenTileLangTPU final : public CodeGenC {
 public:
   CodeGenTileLangTPU(std::string target_chip, std::string target_programming_model);
   std::string Finish();
-  // override behavior
+  // CodeGenC overrides required by the TPU source ABI.
   void PrintFuncPrefix(std::ostream &os) final;
   void PrintExtraAttrs(const PrimFunc &f, std::ostream &os) final;
   void VisitStmt_(const ForNode *op) final;
@@ -62,10 +62,7 @@ public:
                             std::ostream &os) final;
   std::string CastFromTo(std::string value, DataType from,
                          DataType target) final;
-  // overload visitor
   void VisitExpr_(const RampNode *op, std::ostream &os) final; // NOLINT(*)
-  // void VisitExpr_(const BroadcastNode* op, std::ostream& os) final;  //
-  // NOLINT(*)
   void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
   void VisitExpr_(const CallNode *op, std::ostream &os) final;
   void VisitExpr_(const CastNode *op, std::ostream &os) final;
@@ -75,7 +72,7 @@ public:
   void VisitExpr_(const FloorDivNode *op, std::ostream &os) final;
   void VisitExpr_(const FloorModNode *op, std::ostream &os) final;
 
-  // Override this as a work around for __grid_constant__ parameter
+  // Emit the stable TPU entry wrapper and initialize descriptor state.
   void AddFunction(const PrimFunc &f);
 
 protected:
@@ -106,12 +103,16 @@ private:
                   const std::string &c, DataType a_dtype, DataType b_dtype,
                   DataType c_dtype, bool transpose_a, bool transpose_b,
                   bool accumulate, int64_t m, int64_t n, int64_t k);
-  void EmitTPUKernelElementwise(const std::string &instruction,
+  void EmitTPUKernelElementwise(const std::string &operation,
                                 const std::string &dst,
                                 const std::string &src0,
-                                const std::string &src1,
-                                const std::string &dtype,
-                                const std::string &src1_stride);
+                                const std::string &src1, DataType dtype,
+                                const std::vector<int> &src0_shape,
+                                const std::vector<int> &src1_shape);
+  void EmitTPUKernelScalar(const std::string &operation,
+                           const std::string &dst,
+                           const std::string &src, DataType dtype,
+                           double value);
   void EmitRVElementwise(const std::string &operation,
                          const std::string &dst, const std::string &src0,
                          const std::string &src1, DataType dst_dtype,
@@ -122,55 +123,40 @@ private:
   void EmitRVDescriptor(const std::string &tensor, int register_id,
                         bool is_global, const std::string &dtype,
                         bool hw_aligned);
+  // Returns false only when op_name is not a registered TPU-Kernel semantic
+  // operation. Operand validation and instruction selection are owned by the
+  // TPU-Kernel translation unit.
+  bool TryEmitTPUKernelSemantic(const CallNode *op,
+                                const std::string &op_name);
 
-  // Handle volatile loads
+  // Handle volatile loads.
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
 
-  // Whether scope such as "__shared__" or "__constant__"  is part of type.
+  // TPU address spaces are represented by tensor descriptors, not C types.
   bool IsScopePartOfType() const final { return false; }
 
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangTPU *p);
   std::string AllocLocalVarID(const tir::VarNode *v);
-  // The size of the barrier array in shared memory
-  int barrier_count_ = -1;
-  // whether need mma.h
-  bool need_mma_h_{false};
-  // whether need cast_smem_ptr_to_int helper function
-  bool need_cast_smem_ptr_to_int_{false};
-  // The name of the barrier array in shared memory
-  const std::string barrier_name_ = "barrier";
-  // The alignment of the barrier array in shared memory
-  // Set to 16 to maintain minimum alignment requirements for async bulk copy
-  const int barrier_alignment_bytes_ = 16;
-  const int lane_num = 64;
-  std::unordered_map<const VarNode *, std::string> fragment_shapes;
-  std::unordered_map<const VarNode *, std::string> fragment_layouts;
   std::unordered_map<std::string, std::string> parameter_map;
+  // Global access_ptr operands carry Buffer::data variables, while generated
+  // function arguments are handle variables.  Keep the semantic Buffer name
+  // as the explicit bridge instead of relying on name_hint equality or
+  // overloading CodeGenC's var_idmap_ with tensor-info identifiers.
+  std::unordered_map<const VarNode *, std::string> global_buffer_name_;
   std::unordered_map<std::string, std::vector<int>> buffer_shape;
-  // Full normalized N/C/H/W shape for local tensors.  buffer_shape retains
-  // the legacy C/W view used by older TPU-Kernel emitters; portable core ops
-  // must consult this map so a non-trivial N or H dimension is never silently
-  // flattened into an incompatible matrix/vector descriptor.
+  // Full normalized N/C/H/W shape for local tensors.  buffer_shape is the
+  // projected C/W matrix view required by the current instruction ABI;
+  // portable core ops also consult this map so a non-trivial N or H dimension
+  // is never silently flattened into an incompatible descriptor.
   std::unordered_map<std::string, std::vector<int>> buffer_shape4;
   std::unordered_map<std::string, std::vector<int>> buffer_stride;
-  std::unordered_map<const VarNode *, std::vector<std::string>>
-      local_buffer_name_map;
-
   std::unordered_map<const VarNode *, int> buffer_addrs_;
 
-  friend void PrintConst(const FloatImmNode *op, std::ostream &os,
-                         CodeGenTileLangTPU *p);
-  void PrintWmmaScope(const std::string &scope, DataType t,
-                      const VarNode *variable, std::ostream &os);
-  int32_t GetWmmaFragmentSize(const std::string &scope, const VarNode *variable,
-                              int32_t size);
-  int32_t gemm_idx_ = 0;
   // Module-level include/ABI requirements plus per-function ownership fences.
   bool uses_rvt_api_{false};
   bool uses_tpukernel_api_{false};
-  bool uses_canonical_rv_{false};
   bool uses_opaque_raw_rvt_{false};
   int rvt_direct_call_count_{0};
   int tpukernel_extern_count_{0};

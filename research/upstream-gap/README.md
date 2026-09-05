@@ -1,203 +1,312 @@
-# TileLang-TPU 现状与上游能力差距
+# TileLang-TPU 现状、上游差距与演进路线
 
-## 1. 结论
+## 1. 当前结论
 
-截至 2026-09-04，本分支已经完成 SG2260E 的最小双后端数值闭环：同一组
-`T.ppl_*` 前端表达先降为 `tl.tpu.*`，再选择 TPU-Kernel 或 RV Tensor（RVT）
-codegen。实现覆盖 `copy`、零 `fill`、FP16/BF16 GEMM 以及 FP16/BF16/FP32 的
-add/sub/mul/div；本轮数值实验实际验证的是 FP16 GEMM 和 FP32
-add/sub/mul/div，它们已通过 SG2260E CModel 与 PCIe，BM1690 的 TPU-Kernel
-CModel 回归也通过。
+当前分支已经建立可审阅的 TPU 后端竖切：
 
-这仍不是“TileLang 二层 op 已完整支持 TPU”。当前完成的是安全、可验证的核心竖切；
-主要缺口依次是：标准二层 API 收敛、通用 shape/dtype/tail 规划、reduction 与组合算子、
-依赖正确的软件流水、显式多核计划，以及迁移到上游注册式 backend 架构。
+- 编译选择拆为 `chip × programming_model`，运行选择独立为 `runtime_mode`；
+- BM1690 使用 TPU-Kernel；SG2260E 可选择 TPU-Kernel 或 RV Tensor；
+- 核心前端先降为 `tl.tpu.*`，再选择 `codegen_tpukernel` 或 `codegen_rv`；
+- TPU-Kernel 专属能力使用 `tl.tpukernel.*`，不会在 RV target 上静默回退；
+- target pass、残余 IR verifier、AddressAssign、codegen 与 PPL 1.7 toolchain 均按同一完整 target 工作；
+- 未建模的 vector、同步、dtype、shape、ABI 或芯片能力在编译期失败。
 
-## 2. 当前边界
+数值证据已经从“核心示例可运行”扩展到完整的非 FP8 TPU-Kernel 基线和独立 FP8 矩阵：
 
-### 2.1 三条独立选择轴
-
-| 选择轴 | 规范取值 | 作用 |
+| 组合 | CModel | PCIe |
 | --- | --- | --- |
-| 芯片 | `bm1690`、`sg2260e` | PPL arch、编译宏、物理核数和能力集。 |
-| 编程模型 | `tpukernel`、`rv` | 指令 ABI、descriptor 与生命周期。BM1690 只允许前者。 |
-| 运行时 | `cmodel`、`pcie` | 模拟器或真实板卡；不改变 op 语义。 |
+| BM1690 / TPU-Kernel | final 基础矩阵 146/146；FP8 38/38 | 未验证 |
+| SG2260E / TPU-Kernel | final 基础矩阵 140/140；FP8 38/38 | final 基础矩阵 140/140；FP8 未验证 |
+| SG2260E / RV | FP32 四则与 FP16 GEMM 已验证 | 同一核心五项已验证 |
 
-`TPUChipSpec` 是唯一能力表：BM1690 为 `tpub_7_1`/8 核，SG2260E 为
-`tpub_7_1_e`/4 核；二者共用本项目所需的 TPUv7 LMEM 几何。物理核数只描述拓扑，
-当前 host 模板仍为 `core_num=1`，不能把 CModel 初始化 4/8 核写成多核工作负载。
+SG2260E/TPU-Kernel 板端 final 按 core 53、extended 15、reductions 72 三批执行，均首错停止且没有 timeout、retry 或 device fault。profiling 的 recorder/raw 采集已验证；既有 trace 可在隔离的 `bigTpuProfile==0.3.5` 环境解码为 36 条有效事件，但生产环境不会自动安装 decoder。
 
-旧 `device_mode="atomic"` 只是 TPU-Kernel 的历史误称。入口暂作弃用兼容，内部 target、
-缓存身份、codegen 和诊断统一使用 `tpukernel`/`rv`。
+这些结果仍不等于“TileLang 二层算子已完整支持 TPU”。当前主要差距已经从基础 TPU-Kernel 指令连通和 SG 板端数值验证，转向统一 op spec、标准二层 API、tail/dynamic shape、FP8 板端验证、RV 能力扩展、多核与依赖安全流水，以及可持续的上游后端边界。
 
-### 2.2 当前编译竖切
+## 2. 现有能力边界
+
+### 2.1 选择模型
+
+| 维度 | 取值 | 当前约束 |
+| --- | --- | --- |
+| 芯片 | `bm1690`、`sg2260e` | BM 为 `tpub_7_1`/8 核；SG 为 `tpub_7_1_e`/4 核 |
+| 编程模型 | `tpukernel`、`rv` | BM 只允许 TPU-Kernel；SG 允许两者 |
+| 运行时 | `cmodel`、`pcie` | 不参与指令选择；PCIe 额外受加载门禁和进程监管 |
+
+BM1690 与 SG2260E 在当前 allocator 所需的 TPUv7 LMEM 几何上共用 profile；PPL arch、编译宏、核数与能力集仍分别声明。SG2260E topk 是重要反例：头文件存在 HAU symbol，但 `tpub_7_1_e` runtime 不实现该原语，因此 SG codegen 直接拒绝，而 BM CModel 已验证。
+
+### 2.2 ABI 与 pass 边界
 
 ```text
-T.ppl_* compatibility frontend
-        │
-        ▼
-tl.tpu.{copy,fill,gemm,add,sub,mul,div}
-        │
-        ├─ common parsing / shape+dtype contract / AddressAssign
-        ├─ codegen_tpukernel.cc ─► tpu_kernel.h
-        └─ codegen_rv.cc        ─► rvt_api.h
-                                      │
-                                      ▼
-                         PPL 1.7 ─► CModel / PCIe
+T.ppl_* frontend
+  ├─ tl.tpu.{copy,fill,gemm,add,sub,mul,div}
+  │    ├─ TPU-Kernel emitter
+  │    └─ RV emitter
+  └─ tl.tpukernel.{scalar,exp,sigmoid,reduce,rsqrt,gather,topk,rope}
+       └─ TPU-Kernel emitter only
 ```
 
-共同层不再以 PPL 作为编程模型名称；源码已拆为 `codegen_tpu_common`、
-`codegen_tpukernel` 和 `codegen_rv`。规范 FFI 是 `target.build.tilelang_tpu`，旧
-`target.build.tilelang_ppl` 仅为兼容别名。`ppl_layout.py` 中的 PPL 指厂商 SDK，且只
-接受 PPL 1.7 `deps/` 布局，不再区分或探测旧工具链。
+TPU pipeline 当前采用保守语义：不运行 vectorization、software-pipeline injection 和 `StorageRewrite`。这不是性能目标，而是正确性边界；在 residual vector IR、DMA/compute 依赖和结构化 buffer 生命周期尚未建模时，这些 pass 可能生成语法成立但语义错误的程序。
 
-### 2.3 已证明的能力
+AddressAssign 为封闭 semantic op 集建模 read/write/read-write effect。GEMM 的 `accumulate` 是显式 ABI 位，同时决定 C 是 write 还是 read-write。contract verifier 在 target pass 前后执行，防止前端或 pass 引入另一编程模型、未知 extern、GPU barrier 或 vector residual IR。
 
-| 能力 | SG2260E TPU-Kernel | SG2260E RV | BM1690 TPU-Kernel |
-| --- | --- | --- | --- |
-| add/sub/mul/div，FP32 32×32 tile | CModel + PCIe 数值通过 | CModel + PCIe 数值通过 | CModel 数值通过 |
-| 64×64 FP16 matmul，32×32 tile，FP32 累加 | CModel + PCIe 数值通过 | CModel + PCIe 数值通过 | CModel 数值通过 |
-| PCIe 指令 profiling | 每个逐元素 16 条、matmul 36 条 timing | 同左 | 未上板 |
-| 四/八核工作划分 | 未实现（当前单核） | 未实现（当前单核） | 未实现（当前单核） |
+### 2.3 TPU-Kernel op 现状
 
-完整矩阵、容差和初次 PCIe software-pipeline 冒险见
-`research/rv-backend/TESTING.md`。源码可编译、CModel 可运行和 PCIe 数值通过是三种
-不同强度的证据，本文不从一个层级外推另一个层级。
-
-## 3. 当前核心 op 契约
-
-| 中立 op | 已实现语义 | 明确拒绝的范围 |
+| 族 | 两芯片 CModel 已验证范围 | 主要未覆盖 |
 | --- | --- | --- |
-| `tl.tpu.copy` | 等形静态 region；S2L/L2S/S2S/L2L；RV 用 GR/TR + FREE stride。 | 越界、两端 extent 不同、global 跨 dtype；TPU-Kernel FP16↔BF16 直接 cast；RV 非浮点 f2f。 |
-| `tl.tpu.fill` | TPU-Kernel 浮点常量；RV typed CR + `rvt_cp` 的零填充。 | RV 非零常量及未建模 dtype。 |
-| `tl.tpu.gemm` | local N=H=1；FP16/BF16 A/B；NN/NT；显式 overwrite/accumulate；M/N/K ≤ 65535。 | `transpose_A`、TPU-Kernel NT accumulate、batched/4-D 冒充矩阵、未注册 dtype。 |
-| `tl.tpu.add/sub/mul/div` | local N=H=1；同 dtype FP16/BF16/FP32；等形或 rhs W broadcast。 | global operand、一般 broadcast、混合 dtype；未定义的 NaN/Inf/零除完整语义。 |
+| copy/cast | FP16/BF16/FP32 与六种整数同 dtype local roundtrip/S2S；FP32 相关本地 cast；FP8 local roundtrip/S2S | FP16↔BF16、更多混合 dtype |
+| fill | FP16/BF16/FP32 非零常量；FP32 零值；FP8 零值 | FP16/BF16 独立零 case、FP8 非零 |
+| GEMM | FP16/BF16 NN overwrite/accumulate、NT overwrite；FP8 NN/NT overwrite 与 accumulate | batch、transpose-A、FP16/BF16 NT accumulate、FP8 C、tail |
+| add/sub/mul/div | 三种浮点等形；FP32 W broadcast；FP8 等形及 W-broadcast add/sub/mul | FP16/BF16 broadcast、FP8 div、一般 broadcast |
+| scalar | FP16/BF16/FP32/E4M3/E5M2 add/mul；FP8 默认非饱和 | sub/div、动态 scalar、可选 saturation |
+| exp/sigmoid | 三种浮点 | RV、更多函数、误差域扩展 |
+| reduction | FP16/BF16/FP32 row sum/max，12 个 EU 边界 width（含 63/64/65） | RV、min/arg、跨 tile/多轴 |
+| rsqrt | FP16/BF16/FP32 通用原语 | FP8、RV |
+| gather/rope | FP16/BF16/FP32/E4M3/E5M2；FP8 gather 精确保持 encoded bytes，RoPE 为偶宽 interleaved add | RV、整数 gather payload、一般 layout |
+| topk | BM 的 FP32/INT32/UINT32 双向、K-sized 输出及稳定重复键；SG 编译期不适用 | K=1/K=length、长度上限、BM PCIe；RV |
 
-RV descriptor 由编译器拥有：CR=R0–R7、TR=R8–R31、GR=R32–R39，精度使用
-`PRECISION/FP8TYPE`，生命周期为 `rvt_kernel_start → lanemask/body → rvt_sync_i`。
-raw `rvt_*` 仍是专家 escape hatch；它与 compiler-owned `tl.tpu.*` descriptor/lifecycle
-不能混用。TPU-Kernel 则独立使用 `tpu_initialize → body → tpu_poll`。
+FP8 的“手册/头文件声明、公开 frontend、TileLang codegen、CModel、PCIe”分别记录。最终矩阵 76/76，即两芯片 × 两格式 × 19 个公开 case；它只提升所列 selector。早先 scalar 两芯片 exit 139 已定位为 direct mixed-precision API 的非法 dtype tuple；合法 PPL/TileLang 路径均使用 cast 后的通用 add_C/mul_C，因此该崩溃不构成硬件负向证据。
 
-## 4. 二层 op 与功能差距
+SG2260E/TPU-Kernel 的非 FP8 列表已在真实芯片按同一 case registry 通过 140/140，其中包括基础浮点 scalar、exp/sigmoid/rsqrt、gather/rope、FP32 W broadcast 及十二个 reduction 边界 width。该结果只关闭这些精确 selector 的 SG 板端数值缺口；BM 板端、FP8 板端和更宽 RV selector 仍未验证。
 
-优先级含义：P0 是扩大功能前必须解决的正确性/架构边界；P1 建立常用模型的基础算子；
-P2 面向复杂模型与性能；P3 是规模化和上游化。
+## 3. 差距排序原则
 
-| 层级/能力 | 当前状态 | Why | 具体措施与验收 |
-| --- | --- | --- | --- |
-| 标准 `T.copy/T.fill/T.gemm` | 核心语义仍由 `T.ppl_*` 兼容入口暴露。 | 公共 API 带厂商名会阻止同一程序跨后端，也让 op contract 与实现耦合。 | **P0**：令标准 TileOp 降到同一 `tl.tpu.*`；`ppl_*` 变薄兼容别名。两种入口的 TIR 与数值 golden 必须一致。 |
-| capability/op spec | shape、dtype、effect 检查仍分布在 frontend、AddressAssign、codegen。 | 新增 op 容易出现地址分析认为只写、codegen 实际读写等漂移。 | **P0**：建立 `TpuOpSpec`，集中声明 operand role、scope、effect、dtype/layout、workspace、backend selector；所有 pass 消费同一注册。 |
-| tail 与动态 shape | 当前核心用例要求静态整 tile。 | 隐式越界 DMA 是板端高风险问题，不能靠 CModel 偶然通过。 | **P0**：引入 tile validity/mask 或显式 pad/crop planner；先覆盖非整除 M/N/K，再允许动态符号。每个 tail 有正例与越界负例。 |
-| cast/量化/混合 dtype | 只覆盖 matmul 输出 FP32→FP16 和受限 copy cast。 | 推理模型需要 BF16、INT8/INT4、scale/zero-point 和确定舍入。 | **P1**：按两套 ISA 建 capability matrix，分别映射 f2f/i2i/i2f/f2i、round/saturate/quant；未列组合编译期失败。 |
-| 一般 elementwise | 仅二元同 dtype与受限 W broadcast。 | bias、mask、门控和残差需要 scalar、row/column、compare/select。 | **P1**：统一 broadcast axis 映射；加入常量 add/mul、min/max、compare、select、clamp；定义 in-place、NaN/Inf 与除零行为。 |
-| reduction | 历史 TPU-Kernel 有受限 `ppl.reduce_sum/max` handler，未进入中立契约；RV 无 lowering。 | softmax、norm、attention 与 loss 都依赖可靠 reduction。 | **P1**：先连续轴 sum/max/min，明确 init/clear、accumulator dtype、tail；再多轴与跨 tile。CModel/PCIe 分阶段验证。 |
-| 激活与数学函数 | 历史 TPU-Kernel 有 exp/sigmoid/rsqrt 等专用 handler；RV 未统一。 | 这些实现常依赖 table/workspace/近似精度，不能仅按名字认为等价。 | **P1**：为 exp/exp2/rsqrt/sigmoid/GELU/SiLU 建误差契约和 workspace planner；逐后端注册实现或组合 lowering。 |
-| normalization/softmax | 未形成标准二层实现。 | 是 attention 和现代网络的高频组合，能检验 reduction+elementwise+数值稳定性。 | **P1**：先 RMSNorm/LayerNorm，再稳定 softmax；明确 FP32 累加、epsilon、最大值归约和尾块。 |
-| reshape/view/transpose | view 类前端存在，但 TPU descriptor/layout 语义未系统化。 | 逻辑 view 与真实 DMA transpose 混淆会产生错误 stride。 | **P1**：区分零成本 view 与物化 layout transform；验证 global/local stride、别名与地址区间。 |
-| gather/topk/sort | 仅历史 TPU-Kernel 特殊 handler，未做双后端契约。 | 索引边界、稳定排序、workspace 与 index dtype 都影响正确性。 | **P2**：先 gather，再 top-k/sort；定义越界策略、stable 语义、K 限制、workspace，并增加随机/重复值测试。 |
-| convolution/im2col | 标准 `c2d_im2col` 存在，TPU 端未闭环。 | 需要 layout、padding、dilation、DMA 和 GEMM 协同，不是单条 intrinsic。 | **P2**：先显式 im2col+GEMM 参考实现，再按 capability 融合；验证 NCHW/NHWC 与非对齐边界。 |
-| batch GEMM/attention | 当前 GEMM 限二维 local tile。 | FlashAttention 等需要 batch/head、online reduction、mask 与流水。 | **P2**：先 batched GEMM descriptor/partition，再组合 softmax；复杂 attention 只在基础 op 稳定后接入。 |
-| software pipeline/async | 核心正确性示例使用 `T.serial`。初次 PCIe 证明 `num_stages=1` 可让 DMA 与直接消费者 GEMM 竞态。 | CModel 会剥掉 TPU parallel marker，不能验证真实依赖；错误流水比无优化更危险。 | **P0/P2**：先建立 DMA/compute token、读写 hazard 和 buffer versioning；做 serial-vs-pipeline 等价测试后才开放 overlap。 |
-| 多核/Persistent | 物理 4/8 核已建模，launch 仍单核。 | 直接把 `core_num` 改为 4/8 会重复整个 grid 并竞写输出。 | **P2/P3**：引入 `LaunchPlan`：per-core range、offset、output ownership、同步/归约、错误回收；先 elementwise 无冲突分片，再 GEMM/reduction。 |
-| profiling/benchmark/autotune | CModel raw 与 PCIe 逐指令 timing 已打通。 | recorder 的 host wall time带开销，不能直接供 autotune 或性能回归。 | **P1/P2**：artifact manifest 记录 target/SDK/input；profiling 用于定位，另建 warmup/repeat/统计 benchmark；最后才让 autotuner消费。 |
-| 持久缓存/导出 | TPU 预编译 artifact 仍故意 fail-closed。 | 私有 `libkernel.so`、SDK/runtime identity 与 device ABI 未打包时，cache hit 可能绕过加载门禁。 | **P3**：建立包含 resolved target、pass、SDK/toolchain/runtime、二进制依赖的 manifest；加载前逐项验证并在新进程 rehydrate。 |
+后续任务按四项标准排序：
 
-## 5. 上游 TileLang 所需重构
+1. **正确性外溢范围**：一个缺口是否会使多个 op 产生错误地址、依赖或静默 fallback；
+2. **模型复用度**：能力是否被 normalization、softmax、attention 等大量上层 op 复用；
+3. **验证成本与板端风险**：能否先在 source/CModel 证明，再以小步 PCIe 验证；
+4. **上游可维护性**：新实现是否减少 target 特判和重复契约，而不是继续增加分叉。
 
-上游 TileLang 当前的
-[Backend Layout](https://github.com/tile-ai/tilelang/blob/main/tilelang/backend/README.md)
-已明确：通用 `tilelang/backend` 只保留注册与共享设施，target 特定的 pipeline、host/device
-codegen、op 与 intrinsic 应由 `tilelang/<backend>` 和 `src/<backend>` 拥有。TPU 应按这一
-边界演进，而不是继续在 `engine/lower.py` 中累积条件分支。
+因此先解决 op spec、tail 和依赖模型，再扩复杂算子；先建立通用组合能力，再写单个模型专用 kernel。
 
-建议目标结构：
+## 4. P0：编译器正确性与架构收敛
+
+### 4.1 注册式 `TpuOpSpec`
+
+**现状**：operand role、dtype/shape、effect 和失败策略分布在 frontend、residual verifier、AddressAssign 与两个 emitter 中。
+
+**Why**：新增 op 时，任一层漏改都可能产生“前端接受、地址分析乐观、codegen 读取额外 buffer”的不一致；这是板端错误的系统性来源。
+
+**措施**：
+
+1. 定义 `TpuOpSpec`：semantic name、frontend alias、operand role/scope、effect、dtype/layout constraint、workspace、applicable programming model 与 emitter key；
+2. 由该表生成/驱动 frontend guard、verifier allowlist、AddressAssign effect 和 codegen dispatch；
+3. chip-specific capability 作为 spec 的 predicate，不在 emitter 内散落字符串判断；
+4. 合法性按完整 `chip × programming model × dtype × layout × attributes` selector 表达，保留 FP8 NT accumulation 与 base-float NT rejection 这样的精确分支；
+5. 为每个 spec 自动生成 positive/negative source test 与 contract selector 骨架。
+
+**验收**：删除任一 op 的 emitter 注册后，编译在统一诊断处失败；effect 与 emitter operand 数自动一致；机器契约可从 spec 检查引用闭包。
+
+### 4.2 Python/native target 能力单源化
+
+**现状**：Python `TPU_CHIP_SPECS` 是主能力源，native build 入口镜像一份合法 chip/model 组合。
+
+**Why**：两份手写表可能在加入芯片或编程模型时漂移，使 Python 接受而 native 拒绝，或相反。
+
+**措施**：采用一份可编译的数据描述生成 Python 与 C++ 常量；生成内容包含 PPL arch、宏、核数、编程模型和 chip feature flags。
+
+**验收**：构建期比较生成表；所有合法/非法 target 组合在 Python 与 native 层得到一致结果。
+
+### 4.3 tail、动态 shape 与 alias
+
+**现状**：已验证 case 均为静态、规则 tile；copy/gemm/reduction 在有限静态范围 fail-closed。当前所有 TPUv7/PPL `dim4` 单维必须是编译期整数且位于 `[1,65535]`，exp/sigmoid 另有 `H*W<=65535`，reduction 还校验 EU 对齐后的派生宽度。
+
+**Why**：隐式越界 DMA 或错误 stride 在 PCIe 上可能卡住设备；没有统一 tail 语义就无法安全扩大 shape。
+
+**措施**：
+
+1. 先实现静态非整除 tile 的 validity + pad/crop planner；
+2. 每种 DMA/compute op 明确 mask 能力，没有硬件 mask 时分配受控 padding；
+3. 用 analyzer 证明 region bounds，并建立 alias/overlap 规则；
+4. 静态 tail 稳定后再支持符号 extent 和 runtime guard。
+
+**验收**：M/N/K 与 W 在 EU/tile 边界前后都有数值正例；越界、重叠与无法证明的 region 均为编译期负例。
+
+### 4.4 依赖安全的 pass 模型
+
+**现状**：TPU pipeline 禁用 vectorization 和 software pipeline；PCIe 已证明未经建模的 DMA/GEMM overlap 会产生数值错误。
+
+**Why**：直接复用 GPU pass 的 barrier、lane 或 async 语义会把“优化”变成错误程序。
+
+**措施**：
+
+1. 定义 DMA/BDC/RV command token、buffer version、producer-consumer 与 barrier 可见域；
+2. 加 hazard verifier，证明 RAW/WAR/WAW 安全后才允许 overlap；
+3. 为 residual vector IR 定义 lane、Ramp、load/store 和 reduction 规则，再逐项开放 vector pass；
+4. serial 与 pipeline 版本必须做 CModel/PCIe 等价测试。
+
+**验收**：任何缺 token 或冲突 buffer 的 pipeline 在编译期失败；通过的 pipeline 有可解释 trace 和数值等价证据。
+
+### 4.5 标准二层 API
+
+**现状**：中立 IR 已形成，但用户入口仍以 `T.ppl_*` 为主。
+
+**Why**：厂商命名进入公共 TileLang 层会阻碍同一程序在 CUDA/HIP/TPU/Ascend 后端间复用，也使上游难以接受。
+
+**措施**：让标准 `T.copy/T.fill/T.gemm` 与二层 elementwise/reduce op 降到同一 semantic registry；TPU 特有参数通过 target capability 或明确的 extension 表达，不复制一套 API。
+
+**验收**：标准入口与当前入口生成等价 semantic IR，并在三种有效 target 上保持相同数值结果；完成迁移后只保留一个公共语义入口。
+
+## 5. P1：模型基础算子
+
+### 5.1 cast、量化与 dtype contract
+
+**Why**：推理需要 BF16、FP8、INT8/INT4、scale/zero-point、舍入与饱和；仅看指令名无法保证两条 ISA 语义一致。
+
+**措施**：按 `src dtype × dst dtype × round × saturate × scope × backend` 建矩阵；实现 f2f/i2i/i2f/f2i 与 quant/dequant；未列组合编译期拒绝。FP8 E4M3/E5M2 永远分开记录。
+
+### 5.2 一般 elementwise 与 broadcast
+
+**Why**：bias、mask、门控和残差需要 scalar、row/column/batch broadcast、compare/select/clamp。
+
+**措施**：先验证 FP16/BF16 W broadcast，再抽象 broadcast-axis/zero-stride planner；加入 min/max、compare、select、clamp 与明确的 in-place/NaN/Inf/零除策略。
+
+### 5.3 reduction 的中立化与扩展
+
+**Why**：sum/max 已在 TPU-Kernel CModel 稳定，但仍是 `tl.tpukernel.*`；RV、min、arg、跨 tile 与 FP32 accumulator 是 softmax/norm 的前置。
+
+**措施**：定义 `tl.tpu.reduce` 的 axis、init、accumulator dtype、workspace 和 tail 语义；TPU-Kernel复用现有 composite，RV 按 ISA 实现；先连续轴，再多轴/跨 tile。
+
+### 5.4 数学函数与 activation
+
+**Why**：exp/sigmoid/rsqrt 的 workspace、输入域和近似误差都属于算子契约；不同后端不能只按同名函数视为等价。
+
+**措施**：建立 exp/exp2/log/rsqrt/sigmoid/GELU/SiLU 的误差 envelope 和 workspace planner；允许“原语实现”或“已注册组合 lowering”，但都必须按 backend 独立验证。
+
+### 5.5 normalization 与 softmax
+
+**Why**：RMSNorm、LayerNorm 和稳定 softmax 是现代模型的基础组合，也是检验 reduction、broadcast、tail 与数值稳定性的最佳中层 workload。
+
+**措施**：先 RMSNorm（sum-square + rsqrt + scale），再 LayerNorm 和 max-subtracted softmax；统一 FP32 accumulator、epsilon、mask 与尾块策略。
+
+### 5.6 layout/view/transpose
+
+**Why**：逻辑 view 与真实 DMA transform 混淆会生成错误 stride；GEMM、attention 和 convolution 都依赖可靠 layout。
+
+**措施**：区分零成本 view 与物化 transform，建立 global/local stride、contiguity、alignment 与 alias verifier；先 2D transpose，再 blocked layout。
+
+## 6. P2：复杂算子与性能
+
+### 6.1 显式多核 `LaunchPlan`
+
+**Why**：SG 的 4 核和 BM 的 8 核已经建模，但直接把 `core_num` 改大只会复制整个 grid 并竞写输出。
+
+**措施**：`LaunchPlan` 明确 per-core range、地址偏移、output ownership、跨核同步/归约和错误回收；先无写冲突 elementwise，再 GEMM，最后 reduction。
+
+### 6.2 async pipeline
+
+**Why**：保守串行保证正确性但无法发挥 DMA/compute overlap；它依赖 P0 的 token/hazard 模型。
+
+**措施**：双 buffer versioning、显式 wait/signal、capacity check 和 schedule legality；profiling 只用于定位 overlap，性能结论使用无 recorder 的 warmup/repeat benchmark。
+
+### 6.3 Batch GEMM 与 attention
+
+**Why**：当前 GEMM 只描述 local rank-2 tile；attention 需要 batch/head、mask、online reduction 与流水。
+
+**措施**：先 batched descriptor 与 partition，再验证 online softmax，最后组合 FlashAttention；基础 op 的 contract 未闭合前不引入专用快捷路径。
+
+### 6.4 gather/topk/sort
+
+**Why**：当前 gather/topk 是 TPU-Kernel 专属，且 topk 有芯片 runtime 差异。索引越界、稳定排序、重复值、workspace 和 K 上限都影响语义。
+
+**措施**：将 gather 纳入中立 op；定义 index OOB policy。BM topk 已按真实 K-element 写入 extent 收紧输出并验证稳定重复键，下一步覆盖 K=1/K=length、长度上限和 PCIe；SG 保持拒绝，直到厂商提供有效实现；RV 只在 ISA 与算法路径明确后注册。
+
+### 6.5 convolution 与 layout lowering
+
+**Why**：convolution 需要 padding/dilation/layout/DMA/GEMM 协同，不是简单转发一条 intrinsic。
+
+**措施**：先 im2col+GEMM 参考实现，覆盖 NCHW/NHWC 和非对齐边界；再以 capability 驱动融合或专用指令。
+
+### 6.6 FP8 扩展
+
+**Why**：当前 FP8 已形成 76/76 的公开 CModel 矩阵，包含 copy/cast/fill、dense/W-broadcast/scalar arithmetic、gather、RoPE 与 NN/NT GEMM，但 PCIe、异常值域、可选 saturation 与 RV mapping 仍未形成生产闭环。
+
+**措施**：先在 SG PCIe 分批验证已通过的 copy/arithmetic/scalar/gather/RoPE/GEMM；再为异常值与 saturation 建独立契约。当前 scalar 只承诺非饱和 E4M3-NaN/E5M2-infinity overflow，不能把被 PPL 丢弃的 saturation flag 暴露给用户。RV 按 descriptor、round/saturate 与 accumulator 逐项实现，不能因 ISA 文档列出 FP8 就整体开放。
+
+## 7. P3：上游化与生产工程
+
+### 7.1 后端目录与注册
+
+目标结构：
 
 ```text
 tilelang/tpu/
-  language.py       # common language + 明确的 TPU 专属扩展
-  target.py         # chip/model/runtime normalizer 与 capability
-  pipeline.py       # 完整且可审阅的 TPU pass 顺序
-  codegen.py        # host/device codegen 注册
-  op/               # TpuOpSpec 与标准 TileOp lowering
-  intrinsics/       # 专属 TPU-Kernel/RV escape hatch
-  toolchain.py      # PPL 1.7 resolver/build hook
+  target.py       # chip/model/runtime resolver 与 capability
+  pipeline.py     # TPU pass 顺序
+  language.py     # 标准 op lowering + TPU extension
+  op/             # TpuOpSpec
+  toolchain.py    # PPL 1.7 resolver/build
 
 src/tpu/
-  codegen/          # common / tpukernel / rv
-  op/               # native op verification/lowering
-  memory/           # TPUv7 LMEM profile 与 AddressAssign
+  codegen/common/
+  codegen/tpukernel/
+  codegen/rv/
+  memory/
 ```
 
-迁移顺序：
+**Why**：通用 engine 不应持续累积 TPU/PPL/RV 条件分支。
 
-1. **先注册、不改语义**：把 target normalization、pass list、`target.build.tilelang_tpu`
-   和 execution adapter 接到上游 registry；保持现有数值矩阵不变。
-2. **再统一 op contract**：标准 `T.copy/fill/gemm/reduce` 与兼容 `T.ppl_*` 都进入
-   `TpuOpSpec`；删除 AddressAssign/codegen 的重复字符串知识。
-3. **最后拆 native 目录**：将本轮的三份 codegen 和 TPUv7 memory planner 移入
-   `src/tpu`，让通用 engine 不再知道 PPL、RVT 或 SG2260E。
-4. **可上游与私有内容分层**：target/backend hook、op contract 和无 SDK 单测适合上游；
-   PPL 路径、专有头文件、固件/runtime 与板端安全策略留在可选 TPU adapter。
+**措施**：先把现有行为接到 backend registry，不改语义；再以 `TpuOpSpec` 消除重复字符串；最后移动 native 目录。每一步都重跑 BM/SG CModel 基线。
 
-每一步都以“同一前端在 SG 双后端与 BM 基线上结果不变”为验收，避免一次大迁移同时改变
-目录、pass 顺序和硬件语义。
+### 7.2 artifact manifest 与缓存
 
-## 6. TileLang-Ascend 的参考价值
+**Why**：TPU artifact 依赖 resolved target、pass pipeline、PPL SDK、runtime 和私有 `libkernel.so`；缺少 manifest 的 cache hit 可能加载错误 ABI。
 
-[tilelang-ascend](https://github.com/tile-ai/tilelang-ascend) 当前示例覆盖 GEMM/Batch GEMM、
-elementwise、attention、softmax、normalization、activation、reduce、sort、convolution、
-loss 和 dispatch/combine；其
-[路线图](https://github.com/tile-ai/tilelang-ascend/issues/3) 还将自动同步插入、
-Cube/Vector 分离、`T.Pipelined`、`T.Parallel`、tail 和 persistent 多核分别跟踪。
+**措施**：manifest 记录编译身份、运行身份、toolchain/runtime 依赖和输入签名；新进程 rehydrate 前逐项校验，身份不同即 miss。
 
-应借鉴的是工程分层和验收顺序：
+### 7.3 长期验证矩阵
 
-| Ascend 经验 | TPU 对应措施 | 不应照搬 |
+**Why**：芯片、编程模型、runtime、dtype 与 op 组合迅速增长，手工报告无法防止状态漂移。
+
+**措施**：
+
+- 每次提交运行 source-only + 两芯片 CModel；
+- PCIe 按风险分 smoke/core/extended 三层，首错停止；
+- contract 与 case registry 做双向一致性检查；
+- instruction profiling 与性能 benchmark 分开保存；
+- tracked 报告只汇总结论，raw artifact 继续 ignored。
+
+### 7.4 profiling 依赖与性能判定
+
+**现状**：SG2260E 硬件 dispatch 与 recorder raw 采集成功；受监管会话内没有可用 decoder，因而正确报告 unavailable。随后以临时隔离安装的 vendor package 对同一 raw 文件离线解码，得到 36 条具有有效 ns 区间的 BDC/GDMA 事件，且未再次下发板卡。
+
+**Why**：若框架静默安装或把 decoder 缺失当成数值失败，会破坏离线构建、依赖可审计性和板端安全；单次 recorder 时长也不能代替稳定性能 benchmark。
+
+**措施**：将 raw capture、decode 和 benchmark 保持为三个独立阶段；生产端只探测显式配置的兼容 decoder，记录版本与解析状态，不自动安装；性能比较另用无 recorder 的 warmup/repeat 流程，并保存环境与统计量。
+
+## 8. 对 TileLang 与 TileLang-Ascend 的借鉴
+
+上游 TileLang 需要提供的是后端注册边界、标准二层 op 和 target-specific pipeline hook；TPU 不应要求通用 GPU pass 理解 PPL/RV。适合上游的内容包括 target resolver 接口、`TpuOpSpec` 形态、无 SDK 的 verifier/source tests 与通用 artifact manifest；PPL 路径、专有头文件、固件/runtime 和 PCIe 安全门禁留在可选 TPU adapter。
+
+TileLang-Ascend 的价值在于验证工程分层：计算单元选择、自动同步、pipeline、tail、persistent 多核和复杂 op 应是可分别审阅的层，而不是一个“大而全” lowering。可借鉴注册方式与验收顺序，不能复制其 Cube/Vector 名称、barrier 规则、核数或 layout。
+
+建议用以下组合 workload 逐层验收：
+
+1. RMSNorm 检验 reduction + rsqrt + broadcast；
+2. stable softmax 检验 max/sum + exp + tail；
+3. Batch GEMM 检验 descriptor 与多核 partition；
+4. attention 检验前述能力与依赖安全 pipeline；
+5. MoE dispatch/combine 检验 gather/scatter、sort 与多核 ownership。
+
+## 9. 可执行路线图
+
+| 阶段 | 任务 | 退出条件 |
 | --- | --- | --- |
-| 计算单元自动分工 | 用 capability/op spec 选择 TPU-Kernel 或 RV，并记录 fallback。 | Cube/Vector 名称与指令语义。 |
-| 自动同步与 pipeline | 建立 TPU DMA/BDC/RV 的依赖 token 与 hazard verifier。 | Ascend flag/barrier 编号和可见性规则。 |
-| `T.Parallel`/Persistent | 用显式 `LaunchPlan` 做 SG 4 核、BM 8 核分片。 | Ascend 核数、任务队列和默认调度。 |
-| 以复杂 op 检验基础层 | 用 RMSNorm/softmax/attention 检验 reduction、broadcast、tail。 | 直接复制其 kernel 或 layout。 |
-| examples + batch regression | 每个支持声明必须进入 chip×backend×runtime 矩阵。 | 只以示例可编译替代数值/板端证据。 |
+| P0-A | `TpuOpSpec` + target 表单源化 | verifier/effect/emitter 由同一 spec 驱动；所有负例诊断一致 |
+| P0-B | static tail + hazard verifier | 非整除核心 op CModel 通过；错误 pipeline 编译期拒绝 |
+| P1-A | cast/quant + broadcast + 中立 reduction | 三种有效 target 的精确 capability 矩阵建立 |
+| P1-B | math + RMSNorm/softmax | 误差、workspace、tail 契约在两芯片 CModel 通过 |
+| P2-A | `LaunchPlan` + dependency-safe async | SG 4 核/BM 8 核无竞写，serial/pipeline 数值等价 |
+| P2-B | Batch GEMM、gather/sort、conv、attention | 基础 op 与组合 workload 均有分层证据 |
+| P3 | 上游目录、manifest、CI/benchmark | 通用 engine 无 TPU 细节；cache/板端回归可复现 |
 
-Ascend 自身仍把透明单元分离、自动 tail、persistent、多算子覆盖和性能回归列为持续工作；
-因此它是后端分层参照，不是“另一 NPU 已完整解决”的证据。
+## 10. 支持判定原则
 
-## 7. 分阶段任务清单
-
-### P0：守住正确性边界
-
-1. 建立 `TpuOpSpec` 单点语义源，消除 effect/shape/dtype 的重复分发。
-2. 让标准 `T.copy/fill/gemm` 与 `T.ppl_*` 生成同一中立 IR。
-3. 实现静态 tail/pad 方案；在此前继续拒绝可能越界的 region。
-4. 对 software pipeline 加 hazard verifier；不能验证依赖时编译期拒绝或明确串行化。
-5. 保持 PCIe fresh process、双授权、device id、父死亡/进程组和 bounded kill/drain。
-
-### P1：形成模型基础算子层
-
-1. reduction sum/max/min 与 FP32 accumulator。
-2. scalar/general broadcast、compare/select、cast/quant capability matrix。
-3. exp/rsqrt/activation，再组合 RMSNorm、LayerNorm、softmax。
-4. 为每个 op 建 SG TPU-Kernel/RV CModel 数值测试；只把通过项逐个推进 PCIe。
-
-### P2：性能与复杂算子
-
-1. dependency-correct DMA/compute pipeline 与 buffer versioning。
-2. gather/topk/sort、transpose/im2col、Batch GEMM/conv。
-3. 从无写冲突 elementwise 开始实现 SG 4 核/BM 8 核 `LaunchPlan`。
-4. 在稳定基础 op 上实现 attention/dispatch-combine 等组合 kernel。
-
-### P3：上游化与生产工程
-
-1. 迁入注册式 `tilelang/tpu`、`src/tpu` 后端竖切。
-2. 建 artifact manifest、持久缓存与新进程 rehydrate 测试。
-3. 分离 instruction profiling、低扰动 benchmark 和 autotune 数据模型。
-4. 建 chip×programming-model×runtime×op×dtype/tail 的长期 CI/板端矩阵。
-
-## 8. 判定原则
-
-- “支持”必须同时给出前端契约、生成指令、数值 oracle 和注明的 runtime/chip 范围。
-- CModel 是 PCIe 的前置条件，不是并行/时序语义的替代品。
-- 不支持的 shape、dtype、layout 或生命周期必须在编译期失败，不能静默 fallback。
-- SG2260E 的 4 核是硬件事实；在 `LaunchPlan` 完成前，系统只宣称单核工作负载正确。
-- 单次 profiling duration 用于定位指令，不用于宣称性能优劣。
+- “支持”必须绑定精确 chip、programming model、dtype、shape/layout、variant 与验证 stage；
+- 头文件或 ISA 声明只能证明底层候选能力；
+- CModel 是 PCIe 的必要前置，不证明板端并发、驱动和稳定性；
+- unsupported 与 unverified 必须分开：前者是当前实现明确拒绝，后者是尚无足够证据；
+- 首次板端异常立即终止受控进程组并跳过剩余测试；
+- 单次 instruction timing 用于映射审查，不用于性能排名；
+- 机器事实以 `research/tpu-op-contract/contract.json` 为准，叙述文档不得扩大其 scope。

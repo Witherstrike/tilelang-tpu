@@ -37,8 +37,7 @@ def swi_glu(Block_w, Block_c, C, W, dtype="float32", accum_dtype="float32"):
             work0_1 = T.alloc_shared([Block_c, Block_w], accum_dtype)
             work1_1 = T.alloc_shared([Block_c, Block_w], accum_dtype)
             coeff_1 = T.alloc_shared([64, 32], accum_dtype)  # npu number is 64
-            table_1 = T.alloc_shared([64, 192], accum_dtype)  # npu number is 64
-            T.ppl_exp2(x_neg_exp, work0_1, work1_1, coeff_1, table_1) # exp(-x)
+            T.ppl_exp(x_neg_exp, work0_1, work1_1, coeff_1)  # exp(-x)
             # T.ppl_copy(x_neg, x_neg_exp)
             T.ppl_add(x_neg_exp_1, x_neg_exp, ones) # exp(-x) + 1
             T.ppl_div(x_neg_exp_1_div, x, x_neg_exp_1) # x / (exp(-x) + 1)

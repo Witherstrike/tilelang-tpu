@@ -101,12 +101,16 @@ tilelang/jit/adapter/cython/.cycache
 /src/tl_templates/tpu/main.cpp
 /src/tl_templates/tpu/main.so
 
-# Local SDK/PDF investigation artifacts stay untracked. The maintained backend
-# gap assessment is source documentation and is deliberately the only tracked
-# exception under research/.
+# TPU demo C sources are compiler outputs.  Keep the Python kernels as the
+# source of truth and regenerate C in an isolated build workspace.
+/tpu_demo/**/*.c
+
+# Local SDK/PDF investigation artifacts stay untracked. Maintained design,
+# capability-contract, profiling, and gap reports are explicit exceptions.
 /research/*
 # Local experiment logs and raw outputs. Keep them out of Git deliberately.
 /research/artifacts/
+/.local_content/
 !/research/upstream-gap/
 !/research/upstream-gap/README.md
 !/research/ppl-profiling/
@@ -114,3 +118,11 @@ tilelang/jit/adapter/cython/.cycache
 !/research/rv-backend/
 !/research/rv-backend/README.md
 !/research/rv-backend/TESTING.md
+!/research/tpu-op-contract/
+!/research/tpu-op-contract/README.md
+!/research/tpu-op-contract/schema.json
+!/research/tpu-op-contract/contract.json
+!/research/tpu-op-contract/validate.py
+!/research/tpu-backend-design/
+!/research/tpu-backend-design/README.md
+!/research/tpu-backend-design/test-report.md

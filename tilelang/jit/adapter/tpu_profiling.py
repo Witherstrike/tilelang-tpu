@@ -3,8 +3,8 @@
 """Safe PPL-style instruction profiling for TileLang TPU test programs.
 
 TileLang emits raw PPL C directly and does not pass through ``ppl-compile``.
-Consequently PPL's deprecated ``--profiling``/``--autotune`` frontend switch is
-not meaningful here.  What is reusable is its runtime protocol:
+Consequently PPL's CLI-level ``--profiling``/``--autotune`` switch is not
+directly applicable here. What is reusable is its runtime protocol:
 
 * on CModel, execute one freshly compiled test worker in a dedicated directory
   with ``FILE_DUMP_CMD`` set, then optionally run an explicitly supplied
@@ -41,7 +41,8 @@ import tempfile
 import time
 from typing import Any, Mapping, MutableMapping, Optional, Sequence, Tuple, Union
 
-from tilelang.engine.tpu_config import TPUCompileConfig
+from tilelang.engine.tpu_config import TPURuntimeConfig, TPUTargetSpec
+from tilelang.jit.adapter.ppl_layout import resolve_ppl_layout
 
 
 PathLike = Union[str, os.PathLike]
@@ -91,7 +92,7 @@ class TPUProfilingConfig:
     """
 
     chip: str
-    device_mode: str = "tpukernel"
+    programming_model: str = "tpukernel"
     runtime_mode: str = "cmodel"
     output_dir: Optional[PathLike] = None
     label: str = "tilelang"
@@ -119,26 +120,31 @@ class TPUProfilingConfig:
         if not isinstance(self.profile_book_keeping, int) or self.profile_book_keeping < 0:
             raise ValueError("TPU profile_book_keeping must be a non-negative integer.")
         # The dual-backend capability registry is the one authority for chip,
-        # programming model, legacy atomic normalization, and core topology.
+        # programming model and core topology.
         # Profiling must not maintain a second copy of this table.
-        compile_config = TPUCompileConfig(
+        target_spec = TPUTargetSpec(
             chip=self.chip,
-            device_mode=self.device_mode,
-            runtime_mode=self.runtime_mode,
+            programming_model=self.programming_model,
         )
-        object.__setattr__(self, "chip", compile_config.chip)
-        object.__setattr__(self, "device_mode", compile_config.device_mode)
-        object.__setattr__(self, "runtime_mode", compile_config.runtime_mode)
+        runtime_config = TPURuntimeConfig(runtime_mode=self.runtime_mode)
+        object.__setattr__(self, "chip", target_spec.chip)
+        object.__setattr__(self, "programming_model", target_spec.programming_model)
+        object.__setattr__(self, "runtime_mode", runtime_config.runtime_mode)
 
     @property
-    def compile_config(self) -> TPUCompileConfig:
-        """Return the canonical dual-backend selection for this session."""
+    def target_spec(self) -> TPUTargetSpec:
+        """Return the canonical compile-time identity for this session."""
 
-        return TPUCompileConfig(
+        return TPUTargetSpec(
             chip=self.chip,
-            device_mode=self.device_mode,
-            runtime_mode=self.runtime_mode,
+            programming_model=self.programming_model,
         )
+
+    @property
+    def runtime_config(self) -> TPURuntimeConfig:
+        """Return the canonical host runtime selection for this session."""
+
+        return TPURuntimeConfig(runtime_mode=self.runtime_mode)
 
 
 @dataclass(frozen=True)
@@ -430,7 +436,7 @@ def _perfai_chip_name(config: TPUProfilingConfig) -> str:
     adapter boundary; it is not a third TileLang chip target.
     """
 
-    if config.device_mode == "rv":
+    if config.programming_model == "rv":
         return "sg2260erv"
     # This preserves PPL's CModel special case in ppl_compile.py: BM1690's
     # PerfAI target is named sg2260.
@@ -440,9 +446,9 @@ def _perfai_chip_name(config: TPUProfilingConfig) -> str:
 def _pcie_profile_arch(config: TPUProfilingConfig) -> str:
     """Return the decoder architecture used by PPL's TPUv7 PCIe path."""
 
-    if config.device_mode == "rv":
+    if config.programming_model == "rv":
         return "tpub_7_1_e_rv"
-    return config.compile_config.chip_spec.ppl_arch
+    return config.target_spec.chip_spec.ppl_arch
 
 
 def _extract_js_array(text: str, variable: str) -> Sequence[Any]:
@@ -727,6 +733,30 @@ class TPUInstructionProfiler:
     def __init__(self, config: TPUProfilingConfig):
         self.config = config
 
+    def _validate_ppl_dependencies(self, environment: Mapping[str, str]) -> None:
+        """Fail before spawning when a TileLang/PPL worker declares its SDK.
+
+        The profiler also accepts generic commands used by parser/unit tests,
+        so an absent ``PPL_PROJECT_ROOT`` is not itself an error here.  Once a
+        worker supplies the root, however, the runtime is known and only that
+        runtime's profiling contract is validated.
+        """
+
+        ppl_root = environment.get("PPL_PROJECT_ROOT")
+        if ppl_root is None:
+            return
+        if not ppl_root.strip():
+            raise TPUProfilingError(
+                "PPL_PROJECT_ROOT must not be empty for a TPU profile worker.")
+        try:
+            layout = resolve_ppl_layout(ppl_root, self.config.chip)
+            layout.require_profiling(
+                self.config.runtime_mode, environment=environment)
+        except (OSError, ValueError) as exc:
+            raise TPUProfilingError(
+                "PPL 1.7 dependency preflight failed for "
+                f"{self.config.runtime_mode} profiling: {exc}") from exc
+
     def pcie_profile_environment_overrides(
             self, environment: Optional[Mapping[str, str]] = None) -> Mapping[str, str]:
         """Return PPL's recorder overrides after PCIe safety preflight.
@@ -785,14 +815,16 @@ class TPUInstructionProfiler:
             raise ValueError("TPU profiling command must not be empty.")
         normalized_command = tuple(os.fspath(item) for item in command)
         deadline = _profile_deadline(float(self.config.timeout_s))
-        output_dir = _profile_output_dir(self.config)
         worker_env = _copy_environment(environment)
         worker_env.update(self.pcie_profile_environment_overrides(worker_env))
+        self._validate_ppl_dependencies(worker_env)
+        output_dir = _profile_output_dir(self.config)
         worker_env.pop("FILE_DUMP_CMD", None)
         worker_env["TILELANG_TPU_PROFILE_SESSION"] = "1"
         worker_env["TILELANG_TPU_PROFILE_OUTPUT_DIR"] = str(output_dir)
         worker_env["TILELANG_TPU_PROFILE_CHIP"] = self.config.chip
-        worker_env["TILELANG_TPU_PROFILE_DEVICE_MODE"] = self.config.device_mode
+        worker_env["TILELANG_TPU_PROFILE_PROGRAMMING_MODEL"] = \
+            self.config.programming_model
         worker_env["TILELANG_TPU_PROFILE_RUNTIME_MODE"] = "pcie"
         # The host template independently suppresses benchmark loops during a
         # profile session; keep the worker contract explicit too.
@@ -1009,8 +1041,9 @@ class TPUInstructionProfiler:
         # AutoRunner cannot extend a user-visible 60s CModel watchdog into a
         # multi-minute operation.
         deadline = _profile_deadline(float(self.config.timeout_s))
-        output_dir = _profile_output_dir(self.config)
         worker_env = _copy_environment(environment)
+        self._validate_ppl_dependencies(worker_env)
+        output_dir = _profile_output_dir(self.config)
         # This is the PPL CModel contract.  A relative label is required by the
         # emulator, hence the isolated worker cwd instead of a global parent
         # process chdir.
@@ -1018,7 +1051,8 @@ class TPUInstructionProfiler:
         worker_env["TILELANG_TPU_PROFILE_SESSION"] = "1"
         worker_env["TILELANG_TPU_PROFILE_OUTPUT_DIR"] = str(output_dir)
         worker_env["TILELANG_TPU_PROFILE_CHIP"] = self.config.chip
-        worker_env["TILELANG_TPU_PROFILE_DEVICE_MODE"] = self.config.device_mode
+        worker_env["TILELANG_TPU_PROFILE_PROGRAMMING_MODEL"] = \
+            self.config.programming_model
         worker_env["TILELANG_TPU_PROFILE_RUNTIME_MODE"] = "cmodel"
         # Profiling is exactly one launch.  The generated TileLang host
         # template otherwise honors an inherited benchmark loop.
@@ -1027,7 +1061,7 @@ class TPUInstructionProfiler:
         # explicit for both supported chips so a worker does not inherit a
         # previous process's emulator-core setting.
         worker_env["TPU_RT_CORE_NUM"] = str(
-            self.config.compile_config.chip_spec.physical_core_count)
+            self.config.target_spec.chip_spec.physical_core_count)
         # PPL's CModel flow uses FILE_DUMP_CMD, not BMLIB's PCIe recorder.
         worker_env.pop("BMLIB_ENABLE_ALL_PROFILE", None)
         # Never inherit a previously acknowledged board session into a CModel

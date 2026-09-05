@@ -11,11 +11,6 @@ from tvm.target import Target
 from tvm.tir import PrimFunc
 from tilelang.jit import JITKernel
 from tilelang.engine.param import KernelParam
-from tilelang.engine.tpu_config import (
-    bind_tpu_target,
-    get_tpu_target_chip,
-    resolve_tpu_compile_config,
-)
 import threading
 import cloudpickle
 import logging
@@ -45,42 +40,12 @@ class KernelCache:
     _memory_cache = {}  # In-memory cache dictionary
 
     @staticmethod
-    def _canonical_tpu_cache_selection(target, chip, device_mode, runtime_mode, mode=None):
-        """Normalize the TPU portion of a future persistent cache key.
-
-        Disk caching is intentionally disabled for TPU artifacts today, but
-        keeping this path canonical now prevents the deprecated ``atomic``
-        spelling or legacy ``-model`` target spelling from becoming separate
-        cache identities when it is enabled later.
-        """
-        target_object = None
-        if isinstance(target, Target):
-            target_object = target
-        elif isinstance(target, str) and target != "auto":
-            target_object = Target(target)
-
-        if target_object is None or target_object.kind.name != "tpu":
-            return None, str(target_object) if target_object is not None else str(target)
-
-        target_chip = get_tpu_target_chip(target_object)
-        tpu_config = resolve_tpu_compile_config(
-            chip=chip,
-            device_mode=device_mode,
-            runtime_mode=runtime_mode,
-            mode=mode,
-            target_chip=target_chip,
-        )
-        target_object = bind_tpu_target(target_object, tpu_config)
-        return tpu_config, str(target_object)
-
-    @staticmethod
     def _is_tpu_target_selection(target) -> bool:
         """Resolve ``auto`` before deciding whether persistence is safe.
 
-        TPU artifacts embed a private device library and do not yet have a
-        validated manifest.  Treat an environment-configured ``auto`` target
-        exactly like an explicit TPU target instead of allowing it to enter a
-        generic cache path under an ambiguous key.
+        ``auto`` never selects TPU; an explicit complete TPU Target is the only
+        TPU selection. TPU artifacts still embed a private device library and
+        do not yet have a validated persistence manifest.
         """
         return Target(determine_target(target)).kind.name == "tpu"
 
@@ -115,10 +80,7 @@ class KernelCache:
         args=None,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
-        chip: Optional[str] = None,
-        device_mode: Literal["tpukernel", "rv", "atomic"] = "tpukernel",
         runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
-        mode: Optional[Literal["pcie", "cmodel"]] = None,
     ) -> str:
         """
         Generates a unique hash key for caching compiled kernels.
@@ -135,24 +97,17 @@ class KernelCache:
             str: SHA256 hash key for the kernel configuration.
         """
         func_binary = cloudpickle.dumps(func.script())
-        tpu_config, canonical_target = self._canonical_tpu_cache_selection(
-            target, chip, device_mode, runtime_mode, mode)
         key_data = {
             "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
             "out_idx": (tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx]),
             "args_repr": tuple(
                 repr(arg) for arg in args
             ),  # Use repr to serialize arguments, may need more robust serialization
-            "target": canonical_target,
+            "target": str(target),
             "target_host": str(target_host) if target_host else None,
             "execution_backend": execution_backend,
+            "runtime_mode": runtime_mode,
         }
-        if tpu_config is not None:
-            key_data.update({
-                "chip": tpu_config.chip,
-                "device_mode": tpu_config.device_mode,
-                "runtime_mode": tpu_config.runtime_mode,
-            })
         key_string = json.dumps(key_data, sort_keys=True)  # Sort keys to ensure consistency
         return sha256(key_string.encode()).hexdigest()  # Use SHA256 to generate hash key
 
@@ -166,10 +121,7 @@ class KernelCache:
         execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
         verbose: bool = False,
         pass_configs: dict = None,
-        chip: Optional[str] = None,
-        device_mode: Literal["tpukernel", "rv", "atomic"] = "tpukernel",
         runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
-        mode: Optional[Literal["pcie", "cmodel"]] = None,
     ) -> JITKernel:
         """
         Caches and reuses compiled kernels to avoid redundant compilation.
@@ -193,10 +145,7 @@ class KernelCache:
                 target_host=target_host,
                 verbose=verbose,
                 pass_configs=pass_configs,
-                chip=chip,
-                device_mode=device_mode,
                 runtime_mode=runtime_mode,
-                mode=mode,
             )
 
         # key = self._generate_key(
@@ -228,10 +177,7 @@ class KernelCache:
             target_host=target_host,
             verbose=verbose,
             pass_configs=pass_configs,
-            chip=chip,
-            device_mode=device_mode,
             runtime_mode=runtime_mode,
-            mode=mode
         )
         # if execution_backend == "dlpack":
         #     self.logger.warning("DLPack backend does not support cache saving to disk.")

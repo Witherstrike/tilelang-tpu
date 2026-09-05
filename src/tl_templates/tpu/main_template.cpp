@@ -1,5 +1,5 @@
 #include <tpuv7_rt.h>
-#ifdef TILELANG_TPU_PCIE
+#ifdef TILELANG_TPU_PCIE_PROFILING
 #include <tpuDNN.h>
 #endif
 #include "kernel.h"
@@ -18,7 +18,7 @@ tpuRtStream_t stream = nullptr;
 tpuRtKernelModule_t tpu_module = nullptr;
 static std::mutex tilelang_tpu_profile_mutex;
 static int tilelang_tpu_expected_device_id = -1;
-#ifdef TILELANG_TPU_PCIE
+#ifdef TILELANG_TPU_PCIE_PROFILING
 static bool tilelang_tpu_pcie_profile_consumed = false;
 #endif
 
@@ -27,7 +27,7 @@ static bool tilelang_tpu_env_is_one(const char* name) {{
   return value != nullptr && std::strcmp(value, "1") == 0;
 }}
 
-#ifdef TILELANG_TPU_PCIE
+#ifdef TILELANG_TPU_PCIE_PROFILING
 static bool tilelang_tpu_parse_profile_integer(
     const char* name, int minimum, int* result) {{
   const char* value = std::getenv(name);
@@ -147,14 +147,12 @@ static int tilelang_tpu_device_id() {{
 #endif
 }}
 
-static const char* tilelang_tpu_kernel_path() {{
-#ifdef TILELANG_PPL_KERNEL_PATH
-  return TILELANG_PPL_KERNEL_PATH;
-#else
-  // Keep the standalone template usable, while JIT-built main.so embeds its
-  // private libkernel.so path and never relies on this process-global value.
-  return std::getenv("PPL_KERNEL_PATH");
+#ifndef TILELANG_PPL_KERNEL_PATH
+#error "TPU host artifact must embed its private libkernel.so path"
 #endif
+
+static const char* tilelang_tpu_kernel_path() {{
+  return TILELANG_PPL_KERNEL_PATH;
 }}
 
 int init() {{
@@ -232,7 +230,7 @@ extern "C" int tilelang_tpu_run(void** args) {{
   }}
   const bool profile_session =
       tilelang_tpu_env_is_one("TILELANG_TPU_PROFILE_SESSION");
-#ifdef TILELANG_TPU_PCIE
+#ifdef TILELANG_TPU_PCIE_PROFILING
   tpudnnHandle_t profile_handle = nullptr;
   bool pcie_profile_enabled = false;
 #endif
@@ -251,7 +249,7 @@ extern "C" int tilelang_tpu_run(void** args) {{
       break;
     }}
 
-#ifdef TILELANG_TPU_PCIE
+#ifdef TILELANG_TPU_PCIE_PROFILING
     const int profile_state = tilelang_tpu_begin_pcie_profile(&profile_handle);
     if (profile_state < 0) {{
       status = profile_state;
@@ -263,7 +261,7 @@ extern "C" int tilelang_tpu_run(void** args) {{
     auto start = std::chrono::high_resolution_clock::now();
 {kernel_call}
     auto end = std::chrono::high_resolution_clock::now();
-#ifdef TILELANG_TPU_PCIE
+#ifdef TILELANG_TPU_PCIE_PROFILING
     if (pcie_profile_enabled) {{
       const tpudnnStatus_t sync_status = tpudnnSync(profile_handle);
       const tpudnnStatus_t disable_status = tpudnnDisableProfile(profile_handle);
@@ -350,7 +348,7 @@ extern "C" int tilelang_tpu_run(void** args) {{
 
 {free_statements}
   post();
-#ifdef TILELANG_TPU_PCIE
+#ifdef TILELANG_TPU_PCIE_PROFILING
   if (profile_handle != nullptr) {{
     tpudnnDestroy(profile_handle);
     profile_handle = nullptr;

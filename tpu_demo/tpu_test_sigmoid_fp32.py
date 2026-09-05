@@ -17,14 +17,13 @@ def sigmoid_kernel(Block_w, Block_c, C, W, dtype="float32", accum_dtype="float32
 			x = T.alloc_shared(block_shape, accum_dtype)
 			out = T.alloc_shared(block_shape, accum_dtype)
 
-			# Temporary buffers required by ppl_sigmoid implementation.
+			# Temporary buffers required by the PPL 1.7 sigmoid composition.
 			work0 = T.alloc_shared(block_shape, accum_dtype)
 			work1 = T.alloc_shared(block_shape, accum_dtype)
 			coeff = T.alloc_shared([64, 32], accum_dtype)
-			table = T.alloc_shared([64, 192], accum_dtype)
 
 			T.ppl_copy(G_in[bx * Block_c, by * Block_w], x)
-			T.ppl_sigmoid(out, x, work0, work1, coeff, table)
+			T.ppl_sigmoid(out, x, work0, work1, coeff)
 			T.ppl_copy(out, G_out[bx * Block_c, by * Block_w])
 
 	return main_kernel_inner
@@ -39,7 +38,7 @@ def main():
 	kernel = tilelang.compile(
 		sigmoid_kernel(Block_c=block_C, Block_w=block_W, C=C, W=W),
 		out_idx=-1,
-		target="tpu",
+		target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel",
 	)
 
 	torch.manual_seed(0)

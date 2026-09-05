@@ -27,13 +27,15 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float32", accum_dtype="flo
                 T.ppl_copy(B[k * block_K, bx * block_N], B_shared)
                 T.ppl_copy(A_shared, A_tmp)
                 T.ppl_copy(B_shared, B_tmp)
-                T.ppl_gemm(A_tmp, B_tmp, C_shared)
+                T.ppl_gemm(A_tmp, B_tmp, C_shared, accumulate=True)
             T.ppl_copy(C_shared, C[by * block_M, bx * block_N])
     return main_kernel_inner
 
 
 
-kernel = tilelang.compile(matmul(64,64,64,32,32,32), out_idx=-1, target="tpu")
+kernel = tilelang.compile(
+    matmul(64, 64, 64, 32, 32, 32), out_idx=-1,
+    target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
 
 a = torch.randn(64, 64).float()
 b = torch.randn(64, 64).float()

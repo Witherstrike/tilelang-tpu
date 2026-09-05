@@ -42,8 +42,7 @@ def swi_glu(Block_w, Block_c, C, W, dtype="bfloat16", accum_dtype="float32"):
             work0_1 = T.alloc_shared([Block_c, Block_w], accum_dtype)
             work1_1 = T.alloc_shared([Block_c, Block_w], accum_dtype)
             coeff_1 = T.alloc_shared([64, 32], accum_dtype)  # npu number is 64
-            table_1 = T.alloc_shared([64, 192], accum_dtype)  # npu number is 64
-            T.ppl_exp2(x_neg_exp, work0_1, work1_1, coeff_1, table_1) # exp(-x)
+            T.ppl_exp(x_neg_exp, work0_1, work1_1, coeff_1)  # exp(-x)
             T.ppl_add(x_neg_exp_1, x_neg_exp, ones) # exp(-x) + 1
             T.ppl_div(x_neg_exp_1_div, x, x_neg_exp_1) # x / (exp(-x) + 1)
             T.ppl_mul(out, right, x_neg_exp_1_div) # right * x / (exp(-x) + 1)
@@ -55,7 +54,9 @@ def swi_glu(Block_w, Block_c, C, W, dtype="bfloat16", accum_dtype="float32"):
 
 
 
-kernel = tilelang.compile(swi_glu(32, 32, 64, 64), out_idx=-1, target="tpu") #,pass_config={"disable_storage_rewrite": True})
+kernel = tilelang.compile(
+    swi_glu(32, 32, 64, 64), out_idx=-1,
+    target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
 
 a = torch.randn(64, 64, dtype=torch.bfloat16)
 b = torch.randn(64, 64, dtype=torch.bfloat16)
@@ -77,4 +78,3 @@ print(f"最大差异: {max_diff}")
 print(f"平均差异: {avg_diff}")
 print("check close:")
 print(torch.allclose(c, ref, atol=1e-2, rtol=1e-2))
-

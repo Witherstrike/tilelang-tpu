@@ -71,20 +71,6 @@ def _canonical_events(result):
     return events
 
 
-def _legacy_run_web(output_dir: Path) -> bool:
-    """Run the PPL 1.7 web exporter when an older decoder layout provides it."""
-
-    try:
-        from perfAI.perfAIWeb.run_web import run_web
-    except ImportError:
-        try:
-            from bigTpuProfile.perfAI.perfAIWeb.run_web import run_web
-        except ImportError:
-            return False
-    run_web(str(output_dir), "PerfAI_web", "", False, "", "")
-    return True
-
-
 def main() -> int:
     args = _parse_args()
     profile_dir = args.profile_dir.resolve()
@@ -109,36 +95,24 @@ def main() -> int:
         parser = BMProfileParserPerfAI()
         result = parser.parse(str(raw_path))
         events = _canonical_events(result)
-        if events is not None:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            report = {
-                "schema_version": 1,
-                "arch": args.arch,
-                "source": raw_path.name,
-                "events": events,
-            }
-            (output_dir / _DECODED_REPORT_NAME).write_text(
-                json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",
-                encoding="utf-8",
-            )
-        elif hasattr(parser, "to_txt"):
-            # Compatibility with the decoder API used by PPL 1.7's
-            # autotune.py.  That release obtains the timeline through PerfAI.
-            parser.to_txt(str(output_dir), 1000)
-            if not _legacy_run_web(output_dir):
-                print(
-                    "The installed legacy bigTpuProfile needs its PerfAI web "
-                    "module, which is unavailable.",
-                    file=sys.stderr,
-                )
-                return 4
-        else:
+        if events is None:
             print(
-                "The installed bigTpuProfile API exposes neither a structured "
-                "ProfileResult nor the PPL 1.7 to_txt method.",
+                "The installed bigTpuProfile API does not expose the structured "
+                "ProfileResult required by TileLang.",
                 file=sys.stderr,
             )
             return 4
+        output_dir.mkdir(parents=True, exist_ok=True)
+        report = {
+            "schema_version": 1,
+            "arch": args.arch,
+            "source": raw_path.name,
+            "events": events,
+        }
+        (output_dir / _DECODED_REPORT_NAME).write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
         print(f"decoded arch={args.arch} input={raw_path} output={output_dir}")
     return 0
 

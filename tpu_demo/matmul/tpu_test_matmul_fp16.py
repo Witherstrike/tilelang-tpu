@@ -39,7 +39,7 @@ def matmul(
     """Build the user-facing TileLang kernel.
 
     ``T.ppl_*`` remains the stable frontend spelling. The compiler selects
-    TPU-Kernel or RV Tensor lowering from ``device_mode`` at compile time.
+    TPU-Kernel or RV Tensor lowering from the complete target at compile time.
     """
 
     @T.prim_func
@@ -63,7 +63,7 @@ def matmul(
             for k in T.serial(T.ceildiv(K, block_K)):
                 T.ppl_copy(A[by * block_M, k * block_K], A_shared)
                 T.ppl_copy(B[k * block_K, bx * block_N], B_shared)
-                T.ppl_gemm(A_shared, B_shared, C_shared)
+                T.ppl_gemm(A_shared, B_shared, C_shared, accumulate=True)
             T.ppl_copy(C_shared, C_out)
             T.ppl_copy(C_out, C[by * block_M, bx * block_N])
 
@@ -121,7 +121,7 @@ def _configure_runtime_safety(
 def run(
     *,
     chip: str = "sg2260e",
-    device_mode: str = "tpukernel",
+    programming_model: str = "tpukernel",
     runtime_mode: str = "cmodel",
     allow_pcie: bool = False,
     device_id: Optional[int] = None,
@@ -131,20 +131,20 @@ def run(
 
     if chip not in ("bm1690", "sg2260e"):
         raise ValueError(f"unsupported TPU chip: {chip!r}")
-    if device_mode not in ("tpukernel", "rv"):
-        raise ValueError(f"unsupported device mode: {device_mode!r}")
+    if programming_model not in ("tpukernel", "rv"):
+        raise ValueError(f"unsupported programming model: {programming_model!r}")
     if runtime_mode not in ("cmodel", "pcie"):
         raise ValueError(f"unsupported runtime mode: {runtime_mode!r}")
-    if chip == "bm1690" and device_mode == "rv":
-        raise ValueError("BM1690 does not support device_mode='rv'")
+    if chip == "bm1690" and programming_model == "rv":
+        raise ValueError("BM1690 does not support the RV programming model")
     _configure_runtime_safety(runtime_mode, allow_pcie, device_id)
 
     torch.manual_seed(seed)
     kernel = tilelang.compile(
         matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K),
         out_idx=-1,
-        target=f"tpu -mcpu={chip}",
-        device_mode=device_mode,
+        target=(f"tpu -mcpu={chip} "
+                f"-tpu-programming-model={programming_model}"),
         runtime_mode=runtime_mode,
     )
     a = torch.randn(M, K, dtype=torch.float16)
@@ -159,7 +159,7 @@ def run(
     passed = torch.allclose(actual, expected, atol=1e-2, rtol=1e-2)
     print(
         "MATMUL_RESULT "
-        f"chip={chip} device_mode={device_mode} runtime_mode={runtime_mode} "
+        f"chip={chip} programming_model={programming_model} runtime_mode={runtime_mode} "
         f"max_abs_error={max_abs_error:.8g} "
         f"mean_abs_error={mean_abs_error:.8g} passed={passed}",
         flush=True,
@@ -176,7 +176,7 @@ def _parser() -> argparse.ArgumentParser:
         "--chip", choices=("bm1690", "sg2260e"), default="sg2260e"
     )
     parser.add_argument(
-        "--device-mode", choices=("tpukernel", "rv"), default="tpukernel"
+        "--programming-model", choices=("tpukernel", "rv"), default="tpukernel"
     )
     parser.add_argument(
         "--runtime-mode", choices=("cmodel", "pcie"), default="cmodel"
@@ -197,7 +197,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     try:
         run(
             chip=args.chip,
-            device_mode=args.device_mode,
+            programming_model=args.programming_model,
             runtime_mode=args.runtime_mode,
             allow_pcie=args.allow_pcie,
             device_id=args.device_id,

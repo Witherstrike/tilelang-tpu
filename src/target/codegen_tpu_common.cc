@@ -18,7 +18,8 @@
  */
 
 /*!
- * \file target/codegen.cc
+ * \file target/codegen_tpu_common.cc
+ * \brief Shared TileLang TPU source generation and programming-model dispatch.
  */
 
 #include "codegen_tpu_common.h"
@@ -40,7 +41,6 @@
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
 #include "../op/gemm.h"
-// #include "../../target/source/ptx.h"
 
 namespace tvm {
 namespace codegen {
@@ -52,34 +52,7 @@ CodeGenTileLangTPU::CodeGenTileLangTPU(std::string target_chip,
   restrict_keyword_ = "global_addr_t";
 }
 
-void CodeGenTileLangTPU::PrintFuncPrefix(
-    std::ostream &os) { /*os << "extern \"C\" __global__ "; */
-}
-
-class LaunchConfigExtractor : public tir::StmtVisitor {
-private:
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
-      IterVar iv = Downcast<IterVar>(op->node);
-      if (iv->var->name_hint == "threadIdx.x" ||
-          iv->thread_tag == "threadIdx.x") {
-        threadIdx_x_ext = op->value;
-      } else if (iv->var->name_hint == "threadIdx.y" ||
-                 iv->thread_tag == "threadIdx.y") {
-        threadIdx_y_ext = op->value;
-      } else if (iv->var->name_hint == "threadIdx.z" ||
-                 iv->thread_tag == "threadIdx.z") {
-        threadIdx_z_ext = op->value;
-      }
-    }
-    StmtVisitor::VisitStmt_(op);
-  }
-
-public:
-  PrimExpr threadIdx_x_ext = Integer(1);
-  PrimExpr threadIdx_y_ext = Integer(1);
-  PrimExpr threadIdx_z_ext = Integer(1);
-};
+void CodeGenTileLangTPU::PrintFuncPrefix(std::ostream &) {}
 
 class TPUExternUsageExtractor : public tir::StmtExprVisitor {
 private:
@@ -107,10 +80,11 @@ std::string CodeGenTileLangTPU::Finish() {
   decl_stream << "#include \"ppl_helper.h\"\n";
   if (uses_rvt_api_) {
     // RVT calls use the vendor ABI directly. Do not permit an accidental
-    // implicit declaration in a TPU-Kernel build: only device_mode="rv" sets
-    // TILELANG_TPU_RV and selects a PPL package with rvt_api.h.
+    // implicit declaration in a TPU-Kernel build: only the RV programming
+    // model sets TILELANG_TPU_RV and selects a PPL package with rvt_api.h.
     decl_stream << "#ifndef TILELANG_TPU_RV\n"
-                << "#error \"RVT externs require TPU device_mode=rv\"\n"
+                << "#error \"RVT externs require "
+                   "-tpu-programming-model=rv\"\n"
                 << "#endif\n"
                 << "#include \"atomic_def.h\"\n"
                 << "#include \"rvt_api.h\"\n";
@@ -120,7 +94,8 @@ std::string CodeGenTileLangTPU::Finish() {
   }
   if (uses_tpukernel_api_) {
     decl_stream << "#ifndef TILELANG_TPU_TPUKERNEL\n"
-                << "#error \"TPU-Kernel externs require TPU device_mode=tpukernel\"\n"
+                << "#error \"TPU-Kernel externs require "
+                   "-tpu-programming-model=tpukernel\"\n"
                 << "#endif\n";
   }
   decl_stream << "#ifndef TILELANG_PPL_HELPER_HAS_GET_DTYPE\n"
@@ -148,7 +123,6 @@ std::string CodeGenTileLangTPU::Finish() {
   return CodeGenC::Finish();
 }
 
-/* no need to change */
 void CodeGenTileLangTPU::VisitStmt_(const tir::ForNode *op) {
 
   if (op->kind == tir::ForKind::kUnrolled) {
@@ -175,15 +149,16 @@ void CodeGenTileLangTPU::VisitStmt_(const tir::ForNode *op) {
 }
 
 void CodeGenTileLangTPU::BindThreadIndex(const IterVar &iv) {
-  ICHECK(!var_idmap_.count(iv->var.get()));
-  var_idmap_[iv->var.get()] =
-      CastFromTo(iv->thread_tag, DataType::UInt(32), iv->var.dtype());
+  LOG(FATAL) << "GPU thread binding " << iv->thread_tag
+             << " reached TPU codegen; lower it to an explicit TPU semantic "
+                "operation before source emission";
 }
 
 void CodeGenTileLangTPU::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
-  int lanes = t.lanes();
+  ICHECK(t.is_scalar())
+      << "Vector dtype " << t
+      << " reached TPU codegen; the TPU residual-IR contract is scalar-only";
   if (t.is_handle()) {
-    ICHECK(t.is_scalar()) << "do not yet support vector types";
     os << "void*";
     return;
   }
@@ -193,405 +168,85 @@ void CodeGenTileLangTPU::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     return;
   }
 
-  if (t == tl::cuTensorMapType()) {
-    os << "CUtensorMap";
-    return;
-  }
-
-  bool fail = false;
   if (t.is_float()) {
     switch (t.bits()) {
     case 16:
-      if (t.is_scalar()) {
-        os << "half_t";
-      } else if (lanes <= 8) {
-        // Emit CUDA code to access fp16 vector elements.
-        //
-        // half4 is stored as uint2
-        //
-        // h4.x is emitted as *(half2*)(&(u2.x)).x
-        // h4.y is emitted as *(half2*)(&(u2.x)).y
-        // h4.z is emitted as *(half2*)(&(u2.y)).x
-        // h4.w is emitted as *(half2*)(&(u2.y)).y
-        //
-        ICHECK_EQ(lanes % 2, 0) << "only support even lane for half type";
-        os << "uint" << lanes / 2;
-      } else {
-        fail = true;
-      }
-      break;
+      os << "half_t";
+      return;
     case 32:
-      if (lanes <= 4) {
-        os << "float";
-      } else if (lanes <= 8) {
-        // Emit CUDA code to access fp32 vector elements for 4 < lanes <= 8.
-        //
-        // float8 is stored as ulonglong4
-        //
-        // f8.v1 is emitted as *(float2*)(&(ul4.x)).x
-        // f8.v2 is emitted as *(float2*)(&(ul4.x)).y
-        //
-        ICHECK_EQ(lanes % 2, 0)
-            << "only support even lane for float type with lanes > 4";
-        os << "ulonglong" << lanes / 2;
-      } else {
-        fail = true;
-      }
-      break;
+      os << "float";
+      return;
     case 64:
       os << "double";
-      break;
+      return;
     default:
-      fail = true;
-      break;
-    }
-    if (!fail && (t.is_scalar() || t.bits() == 16))
-      return;
-    if (!fail && (lanes > 4 && lanes <= 8 && t.bits() == 32))
-      return;
-    if (!fail && (lanes >= 2 && lanes <= 4)) {
-      os << lanes;
-      return;
+      LOG(FATAL) << "Unsupported TPU floating-point type " << t;
     }
   } else if (t.is_bfloat16()) {
-    if (t.is_scalar()) {
-      os << "bfloat16_t";
-    } else if (lanes <= 8) {
-      ICHECK_EQ(lanes % 2, 0) << "only support even lane for half type";
-      os << "uint" << lanes / 2;
-    } else {
-      fail = true;
-    }
-    if (!fail)
-      return;
+    os << "bfloat16_t";
+    return;
   } else if (t.is_float8()) {
-    if (t.is_scalar()) {
-      os << "unsigned char"; // __nv_fp8_storage_t is an alias of unsigned char
-    } else if (lanes == 2) {
-      os << "unsigned short int"; // __nv_fp8x2_storage_t is an alias of
-                                  // unsigned short
-    } else if (lanes == 4) {
-      os << "unsigned int"; // __nv_fp8x4_storage_t is an alias of unsigned int
-    } else {
-      fail = true;
-    }
-    if (!fail)
-      return;
+    os << "uint8_t";
+    return;
   } else if (t == DataType::Bool()) {
     os << "bool";
     return;
-  } else if (t.is_vector_bool()) {
-    // CUDA does not support bool vectors.
-    // Use ushort vectors to represent instead.
-    int n = t.lanes();
-    if (n <= 4) {
-      os << "ushort" << n;
-      return;
-    }
   } else if (t.is_uint() || t.is_int()) {
-    if (t.is_uint()) {
-      os << "u";
-    }
+    const bool is_unsigned = t.is_uint();
     switch (t.bits()) {
-    case 1: {
-      if (t.is_scalar()) {
-        os << "int";
-        return;
-      } else if (t.lanes() == 8) {
-        os << "int8_t";
-        return;
-      } else if (t.lanes() == 16) {
-        os << "int16_t";
-        return;
-      } else if (t.lanes() == 32) {
-        os << "int";
-        return;
-      } else {
-        LOG(FATAL) << "Cannot convert type " << t << " to CUDA type!";
-      }
-    }
-    case 4: {
-      if (t.is_scalar()) {
-        os << "int";
-        return;
-      } else if (t.lanes() == 4) {
-        os << "int16_t";
-        return;
-      } else if (t.lanes() == 8) {
-        // directly 8 4-bit int in integer.
-        os << "int";
-        return;
-      } else if (t.lanes() == 16) {
-        os << "int2";
-        return;
-      } else if (t.lanes() == 32) {
-        os << "int4";
-        return;
-      } else if (t.lanes() == 64) {
-        os << "int8";
-        return;
-      } else {
-        LOG(FATAL) << "Cannot convert type " << t << " to CUDA type!";
-      }
-    }
-    case 8: {
-      if (t.lanes() == 4) {
-        // directly 4 8 bit int in integer.
-
-        // We use int for int8x4 instead of char4 because using char4 is
-        // likely to produce extra instructions to pack four int8 elements
-        // into 32-bit data.
-        os << "int";
-        return;
-      } else if (t.lanes() == 8) {
-        os << "int2";
-        return;
-      } else if (t.lanes() == 16) {
-        os << "int4";
-        return;
-      } else if (!t.is_uint() && t.is_scalar()) {
-        os << "signed char";
-        break;
-      } else {
-        os << "char";
-        break;
-      }
-    }
-    case 16: {
-      if (t.is_scalar()) {
-        os << "short";
-      } else if (t.lanes() <= 4) {
-        os << "short" << lanes;
-      } else if (t.lanes() <= 8) {
-        // Emit CUDA code to access int16 vector elements.
-        //
-        // short4 is stored as int2
-        //
-        // s4.x is emitted as *(short2*)(&(i2.x)).x
-        // s4.y is emitted as *(short2*)(&(i2.x)).y
-        // s4.z is emitted as *(short2*)(&(i2.y)).x
-        // s4.w is emitted as *(short2*)(&(i2.y)).y
-        //
-        ICHECK_EQ(t.lanes() % 2, 0)
-            << "only support even lane for shorT type with lanes > 4";
-        os << "int" << t.lanes() / 2;
-      } else {
-        fail = true;
-      }
-      if (!fail) {
-        return;
-      }
-      break;
-    }
-    case 32: {
-      if (t.is_scalar()) {
-        os << "int";
-      } else if (t.lanes() <= 4) {
-        os << "int" << t.lanes();
-      } else if (t.lanes() <= 8) {
-        // Emit CUDA code to access int32 vector elements for 4 < lanes <= 8.
-        //
-        // int8 is stored as longlong4
-        //
-        // i8.v1 is emitted as *(int2*)(&(l4.x)).x
-        // i8.v2 is emitted as *(int2*)(&(l4.x)).y
-        //
-        ICHECK_EQ(lanes % 2, 0)
-            << "only support even lane for int32 type with lanes > 4";
-        os << "longlong" << lanes / 2;
-      } else {
-        fail = true;
-      }
-      if (!fail) {
-        return;
-      }
-      break;
-    }
-    case 64: {
-      if (t.is_scalar()) {
-        os << "int64_t";
-      } else if (t.lanes() == 2) {
-        os << "longlong2";
-      } else if (t.lanes() == 3) {
-        os << "longlong3";
-      } else if (t.lanes() == 4) {
-        os << "longlong4";
-      }
+    case 1:
+    case 4:
+      os << (is_unsigned ? "unsigned int" : "int");
       return;
-    }
+    case 8:
+      os << (is_unsigned ? "uint8_t" : "int8_t");
+      return;
+    case 16:
+      os << (is_unsigned ? "uint16_t" : "int16_t");
+      return;
+    case 32:
+      os << (is_unsigned ? "uint32_t" : "int32_t");
+      return;
+    case 64:
+      os << (is_unsigned ? "uint64_t" : "int64_t");
+      return;
     default:
-      fail = true;
-      break;
-    }
-    if (!fail && lanes == 1) {
-      return;
-    }
-    if (!fail && (lanes >= 2 && lanes <= 4)) {
-      os << lanes;
-      return;
+      LOG(FATAL) << "Unsupported TPU integer type " << t;
     }
   }
-  LOG(FATAL) << "Cannot convert type " << t << " to CUDA type";
+  LOG(FATAL) << "Cannot convert type " << t << " to a TPU C ABI type";
 }
 
 void CodeGenTileLangTPU::PrintVecBinaryOp(const std::string &op, DataType t,
                                           PrimExpr lhs, PrimExpr rhs,
                                           std::ostream &os) { // NOLINT(*)
-  // Delcare the result.
-  std::string sret = name_supply_->FreshName("_");
-  this->PrintIndent();
-  this->PrintType(t, stream);
-  stream << ' ' << sret << ";\n";
-  int ssa_scope = BeginScope();
-  {
-    // Unpack into individual ops.
-    std::string vlhs = SSAGetID(PrintExpr(lhs), lhs.dtype());
-    std::string vrhs = SSAGetID(PrintExpr(rhs), rhs.dtype());
-
-    for (int i = 0, lanes = t.lanes(); i < lanes; ++i) {
-      std::ostringstream value_temp;
-      if (isalpha(op[0])) {
-        value_temp << op << "(";
-        PrintVecElemLoad(vlhs, lhs.dtype(), i, value_temp);
-        value_temp << ", ";
-        PrintVecElemLoad(vrhs, rhs.dtype(), i, value_temp);
-        value_temp << ")";
-      } else {
-        value_temp << "(";
-        PrintVecElemLoad(vlhs, lhs.dtype(), i, value_temp);
-        value_temp << op;
-        PrintVecElemLoad(vrhs, rhs.dtype(), i, value_temp);
-        value_temp << ")";
-      }
-      PrintVecElemStore(sret, t, i, value_temp.str());
-    }
-  }
-  EndScope(ssa_scope);
-  os << sret;
+  LOG(FATAL) << "Vector binary operation " << op << " with dtype " << t
+             << " reached scalar-only TPU codegen";
 }
 
 void CodeGenTileLangTPU::PrintVecElemLoad(const std::string &vec, DataType t,
                                           int i,
                                           std::ostream &os) { // NOLINT(*)
-  if (t.is_scalar()) {
-    os << vec;
-    return;
-  }
-
-  static const char access[] = {'x', 'y', 'z', 'w'};
-  ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
-                        : (t.bits() == 16 || t.bits() == 32) ? 8
-                                                             : 4));
-  if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
-    std::string type_name = t.is_int() ? "char" : "unsigned char";
-    if (t.lanes() == 2 || t.lanes() == 3) {
-      os << vec << "." << access[i % t.lanes()];
-    } else {
-      std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
-      os << "((" << type_name << ")(" << ac << " >> " << i % 4 * 8 << "))";
-    }
-  } else if (t.is_float16()) {
-    os << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
-       << access[i % 2];
-  } else if (t.is_bfloat16()) {
-    os << "((nv_bfloat162*)(&(" << vec << "." << access[i / 2] << ")))->"
-       << access[i % 2];
-  } else if (t.lanes() > 4 && t.lanes() <= 8) {
-    std::string type_name;
-    if (t.bits() == 16) {
-      if (t.is_int()) {
-        type_name = "short";
-      } else if (t.is_uint()) {
-        type_name = "ushort";
-      }
-    } else if (t.bits() == 32) {
-      if (t.is_int()) {
-        type_name = "int";
-      } else if (t.is_uint()) {
-        type_name = "uint";
-      } else if (t.is_float()) {
-        type_name = "float";
-      }
-    }
-    ICHECK(!type_name.empty());
-    os << "((" << type_name << "2*)(&(" << vec << "." << access[i / 2]
-       << ")))->" << access[i % 2];
-  } else {
-    os << vec << "." << access[i];
-  }
+  LOG(FATAL) << "Vector element load " << vec << "[" << i << "] of dtype "
+             << t << " reached scalar-only TPU codegen";
 }
 
 void CodeGenTileLangTPU::PrintVecElemStore(const std::string &vec, DataType t,
                                            int i, const std::string &value) {
-  this->PrintIndent();
-  static const char access[] = {'x', 'y', 'z', 'w'};
-  ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
-                        : (t.bits() == 16 || t.bits() == 32) ? 8
-                                                             : 4));
-  if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
-    if (t.lanes() == 2 || t.lanes() == 3) {
-      stream << vec << '.' << access[i % t.lanes()] << "="
-             << "(" << value << ");\n";
-    } else {
-      std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
-      stream << ac << "=";
-      // Do not read the first undef lane.
-      if (i != 0) {
-        stream << ac << " & ~(0x000000ff << " << i % 4 * 8 << ") |";
-      }
-      stream << "(" << value << " << " << i % 4 * 8 << ");\n";
-    }
-  } else if (t.is_float16()) {
-    stream << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
-           << access[i % 2] << " = " << value << ";\n";
-  } else if (t.is_bfloat16()) {
-    stream << "((nv_bfloat162*)(&(" << vec << "." << access[i / 2] << ")))->"
-           << access[i % 2] << " = " << value << ";\n";
-  } else if (t.lanes() > 4 && t.lanes() <= 8) {
-    std::string type_name;
-    if (t.bits() == 16) {
-      if (t.is_int()) {
-        type_name = "short";
-      } else if (t.is_uint()) {
-        type_name = "ushort";
-      }
-    } else if (t.bits() == 32) {
-      if (t.is_int()) {
-        type_name = "int";
-      } else if (t.is_uint()) {
-        type_name = "uint";
-      } else if (t.is_float()) {
-        type_name = "float";
-      }
-    }
-    ICHECK(!type_name.empty());
-    stream << "((" << type_name << "2*)(&(" << vec << "." << access[i / 2]
-           << ")))->" << access[i % 2] << " = " << value << ";\n";
-  } else {
-    stream << vec << "." << access[i] << " = " << value << ";\n";
-  }
+  LOG(FATAL) << "Vector element store " << vec << "[" << i
+             << "] of dtype " << t << " reached scalar-only TPU codegen";
 }
 
 void CodeGenTileLangTPU::PrintStorageSync(const CallNode *op) {
-  const std::string &sync = op->args[0].as<StringImmNode>()->value;
-  if (sync == "warp") {
-    // DO nothing.
-  } else if (sync == "shared" || sync == "shared.dyn") {
-    this->PrintIndent();
-    this->stream << "__syncthreads();\n";
-  }
+  LOG(FATAL) << "GPU storage synchronization reached TPU codegen; it has no "
+                "implicit TPU-Kernel or RV Tensor meaning";
 }
 
 void CodeGenTileLangTPU::PrintStorageScope(const std::string &scope,
                                            std::ostream &os) { // NOLINT(*)
-  ICHECK_NE(scope, "global")
-      << "Cannot allocate global memory when targeting CUDA. You must pass "
-         "all global arrays as input instead";
-  if (scope == "shared") {
-    os << "__shared__ ";
-  } else if (scope == "shared.dyn") {
-    os << "extern __shared__ __align__(1024) ";
-  }
+  LOG(FATAL) << "Unlowered pointer storage scope " << scope
+             << " reached TPU codegen; TPU local storage must use the "
+                "compiler-owned tensor descriptor path";
 }
 
 std::string CodeGenTileLangTPU::CastFromTo(std::string value, DataType from,
@@ -618,30 +273,10 @@ void CodeGenTileLangTPU::VisitExpr_(const CastNode *op, std::ostream &os) {
   DataType from_ty = op->value.dtype();
   DataType target_ty = op->dtype;
   ICHECK_EQ(target_ty.lanes(), from_ty.lanes());
-
-  // Emit simple C-style type conversion.
-  if (from_ty.is_scalar())
-    return CodeGenC::VisitExpr_(op, os);
-
-  // We could emit make_float4 like calls, but the emitted code looks
-  // too compact to read. Emit this as vectorized unary ops.
-  std::string sret = name_supply_->FreshName("_");
-  this->PrintIndent();
-  this->PrintType(target_ty, stream);
-  stream << ' ' << sret << ";\n";
-  {
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
-    for (int i = 0, lanes = from_ty.lanes(); i < lanes; ++i) {
-      std::ostringstream val;
-      val << "(";
-      PrintType(target_ty.element_of(), val);
-      val << ")(";
-      PrintVecElemLoad(src, from_ty, i, val);
-      val << ")";
-      PrintVecElemStore(sret, target_ty, i, val.str());
-    }
-  }
-  os << sret;
+  ICHECK(from_ty.is_scalar())
+      << "Vector cast from " << from_ty << " to " << target_ty
+      << " reached scalar-only TPU codegen";
+  CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangTPU::PrintCallExtern(Type ret_type, String global_symbol,
@@ -649,57 +284,10 @@ void CodeGenTileLangTPU::PrintCallExtern(Type ret_type, String global_symbol,
                                          bool skip_first_arg,
                                          std::ostream &os) { // NOLINT(*)
   DataType ret_dtype = GetRuntimeDataType(ret_type);
-  if (ret_dtype.is_vector()) {
-    //
-    // Emit an unsupported vector call
-    //
-    // v = intrin_f((float4*)A[0], (float4*)B[0])
-    //
-    // as
-    //
-    // float4 __ret;
-    // {
-    //   float4 __arg0 = ((float4*)A)[0];
-    //   float4 __arg1 = ((float4*)B)[0];
-    //   __ret.x = intrin_f(__arg0.x, __arg1.x);
-    //   __ret.y = intrin_f(__arg0.y, __arg1.y);
-    //   __ret.z = intrin_f(__arg0.z, __arg1.z);
-    //   __ret.w = intrin_f(__arg0.w, __arg1.w);
-    // }
-    // v = __ret;
-    //
-    // Declare the result vector.
-    std::string sret = name_supply_->FreshName("_");
-    this->PrintIndent();
-    this->PrintType(ret_dtype, stream);
-    stream << ' ' << sret << ";\n";
-    {
-      // Load arguments.
-      std::vector<std::string> sargs;
-      size_t arg_begin = static_cast<size_t>(skip_first_arg);
-      for (size_t i = arg_begin; i < args.size(); ++i) {
-        std::string val = SSAGetID(PrintExpr(args[i]), args[i].dtype());
-        sargs.push_back(std::move(val));
-      }
-
-      // Emit a scalar call for each lane.
-      for (int i = 0; i < ret_dtype.lanes(); ++i) {
-        std::ostringstream scall;
-        scall << global_symbol << "(";
-        for (size_t j = 0; j < sargs.size(); ++j) {
-          if (j > 0)
-            scall << ", ";
-          PrintVecElemLoad(sargs[j], args[arg_begin + j].dtype(), i, scall);
-        }
-        scall << ")";
-        PrintVecElemStore(sret, ret_dtype, i, scall.str());
-      }
-    }
-    os << sret;
-  } else {
-    CodeGenC::PrintCallExtern(ret_type, global_symbol, args, skip_first_arg,
-                              os);
-  }
+  ICHECK(!ret_dtype.is_vector())
+      << "Vector external return type " << ret_dtype
+      << " reached scalar-only TPU codegen";
+  CodeGenC::PrintCallExtern(ret_type, global_symbol, args, skip_first_arg, os);
 }
 
 // Print a reference expression to a buffer.
@@ -713,8 +301,7 @@ std::string CodeGenTileLangTPU::GetBufferRef(DataType t,
   if (alloc_storage_scope_.count(buffer_var)) {
     scope = alloc_storage_scope_.at(buffer_var);
   }
-  // bool is_vol = IsVolatile(buffer_var);
-  // always false for tl cutlass backend.
+  // Volatile local tensors are not part of the TPU descriptor ABI.
   bool is_vol = false;
 
   auto ptr_cast = [this, is_vol, scope](DataType pointed_to) {
@@ -742,8 +329,8 @@ std::string CodeGenTileLangTPU::GetBufferRef(DataType t,
 
   std::string index_str = PrintExpr(index);
   if (t.bits() == 4 || (t.bits() == 1 && t.is_int())) {
-    // This is a special case, because CodegenCUDA::PrintType()
-    // returns "int" for bool and for 4-bit integers. In most cases,
+    // PrintType uses an int backing scalar for bool and 4-bit integers. In
+    // most cases,
     // we divide by the number of lanes to determine the index.
     // However, the backing type for scalar int4 and scalar bool is
     // int32.  Therefore, we need to divide by the ratio of their
@@ -815,35 +402,14 @@ static inline int TargetDTypeBytes(DataType dtype) {
   return 0;
 }
 
-static inline const char* AsBDTypeStr(const DataType& dtype_) {
-  if (dtype_ == DataType::Float(32)) {
-    return "DT_FP32";
-  } else if (dtype_ == DataType::Float(16)) {
-    return "DT_FP16";
-  } else if (dtype_ == DataType::BFloat(16)) {
-    return "DT_BFP16";
-  } else if (dtype_.is_e5m2_float8()) {
-    return "DT_FP8E5M2";
-  } else if (dtype_.is_e4m3_float8()) {
-    return "DT_FP8E4M3";
-  }
-
-  // 其它类型回退为FP32
-  return "DT_FP32";
-}
-
 inline int GetIntImmValueForDim4(const PrimExpr &expr, const char *context) {
   auto *imm = expr.as<IntImmNode>();
-  ICHECK(imm) << context << " expects IntImm shape or region extent";
-  ICHECK_GT(imm->value, 0)
-      << context << " expects positive shape or region extent";
-  ICHECK_LE(imm->value, std::numeric_limits<int>::max())
-      << context << " shape or region extent exceeds int range";
-  return static_cast<int>(imm->value);
+  ICHECK(imm) << context << " expects a compile-time integer dimension";
+  return static_cast<int>(
+      tl::tpuv7::ValidateDescriptorDim(imm->value, context));
 }
 
-inline std::vector<int> LowerDimValuesToDim4(const std::vector<int> &dims,
-                                             bool local_layout) {
+inline std::vector<int> LowerDimValuesToDim4(const std::vector<int> &dims) {
   int rank = dims.size();
   ICHECK(rank >= 1 && rank <= 4) << "Only support rank 1 to 4, but got "
                                  << rank;
@@ -854,15 +420,9 @@ inline std::vector<int> LowerDimValuesToDim4(const std::vector<int> &dims,
     dim4[1] = dims[0];
     dim4[3] = dims[1];
   } else if (rank == 3) {
-    if (local_layout) {
-      dim4[0] = dims[0];
-      dim4[1] = dims[1];
-      dim4[3] = dims[2];
-    } else {
-      dim4[1] = dims[0];
-      dim4[2] = dims[1];
-      dim4[3] = dims[2];
-    }
+    dim4[0] = dims[0];
+    dim4[1] = dims[1];
+    dim4[3] = dims[2];
   } else {
     for (int i = 0; i < 4; i++) {
       dim4[i] = dims[i];
@@ -871,15 +431,14 @@ inline std::vector<int> LowerDimValuesToDim4(const std::vector<int> &dims,
   return dim4;
 }
 
-inline std::vector<int> LowerRegionToDim4(const Array<Range> &ranges,
-                                          bool local_layout) {
+inline std::vector<int> LowerRegionToDim4(const Array<Range> &ranges) {
   int rank = ranges.size();
   std::vector<int> dims;
   dims.reserve(rank);
   for (const auto &range : ranges) {
     dims.push_back(GetIntImmValueForDim4(range->extent, "TileLang TPU copy region"));
   }
-  return LowerDimValuesToDim4(dims, local_layout);
+  return LowerDimValuesToDim4(dims);
 }
 
 inline std::vector<int> LowerGlobalShapeToDim4(const Array<PrimExpr> &shape) {
@@ -889,15 +448,14 @@ inline std::vector<int> LowerGlobalShapeToDim4(const Array<PrimExpr> &shape) {
   for (const auto &dim : shape) {
     dims.push_back(GetIntImmValueForDim4(dim, "TileLang TPU global tensor"));
   }
-  return LowerDimValuesToDim4(dims, true);
+  return LowerDimValuesToDim4(dims);
 }
 
-inline std::vector<int> StrideIndicesForRank(int rank, bool local_layout) {
+inline std::vector<int> StrideIndicesForRank(int rank) {
   if (rank == 4) {
     return {0, 1, 2, 3};
   } else if (rank == 3) {
-    return local_layout ? std::vector<int>{0, 1, 3}
-                        : std::vector<int>{1, 2, 3};
+    return {0, 1, 3};
   } else if (rank == 2) {
     return {1, 3};
   } else if (rank == 1) {
@@ -908,34 +466,18 @@ inline std::vector<int> StrideIndicesForRank(int rank, bool local_layout) {
 }
 
 void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
-  auto process_stride = [&,
-                         this](const std::vector<int> &src0_shape,
-                               const std::vector<int> &src1_shape,
-                               const std::string &src0, const std::string &src1,
-                               const std::string &dtype) -> std::stringstream {
-    std::stringstream src1_stride;
-    if (src1_shape[1] == 1 && src0_shape[1] != 1) {
-      std::string stride_var = name_supply_->FreshName(src1 + "_stride");
-      this->PrintIndent();
-      this->stream << "dim4 " << stride_var << ";\n";
-      this->PrintIndent();
-      this->stream << "tpu_aligned_stride(&" << stride_var << ", 0, &" << src1
-                   << ".shape, " << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << stride_var << ".w = 0;\n";
-      src1_stride << "&" << stride_var << ", ";
-    } else if (src1_shape[1] == src0_shape[1]) {
-      src1_stride << "(" << src1 << ".default_stride ? NULL : &" << src1
-                  << ".stride), ";
-    }
-    return src1_stride;
-  };
-
   auto handle_elementwise = [&, this](const std::string &operation) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.tpu." << operation << " expects dst, lhs, and rhs";
     const auto *dst_access = op->args[1].as<CallNode>();
     const auto *src0_access = op->args[2].as<CallNode>();
     const auto *src1_access = op->args[3].as<CallNode>();
-    ICHECK(dst_access && src0_access && src1_access)
+    ICHECK(dst_access && src0_access && src1_access &&
+           dst_access->op.same_as(builtin::tvm_access_ptr()) &&
+           src0_access->op.same_as(builtin::tvm_access_ptr()) &&
+           src1_access->op.same_as(builtin::tvm_access_ptr()) &&
+           dst_access->args.size() >= 2U && src0_access->args.size() >= 2U &&
+           src1_access->args.size() >= 2U)
         << "tl.tpu." << operation << " expects three buffer access_ptr operands";
     const auto *dst_var = dst_access->args[1].as<VarNode>();
     const auto *src0_var = src0_access->args[1].as<VarNode>();
@@ -943,15 +485,20 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK(dst_var && src0_var && src1_var)
         << "tl.tpu." << operation << " expects buffer-backed operands";
     ICHECK(buffer_addrs_.count(dst_var) && buffer_addrs_.count(src0_var) &&
-           buffer_addrs_.count(src1_var))
+           buffer_addrs_.count(src1_var) && var_idmap_.count(dst_var) &&
+           var_idmap_.count(src0_var) && var_idmap_.count(src1_var))
         << "TileLang TPU " << operation
-        << " operands must all reside in local memory";
-    auto dst = var_idmap_[dst_var];
-    auto src0 = var_idmap_[src0_var];
-    auto src1 = var_idmap_[src1_var];
-    auto dst_shape = buffer_shape[dst];
-    auto src0_shape = buffer_shape[src0];
-    auto src1_shape = buffer_shape[src1];
+        << " operands must all have compiler-owned local descriptors";
+    const auto &dst = var_idmap_.at(dst_var);
+    const auto &src0 = var_idmap_.at(src0_var);
+    const auto &src1 = var_idmap_.at(src1_var);
+    ICHECK(buffer_shape.count(dst) && buffer_shape.count(src0) &&
+           buffer_shape.count(src1))
+        << "TileLang TPU " << operation
+        << " operands are missing local shape metadata";
+    const auto &dst_shape = buffer_shape.at(dst);
+    const auto &src0_shape = buffer_shape.at(src0);
+    const auto &src1_shape = buffer_shape.at(src1);
     auto require_matrix_layout = [&, this](const std::string &tensor,
                                             const char *operand) {
       auto it = buffer_shape4.find(tensor);
@@ -976,11 +523,21 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK(dst_dtype == src0_dtype && dst_dtype == src1_dtype)
         << "TileLang TPU " << operation
         << " requires matching input/output dtypes";
-    ICHECK(dst_dtype == DataType::Float(16) ||
-           dst_dtype == DataType::BFloat(16) ||
-           dst_dtype == DataType::Float(32))
-        << "TileLang TPU floating-point " << operation
-        << " only supports FP16, BF16, or FP32";
+    const bool is_fp8 =
+        dst_dtype.is_e4m3_float8() || dst_dtype.is_e5m2_float8();
+    if (is_fp8) {
+      ICHECK_NE(operation, "div")
+          << "TileLang TPU division has no validated FP8 instruction";
+      ICHECK_EQ(target_programming_model_, "tpukernel")
+          << "FP8 " << operation
+          << " is validated only for the TPU-Kernel programming model";
+    } else {
+      ICHECK(dst_dtype == DataType::Float(16) ||
+             dst_dtype == DataType::BFloat(16) ||
+             dst_dtype == DataType::Float(32))
+          << "TileLang TPU floating-point " << operation
+          << " only supports FP16, BF16, or FP32";
+    }
     ICHECK(dst_shape == src0_shape)
         << "TileLang TPU " << operation
         << " requires output and lhs shapes to match";
@@ -988,66 +545,30 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
            (src1_shape[0] == dst_shape[0] && src1_shape[1] == 1))
         << "TileLang TPU " << operation
         << " only supports an equal rhs shape or W-dimension broadcast";
-    std::string dtype = TargetDTypeName(dst_dtype);
     if (target_programming_model_ == "tpukernel") {
-      std::stringstream src1_stride =
-          process_stride(src0_shape, src1_shape, src0, src1, dtype);
-      EmitTPUKernelElementwise("tpu_bdc_fp_" + operation, dst, src0, src1,
-                               dtype, src1_stride.str());
+      EmitTPUKernelElementwise(operation, dst, src0, src1, dst_dtype,
+                               src0_shape, src1_shape);
     } else {
       EmitRVElementwise(operation, dst, src0, src1, dst_dtype, src0_dtype,
                         src1_dtype, dst_shape, src0_shape, src1_shape);
     }
   };
-  // void tpu_bdc_fp_mul_C(local_addr_t dst_addr, local_addr_t src_addr,
-  // scalar_t C, const dim4 *shape, const dim4 *dst_stride, const dim4
-  // *src_stride, data_type_t dtype)
-  auto handle_elementwise_const = [&, this](std::string op_name) {
-    auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
-    auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
-    float value = Downcast<FloatImm>(op->args[3])->value;
-    auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-    std::string dtype;
-    std::string scalar_type;
-    if (dtype_ == DataType::Float(16)) {
-      dtype = "DT_FP16";
-      scalar_type = "f16";
-    } else if (dtype_ == DataType::Float(32)) {
-      dtype = "DT_FP32";
-      scalar_type = "f32";
-    } else if (dtype_ == DataType::BFloat(16)){
-      dtype = "DT_BFP16";
-      scalar_type = "bf16";
-    }
-    if (dtype == "DT_FP32"){
-      this->PrintIndent();
-      this->stream << op_name << "( " << dst << ".addr, " << src0 << ".addr, "
-                  << "(scalar_t){." << scalar_type << " = " << value << "}, &"
-                  << dst << ".shape, "
-                  << "(" << dst << ".default_stride ? NULL : &" << dst
-                  << ".stride), "
-                  << "(" << src0 << ".default_stride ? NULL : &" << src0
-                  << ".stride), " << dtype << ");\n";
-    }
-    else{
-      this->PrintIndent();
-      this->stream << "{\n";
-      this->PrintIndent();
-      this->stream << "scalar_t " << dst << "_scalar_" << dtype << " = {.f32 = " << "(float)" << value << "};\n";
-      this->PrintIndent();
-      // x_neg_scalar_DT_BFP16 = tpu_cast(x_neg_scalar_DT_BFP16, DT_BFP16, DT_FP32, RM_HALF_TO_EVEN);
-      this->stream << dst << "_scalar_" << dtype << " = tpu_cast(" << dst << "_scalar_" << dtype << ", " << dtype << ", DT_FP32, RM_HALF_TO_EVEN);\n";
-      this->PrintIndent();
-      this->stream << op_name << "( " << dst << ".addr, " << src0 << ".addr, " <<  dst << "_scalar_" << dtype << ", " << "&" << dst << ".shape, " << "(" << dst << ".default_stride ? NULL : &" << dst << ".stride), " << "(" << src0 << ".default_stride ? NULL : &" << src0 << ".stride), " <<  dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "}\n";
-    }
-  };
   std::vector<std::string> inst;
   if (op->op.same_as(builtin::call_extern())) {
     std::string op_name = Downcast<StringImm>(op->args[0])->value;
+    ICHECK(op_name.rfind("ppl.", 0) != 0)
+        << "The internal ppl.* TIR ABI has been removed; use tl.tpu.* for "
+           "portable core operations or tl.tpukernel.* for TPU-Kernel-only "
+           "operations. Found "
+        << op_name;
+    ICHECK(op_name.rfind("tpu_", 0) != 0)
+        << "Raw tpu_* call_extern is not a supported TileLang ABI. Use a "
+           "typed tl.tpukernel.* semantic operation so ownership, memory "
+           "effects, dtype constraints, and chip support can be validated. "
+           "Found "
+        << op_name;
     const bool is_tpukernel_extern =
-        op_name.rfind("ppl.", 0) == 0 || op_name.rfind("tpu_", 0) == 0;
+        op_name.rfind("tl.tpukernel.", 0) == 0;
     const bool is_rvt_extern = op_name.rfind("rvt_", 0) == 0;
     const bool is_portable_tpu_op = op_name.rfind("tl.tpu.", 0) == 0;
     if (is_portable_tpu_op) {
@@ -1064,7 +585,6 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
       ++canonical_tpu_op_count_;
       if (target_programming_model_ == "rv") {
         uses_rvt_api_ = true;
-        uses_canonical_rv_ = true;
       } else {
         uses_tpukernel_api_ = true;
       }
@@ -1079,17 +599,15 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
       ++tpukernel_extern_count_;
       uses_tpukernel_api_ = true;
     }
-    if (op_name == "ppl.copy" || op_name == "tl.tpu.copy") {
+    if (op_name == "tl.tpu.copy") {
+      ICHECK_EQ(op->args.size(), 3U)
+          << op_name << " expects exactly one source and one destination region";
       tl::BufferMap buffer_map;
-      auto is_local_tensor_scope = [](const std::string &scope) {
-        return scope == "shared.dyn" || scope == "local" ||
-               scope == "local.fragment";
-      };
       auto check_copy_bounds = [&, this](const tir::Buffer &buffer,
                                          const Array<Range> &ranges,
                                          const char *operand_name) {
         ICHECK_LE(ranges.size(), buffer->shape.size())
-            << "ppl.copy " << operand_name << " rank mismatch: region rank "
+            << op_name << " " << operand_name << " rank mismatch: region rank "
             << ranges.size() << ", buffer rank " << buffer->shape.size();
         arith::Analyzer analyzer;
         for (const auto &loop_range : loop_var_ranges_) {
@@ -1111,12 +629,12 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           bool upper_ok = analyzer.CanProve(
               upper <= shape_dim, arith::ProofStrength::kSymbolicBound);
           ICHECK(lower_ok && upper_ok)
-              << "ppl.copy " << operand_name << " region may be out of bounds "
+              << op_name << " " << operand_name << " region may be out of bounds "
               << "for buffer " << buffer->name << " at dim "
               << (dim_offset + i) << ": min=" << min
               << ", extent=" << range->extent << ", upper=" << upper
               << ", shape_dim=" << shape_dim
-              << ". PPL copy does not support implicit tail masking; make "
+              << ". Portable TPU copy has no implicit tail masking; make "
               << "the tile divide the static shape or add explicit tail "
               << "handling in the frontend.";
         }
@@ -1126,31 +644,49 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
                                     const char *operand_name)
           -> std::tuple<std::string, std::string, std::string> {
         auto src_buffer = src.GetBuffer();
-        bool is_local = is_local_tensor_scope(src_buffer.scope());
+        const std::string scope = src_buffer.scope();
+        const bool is_local = tl::tpuv7::IsLocalMemoryScope(scope);
+        const bool is_global = scope == "global";
+        ICHECK(is_local || is_global)
+            << "Unsupported " << op_name << " buffer scope: " << scope
+            << "; expected global or one of shared, shared.dyn, local, "
+               "local.fragment";
 
-        auto src_id = var_idmap_[src_buffer->data.get()];
-        if (src_id.empty()) {
-          src_id = this->parameter_map[src_buffer->name];
+        std::string src_id;
+        if (is_global) {
+          auto parameter_it = parameter_map.find(src_buffer->name);
+          ICHECK(parameter_it != parameter_map.end())
+              << op_name << " " << operand_name << " buffer "
+              << src_buffer->name << " is not a global kernel parameter";
+          src_id = parameter_it->second;
+        } else {
+          const auto *data_var = src_buffer->data.get();
+          auto local_it = var_idmap_.find(data_var);
+          ICHECK(buffer_addrs_.count(data_var) && local_it != var_idmap_.end())
+              << op_name << " " << operand_name << " buffer "
+              << src_buffer->name
+              << " has local scope but no compiler-owned LMEM descriptor";
+          src_id = local_it->second;
         }
         check_copy_bounds(src_buffer, src_ranges, operand_name);
         std::string new_src_var =
             name_supply_->FreshName(src_buffer->data->name_hint);
-        bool use_local_rank3_layout = is_local || src_buffer.scope() == "global";
-        std::string src_shape = vector2string(
-            LowerRegionToDim4(src_ranges, use_local_rank3_layout));
+        std::string src_shape = vector2string(LowerRegionToDim4(src_ranges));
 
         std::string dtype = TargetDTypeName(src_buffer->dtype);
         int bytes_size = TargetDTypeBytes(src_buffer->dtype);
-        if (src_buffer.scope() == "global") {
-          auto strides = buffer_stride[src_buffer->name];
-          ICHECK_EQ(strides.size(), 4U)
+        if (is_global) {
+          auto stride_it = buffer_stride.find(src_buffer->name);
+          ICHECK(stride_it != buffer_stride.end() &&
+                 stride_it->second.size() == 4U)
               << "buffer_stride not initialized for global buffer: "
               << src_buffer->name;
+          const auto &strides = stride_it->second;
           std::string src_strides = vector2string(strides);
 
           std::string min_expr;
           std::vector<int> stride_idx =
-              StrideIndicesForRank(src_ranges.size(), true);
+              StrideIndicesForRank(src_ranges.size());
 
           for (size_t i = 0; i < src_ranges.size(); i++) {
             auto sr = src_ranges[i];
@@ -1173,13 +709,13 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
                          ", .mode = 2, .size = 1, .offset = " + min_expr +
                          ", .unsigned_flag = 0, .default_stride = false};\n");
         } else if (is_local) {
-          auto parent_var = var_idmap_[src_buffer->data.get()];
+          const std::string &parent_var = src_id;
           std::string min_expr;
           std::vector<std::string> strides = {
               parent_var + ".stride.n", parent_var + ".stride.c",
               parent_var + ".stride.h", parent_var + ".stride.w"};
           std::vector<int> stride_idx =
-              StrideIndicesForRank(src_ranges.size(), true);
+              StrideIndicesForRank(src_ranges.size());
           for (size_t i = 0; i < src_ranges.size(); i++) {
             auto sr = src_ranges[i];
             const PrimExpr &e = sr->min;
@@ -1200,12 +736,8 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
                          ", .mode = 0, .size = 1, .offset = " + min_expr + ", "
                          ".unsigned_flag = 0, .default_stride = " + parent_var +
                          ".default_stride};\n");
-        } else {
-          LOG(FATAL) << "Unsupported ppl.copy buffer scope: "
-                     << src_buffer.scope();
         }
-        return std::make_tuple(new_src_var,
-                               src_buffer.scope() == "global" ? "global" : "local",
+        return std::make_tuple(new_src_var, is_global ? "global" : "local",
                                dtype);
       };
       tl::RegionOp src =
@@ -1250,8 +782,8 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
 
       auto emit_copy_for_ranges = [&](const Array<Range> &src_ranges,
                                       const Array<Range> &dst_ranges) {
-        const auto src_shape4 = LowerRegionToDim4(src_ranges, true);
-        const auto dst_shape4 = LowerRegionToDim4(dst_ranges, true);
+        const auto src_shape4 = LowerRegionToDim4(src_ranges);
+        const auto dst_shape4 = LowerRegionToDim4(dst_ranges);
         ICHECK(src_shape4 == dst_shape4)
             << op_name << " requires source and destination regions to have "
                "the same normalized N/C/H/W extents";
@@ -1259,6 +791,21 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
             process_copy(src, src_ranges, "src");
         auto [dst_var_id, dst_flag, dst_dtype] =
             process_copy(dst, dst_ranges, "dst");
+        auto is_fp8 = [](const std::string &dtype) {
+          return dtype == "DT_FP8E4M3" || dtype == "DT_FP8E5M2";
+        };
+        if (is_fp8(src_dtype) || is_fp8(dst_dtype)) {
+          ICHECK_EQ(target_programming_model_, "tpukernel")
+              << op_name << " FP8 transport is validated only for the "
+                 "TPU-Kernel programming model";
+          const bool same_format = src_dtype == dst_dtype;
+          const bool fp32_conversion =
+              (is_fp8(src_dtype) && dst_dtype == "DT_FP32") ||
+              (src_dtype == "DT_FP32" && is_fp8(dst_dtype));
+          ICHECK(same_format || fp32_conversion)
+              << op_name << " FP8 supports same-format transport and the "
+                 "validated FP32 conversion boundary only";
+        }
         // Region descriptors must be declared before either backend emits an
         // instruction that references them.
         for (const auto &declaration : inst) {
@@ -1289,13 +836,18 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
       } else {
         emit_copy_for_ranges(src_ranges, dst_ranges);
       }
-    } else if (op_name == "ppl.fill" || op_name == "tl.tpu.fill") {
+    } else if (op_name == "tl.tpu.fill") {
+      ICHECK_EQ(op->args.size(), 3U)
+          << op_name << " expects a destination and floating literal";
       const auto *access = op->args[1].as<CallNode>();
-      ICHECK(access) << op_name << " expects a buffer access_ptr";
+      ICHECK(access && access->op.same_as(builtin::tvm_access_ptr()) &&
+             access->args.size() >= 2U)
+          << op_name << " expects a buffer access_ptr";
       const auto *var_ = access->args[1].as<VarNode>();
-      ICHECK(var_ && buffer_addrs_.count(var_))
-          << op_name << " destination must reside in local memory";
-      auto data_ = var_idmap_[var_];
+      ICHECK(var_ && buffer_addrs_.count(var_) && var_idmap_.count(var_))
+          << op_name
+          << " destination must have a compiler-owned local descriptor";
+      const auto &data_ = var_idmap_.at(var_);
       auto dtype = access->args[0].as<CallNode>()->dtype;
       const auto *value_node = op->args[2].as<FloatImmNode>();
       ICHECK(value_node) << op_name << " currently requires a floating literal";
@@ -1305,25 +857,41 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
       } else {
         EmitTPUKernelFill(data_, dtype, value);
       }
-    } else if (op_name == "ppl.gemm" || op_name == "tl.tpu.gemm") {
+    } else if (op_name == "tl.tpu.gemm") {
+      ICHECK_EQ(op->args.size(), 10U)
+          << "tl.tpu.gemm requires the canonical 10-argument ABI, including "
+             "an explicit accumulate flag";
       const auto *a_access = op->args[1].as<CallNode>();
       const auto *b_access = op->args[2].as<CallNode>();
       const auto *c_access = op->args[3].as<CallNode>();
-      ICHECK(a_access && b_access && c_access)
+      ICHECK(a_access && b_access && c_access &&
+             a_access->op.same_as(builtin::tvm_access_ptr()) &&
+             b_access->op.same_as(builtin::tvm_access_ptr()) &&
+             c_access->op.same_as(builtin::tvm_access_ptr()) &&
+             a_access->args.size() >= 2U && b_access->args.size() >= 2U &&
+             c_access->args.size() >= 2U)
           << op_name << " expects three buffer access_ptr operands";
       const auto *a_var = a_access->args[1].as<VarNode>();
       const auto *b_var = b_access->args[1].as<VarNode>();
       const auto *c_var = c_access->args[1].as<VarNode>();
       ICHECK(a_var && b_var && c_var && buffer_addrs_.count(a_var) &&
-             buffer_addrs_.count(b_var) && buffer_addrs_.count(c_var))
-          << op_name << " operands must all reside in local memory";
-      auto a_access_data = var_idmap_[a_var];
-      auto b_access_data = var_idmap_[b_var];
-      auto c_access_data = var_idmap_[c_var];
+             buffer_addrs_.count(b_var) && buffer_addrs_.count(c_var) &&
+             var_idmap_.count(a_var) && var_idmap_.count(b_var) &&
+             var_idmap_.count(c_var))
+          << op_name
+          << " operands must all have compiler-owned local descriptors";
+      const auto &a_access_data = var_idmap_.at(a_var);
+      const auto &b_access_data = var_idmap_.at(b_var);
+      const auto &c_access_data = var_idmap_.at(c_var);
 
-      auto M = Downcast<IntImm>(op->args[6])->value;
-      auto N = Downcast<IntImm>(op->args[7])->value;
-      auto K = Downcast<IntImm>(op->args[8])->value;
+      const auto *m_imm = op->args[6].as<IntImmNode>();
+      const auto *n_imm = op->args[7].as<IntImmNode>();
+      const auto *k_imm = op->args[8].as<IntImmNode>();
+      ICHECK(m_imm && n_imm && k_imm)
+          << op_name << " M/N/K must be compile-time integers";
+      auto M = m_imm->value;
+      auto N = n_imm->value;
+      auto K = k_imm->value;
       constexpr int64_t kTPUGemmDimLimit =
           static_cast<int64_t>(std::numeric_limits<uint16_t>::max());
       ICHECK_GT(M, 0);
@@ -1335,16 +903,25 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           << op_name << " N exceeds the TPU GEMM uint16_t limit";
       ICHECK_LE(K, kTPUGemmDimLimit)
           << op_name << " K exceeds the TPU GEMM uint16_t limit";
-      auto trans_A = Downcast<Bool>(op->args[4])->value;
-      auto trans_B = Downcast<Bool>(op->args[5])->value;
-      bool accumulate = !trans_B;
-      if (op->args.size() >= 10) {
-        accumulate = Downcast<Bool>(op->args[9])->value;
-      }
+      const auto *trans_a_imm = op->args[4].as<IntImmNode>();
+      const auto *trans_b_imm = op->args[5].as<IntImmNode>();
+      ICHECK(trans_a_imm && trans_a_imm->dtype.is_bool() && trans_b_imm &&
+             trans_b_imm->dtype.is_bool())
+          << op_name << " transpose flags must be compile-time booleans";
+      auto trans_A = trans_a_imm->value != 0;
+      auto trans_B = trans_b_imm->value != 0;
+      const auto *accumulate_imm = op->args[9].as<IntImmNode>();
+      ICHECK(accumulate_imm && accumulate_imm->dtype.is_bool())
+          << "tl.tpu.gemm accumulate must be a compile-time boolean";
+      bool accumulate = accumulate_imm->value != 0;
 
-      const auto &a_shape = buffer_shape[a_access_data];
-      const auto &b_shape = buffer_shape[b_access_data];
-      const auto &c_shape = buffer_shape[c_access_data];
+      ICHECK(buffer_shape.count(a_access_data) &&
+             buffer_shape.count(b_access_data) &&
+             buffer_shape.count(c_access_data))
+          << op_name << " operands are missing local shape metadata";
+      const auto &a_shape = buffer_shape.at(a_access_data);
+      const auto &b_shape = buffer_shape.at(b_access_data);
+      const auto &c_shape = buffer_shape.at(c_access_data);
       auto require_matrix_layout = [&, this](const std::string &tensor,
                                               const char *operand) {
         auto it = buffer_shape4.find(tensor);
@@ -1384,671 +961,55 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
                           a_dtype, b_dtype, c_dtype, trans_A, trans_B,
                           accumulate, M, N, K);
       }
-    } else if (op_name == "ppl.sub" || op_name == "tl.tpu.sub") {
+    } else if (op_name == "tl.tpu.sub") {
       handle_elementwise("sub");
-    } else if (op_name == "ppl.mul" || op_name == "tl.tpu.mul") {
+    } else if (op_name == "tl.tpu.mul") {
       handle_elementwise("mul");
-    } else if (op_name == "ppl.add" || op_name == "tl.tpu.add") {
+    } else if (op_name == "tl.tpu.add") {
       handle_elementwise("add");
-    } else if (op_name == "ppl.div" || op_name == "tl.tpu.div") {
+    } else if (op_name == "tl.tpu.div") {
       handle_elementwise("div");
-    } else if (op_name == "ppl.mul_C") {
-      handle_elementwise_const("tpu_bdc_fp_mul_C");
-    } else if (op_name == "ppl.add_C") {
-      handle_elementwise_const("tpu_bdc_fp_add_C");
-    }
-    /** The following op needs to be handled specially. */
-    else if (op_name == "ppl.exp") {
-      auto work0 =
-          var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
-      auto work1 =
-          var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
-      auto coeff =
-          var_idmap_[op->args[4].as<CallNode>()->args[1].as<VarNode>()];
-      auto table =
-          var_idmap_[op->args[5].as<CallNode>()->args[1].as<VarNode>()];
-      this->PrintIndent();
-      this->stream << "tpu_bdc_load_fp32_exp_coeff(" << coeff << ".addr"
-                   << ");\n";
-      this->PrintIndent();
-      this->stream << "tpu_bdc_load_fp32_exp_table(" << table << ".addr"
-                   << ");\n";
-      auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
-      auto src0 = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
-      auto src0_shape = buffer_shape[src0];
-      // void tpu_bdc_fp32_exp(local_addr_t dst_addr, local_addr_t src_addr,
-      // local_addr_t work0_addr, local_addr_t work1_addr, local_addr_t
-      // coeff_addr, local_addr_t table_addr, const dim4 *shape)
-      this->PrintIndent();
-      this->stream << "tpu_bdc_fp32_exp(" << dst << ".addr, " << src0
-                   << ".addr, " << work0 << ".addr, " << work1 << ".addr, "
-                   << coeff << ".addr, " << table << ".addr, "
-                   << "&" << src0 << ".shape"
-                   << ");\n";
-    } else if (op_name == "ppl.sigmoid") {
-      auto dst_dtype = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      auto src_dtype = op->args[2].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      auto work0_dtype = op->args[3].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      auto work1_dtype = op->args[4].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      auto coeff_dtype = op->args[5].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      auto table_dtype = op->args[6].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      ICHECK(dst_dtype == DataType::Float(32) && src_dtype == DataType::Float(32) &&
-             work0_dtype == DataType::Float(32) && work1_dtype == DataType::Float(32) &&
-             coeff_dtype == DataType::Float(32) && table_dtype == DataType::Float(32))
-          << "ppl.sigmoid expects FP32 for dst/src/work0/work1/coeff/table";
-
-      auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
-      auto src = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
-      auto work0 = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
-      auto work1 = var_idmap_[op->args[4].as<CallNode>()->args[1].as<VarNode>()];
-      auto coeff = var_idmap_[op->args[5].as<CallNode>()->args[1].as<VarNode>()];
-      auto table = var_idmap_[op->args[6].as<CallNode>()->args[1].as<VarNode>()];
-
-      this->PrintIndent();
-      this->stream << "tpu_bdc_load_fp32_exp_coeff(" << coeff << ".addr"
-                   << ");\n";
-      this->PrintIndent();
-      this->stream << "tpu_bdc_load_fp32_exp_table(" << table << ".addr"
-                   << ");\n";
-      this->PrintIndent();
-      this->stream << "tpu_bdc_fp32_sigmoid(" << dst << ".addr, " << src
-                   << ".addr, " << work0 << ".addr, " << work1 << ".addr, "
-                   << coeff << ".addr, " << table << ".addr, "
-                   << "&" << src << ".shape"
-                   << ");\n";
-    } else if (op_name == "ppl.reduce_max") {
-      // 提取输入、输出和临时张量
-      auto input_tensor =
-          var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
-      auto output_tensor =
-          var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
-      auto tmp_tensor =
-          var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
-      auto eu_num = Downcast<IntImm>(op->args[4])->value;
-      auto align_w = Downcast<IntImm>(op->args[5])->value;
-      auto stride_n = Downcast<IntImm>(op->args[6])->value;
-      // 获取数据类型
-      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      std::string dtype;
-      if (dtype_ == DataType::Float(16)) {
-        dtype = "DT_FP16";
-      } else if (dtype_ == DataType::Float(32)) {
-        dtype = "DT_FP32";
-      } else if (dtype_ == DataType::BFloat(16)) {
-        dtype = "DT_BFP16";
-      }
-
-      this->PrintIndent();
-      int sid = this->BeginScope();
-      this->stream << "{\n";
-
-      // 计算EU数和对齐尺寸
-      this->PrintIndent();
-      this->stream << "int eu_num = " << eu_num << ";\n";
-      this->PrintIndent();
-      this->stream << "int align_w = " << align_w << ";\n";
-
-      // 创建pad_val; FP_NEG_MAX returns the integer bit-pattern of -MAX,
-      // so we must populate the `u32` field to reinterpret the bits,
-      // not the float field which would cast the integer to float.
-      this->PrintIndent();
-      this->stream << "scalar_t pad_val = {.u32 = FP_NEG_MAX(" << dtype
-                   << ")};\n";
-
-      // 创建池化所需的形状
-      this->PrintIndent();
-      this->stream << "dim4 in_reduce_h = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, align_w / eu_num, eu_num};\n";
-      this->PrintIndent();
-      this->stream << "dim4 out_reduce_h = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, 1, eu_num};\n";
-      this->PrintIndent();
-      this->stream << "dim4 in_reduce_w = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, 1, eu_num};\n";
-      this->PrintIndent();
-      this->stream << "dim4 out_reduce_w = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, 1, 1};\n";
-
-      // 设置池化参数
-      this->PrintIndent();
-      this->stream << "dim2 kernel = {align_w / eu_num, 1};\n";
-      this->PrintIndent();
-      this->stream << "padding_t pad = {0, 0, 0, 0};\n";
-      this->PrintIndent();
-      this->stream << "dim2 stride = {1, 1};\n";
-      this->PrintIndent();
-      this->stream << "dim2 dilation = {1, 1};\n";
-
-      this->PrintIndent();
-      this->stream << "if (align_w > " << input_tensor
-                   << ".shape.w && align_w == eu_num) {\n";
-      this->PrintIndent();
-      this->stream << "  dim4 padded_stride = {" << stride_n
-                   << ", align_w, align_w, 1};\n";
-      this->PrintIndent();
-      this->stream << "  dim4 padded_shape = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, 1, align_w};\n";
-      this->PrintIndent();
-      this->stream << "  dim4 copy_shape = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, 1, " << input_tensor
-                   << ".shape.w};\n";
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info padded_input = {.shape = "
-                   << "padded_shape, .stride = padded_stride, .addr = "
-                   << tmp_tensor << ".addr, .dtype = " << dtype
-                   << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = false};\n";
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info input_copy = {.shape = copy_shape, "
-                   << ".stride = {0}, .addr = " << input_tensor
-                   << ".addr, .dtype = " << dtype
-                   << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info padded_input_copy = {.shape = "
-                   << "copy_shape, .stride = padded_stride, .addr = "
-                   << tmp_tensor << ".addr, .dtype = " << dtype
-                   << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = false};\n";
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info output_view = {.shape = "
-                   << "out_reduce_w, .stride = {0}, .addr = "
-                   << output_tensor << ".addr, .dtype = " << dtype
-                   << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_set_C(padded_input.addr, pad_val, "
-                   << "&padded_shape, &padded_input.stride, " << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_cpy(padded_input_copy.addr, input_copy.addr, "
-                   << "&copy_shape, &padded_input_copy.stride, "
-                   << "(input_copy.default_stride ? NULL : &input_copy.stride), "
-                   << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "  dim2 kernel2 = {1, eu_num};\n";
-      this->PrintIndent();
-      this->stream << "  pad_val.u32 = FP_NEG_MAX(" << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_fp_max_pool2d(output_view.addr, "
-                   << "padded_input.addr, &padded_shape, &kernel2, &pad, "
-                   << "&stride, &dilation, " << dtype << ", pad_val);\n";
-      this->PrintIndent();
-      this->stream << "} else {\n";
-
-      this->PrintIndent();
-      this->stream << "  if (align_w > " << input_tensor << ".shape.w) {\n";
-      this->PrintIndent();
-      this->stream << "    dim4 fill_shape = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, 1, align_w - " << input_tensor
-                   << ".shape.w};\n";
-      this->PrintIndent();
-      int elem_size =
-          (dtype_ == DataType::Float(16) || dtype_ == DataType::BFloat(16)) ? 2 : 4;
-      this->stream << "    int elem_size = " << elem_size << ";\n";
-      this->PrintIndent();
-      this->stream << "    int offset = " << input_tensor
-                   << ".shape.w * elem_size;\n";
-      this->PrintIndent();
-      this->stream << "    dim4 fill_tensor_stride = {" << stride_n
-                   << ", align_w, " << input_tensor << ".shape.w, 1};\n";
-      this->PrintIndent();
-      this->stream
-          << "    __tilelang_tpu_tensor_info fill_tensor = {.shape = fill_shape, .stride "
-             "= fill_tensor_stride, "
-          << ".addr = " << input_tensor << ".addr + offset, .dtype = " << dtype
-          << ", "
-          << ".mode = 0, .align_mode = 4, .size = 1, .offset = offset, "
-          << ".unsigned_flag = 0, .default_stride = false};\n";
-      this->PrintIndent();
-      this->stream
-          << "    tpu_bdc_set_C(fill_tensor.addr, pad_val, &fill_shape, "
-          << "(fill_tensor.default_stride ? NULL : &fill_tensor.stride), "
-          << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "  }\n";
-
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info input_view = {.shape = in_reduce_h, "
-                      ".stride = {0}, "
-                   << ".addr = " << input_tensor << ".addr, .dtype = " << dtype
-                   << ", "
-                   << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info tmp_view = {.shape = out_reduce_h, "
-                      ".stride = {0}, "
-                   << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
-                   << ", "
-                   << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_fp_max_pool2d(tmp_view.addr, input_view.addr, "
-                      "&input_view.shape, "
-                   << "&kernel, &pad, &stride, &dilation, " << dtype
-                   << ", pad_val);\n";
-      this->PrintIndent();
-      this->stream << "  dim2 kernel2 = {1, eu_num};\n";
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info output_view = {.shape = out_reduce_w, "
-                      ".stride = {0}, "
-                   << ".addr = " << output_tensor << ".addr, .dtype = " << dtype
-                   << ", "
-                   << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info tmp_view2 = {.shape = in_reduce_w, "
-                      ".stride = {0}, "
-                   << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
-                   << ", "
-                   << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  pad_val.u32 = FP_NEG_MAX(" << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_fp_max_pool2d(output_view.addr, tmp_view2.addr, "
-                      "&tmp_view2.shape, "
-                   << "&kernel2, &pad, &stride, &dilation, " << dtype
-                   << ", pad_val);\n";
-      this->PrintIndent();
-      this->stream << "}\n";
-
-      // 结束块作用域
-      this->EndScope(sid);
-      this->PrintIndent();
-      this->stream << "}\n";
-    } else if (op_name == "ppl.reduce_sum") {
-      // 提取输入、输出和临时张量
-      auto input_tensor =
-          var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
-      auto output_tensor =
-          var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
-      auto tmp_tensor =
-          var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
-      auto eu_num = Downcast<IntImm>(op->args[4])->value;
-      auto align_w = Downcast<IntImm>(op->args[5])->value;
-      auto stride_n = Downcast<IntImm>(op->args[6])->value;
-
-      this->PrintIndent();
-      int sid = this->BeginScope();
-      this->stream << "{\n";
-
-      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      std::string dtype, dtype_2;
-      if (dtype_ == DataType::Float(16)) {
-        dtype = "DT_FP16";
-        dtype_2 = "f16";
-      } else if (dtype_ == DataType::Float(32)) {
-        dtype = "DT_FP32";
-        dtype_2 = "f32";
-      } else if (dtype_ == DataType::BFloat(16)) {
-        dtype = "DT_BFP16";
-        dtype_2 = "bf16";
-      } else if (dtype_ == DataType::Int(32)) {
-        dtype = "DT_INT32";
-        dtype_2 = "s32";
-      } else if (dtype_ == DataType::UInt(32)) {
-        dtype = "DT_UINT32";
-        dtype_2 = "u32";
-      } else if (dtype_ == DataType::Int(16)) {
-        dtype = "DT_INT16";
-        dtype_2 = "s16";
-      } else {
-        LOG(FATAL) << "Unsupported dtype " << dtype_;
-      }
-      // 计算EU数和对齐尺寸
-      this->PrintIndent();
-      this->stream << "int eu_num = " << eu_num << ";\n";
-      this->PrintIndent();
-      this->stream << "int align_w = " << align_w << ";\n";
-
-      // // 创建填充值（对于sum，使用0作为填充值）
-      this->PrintIndent();
-      this->stream << "scalar_t pad_val = {." << dtype_2 << " = 0};\n";
-
-      // 创建池化所需的形状
-      this->PrintIndent();
-      this->stream << "dim4 in_reduce_h = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, align_w / eu_num, eu_num};\n";
-      this->PrintIndent();
-      this->stream << "dim4 out_reduce_h = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, 1, eu_num};\n";
-      this->PrintIndent();
-      this->stream << "dim4 in_reduce_w = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, 1, eu_num};\n";
-      this->PrintIndent();
-      this->stream << "dim4 out_reduce_w = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, 1, 1};\n";
-
-      // 设置池化参数
-      this->PrintIndent();
-      this->stream << "dim2 kernel = {align_w / eu_num, 1};\n";
-      this->PrintIndent();
-      this->stream << "padding_t pad = {0, 0, 0, 0};\n";
-      this->PrintIndent();
-      this->stream << "dim2 stride = {1, 1};\n";
-      this->PrintIndent();
-      this->stream << "dim2 dilation = {1, 1};\n";
-
-      this->PrintIndent();
-      this->stream << "scalar_t scale = {.f32 = (float)1.000000000e+00};\n";
-      if (dtype_ == DataType::Float(16)) {
-        this->PrintIndent();
-        this->stream
-            << "scale = tpu_cast(scale, DT_FP16, DT_FP32, RM_HALF_TO_EVEN);\n";
-      } else if (dtype_ == DataType::BFloat(16)) {
-        this->PrintIndent();
-        this->stream
-            << "scale = tpu_cast(scale, DT_BFP16, DT_FP32, RM_HALF_TO_EVEN);\n";
-      } else if (dtype_ == DataType::Int(32)) {
-        this->PrintIndent();
-        this->stream << "scale = tpu_cast(scale, DT_INT32, DT_FP32, "
-                        "RM_HALF_TO_EVEN);\n";
-      } else if (dtype_ == DataType::UInt(32)) {
-        this->PrintIndent();
-        this->stream << "scale = tpu_cast(scale, DT_UINT32, DT_FP32, "
-                        "RM_HALF_TO_EVEN);\n";
-      }
-
-      this->PrintIndent();
-      this->stream << "if (align_w > " << input_tensor
-                   << ".shape.w && align_w == eu_num) {\n";
-      this->PrintIndent();
-      this->stream << "  dim4 padded_stride = {" << stride_n
-                   << ", align_w, align_w, 1};\n";
-      this->PrintIndent();
-      this->stream << "  dim4 padded_shape = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, 1, align_w};\n";
-      this->PrintIndent();
-      this->stream << "  dim4 copy_shape = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, 1, " << input_tensor
-                   << ".shape.w};\n";
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info padded_input = {.shape = "
-                   << "padded_shape, .stride = padded_stride, .addr = "
-                   << tmp_tensor << ".addr, .dtype = " << dtype
-                   << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = false};\n";
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info input_copy = {.shape = copy_shape, "
-                   << ".stride = {0}, .addr = " << input_tensor
-                   << ".addr, .dtype = " << dtype
-                   << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info padded_input_copy = {.shape = "
-                   << "copy_shape, .stride = padded_stride, .addr = "
-                   << tmp_tensor << ".addr, .dtype = " << dtype
-                   << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = false};\n";
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info output_view = {.shape = "
-                   << "out_reduce_w, .stride = {0}, .addr = "
-                   << output_tensor << ".addr, .dtype = " << dtype
-                   << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_set_C(padded_input.addr, pad_val, "
-                   << "&padded_shape, &padded_input.stride, " << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_cpy(padded_input_copy.addr, input_copy.addr, "
-                   << "&copy_shape, &padded_input_copy.stride, "
-                   << "(input_copy.default_stride ? NULL : &input_copy.stride), "
-                   << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "  dim2 kernel2 = {1, eu_num};\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_fp_avg_pool2d(output_view.addr, "
-                   << "padded_input.addr, &padded_shape, &kernel2, &pad, "
-                   << "&stride, &dilation, " << dtype << ", scale);\n";
-      this->PrintIndent();
-      this->stream << "} else {\n";
-      this->PrintIndent();
-      this->stream << "  if (align_w > " << input_tensor << ".shape.w) {\n";
-      this->PrintIndent();
-      this->stream << "    dim4 fill_shape = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, 1, align_w - " << input_tensor
-                   << ".shape.w};\n";
-      this->PrintIndent();
-      int elem_size = 1;
-      if (dtype_ == DataType::Float(16)) {
-        elem_size = 2;
-      } else if (dtype_ == DataType::Float(32)) {
-        elem_size = 4;
-      } else if (dtype_ == DataType::BFloat(16)) {
-        elem_size = 2;
-      } else if (dtype_ == DataType::Int(32)) {
-        elem_size = 4;
-      } else if (dtype_ == DataType::UInt(32)) {
-        elem_size = 4;
-      } else if (dtype_ == DataType::Int(16)) {
-        elem_size = 2;
-      } else {
-        LOG(FATAL) << "Unsupported dtype " << dtype_;
-      }
-      this->stream << "    int elem_size = " << elem_size << ";\n";
-      this->PrintIndent();
-      this->stream << "    int offset = " << input_tensor
-                   << ".shape.w * elem_size;\n";
-      this->PrintIndent();
-      this->stream << "    dim4 fill_tensor_stride = {" << stride_n
-                   << ", align_w, " << input_tensor << ".shape.w, 1};\n";
-      this->PrintIndent();
-      this->stream
-          << "    __tilelang_tpu_tensor_info fill_tensor = {.shape = fill_shape, .stride "
-             "= fill_tensor_stride, "
-          << ".addr = " << input_tensor << ".addr + offset, .dtype = " << dtype
-          << ", "
-          << ".mode = 0, .align_mode = 4, .size = 1, .offset = offset, "
-          << ".unsigned_flag = 0, .default_stride = false};\n";
-      this->PrintIndent();
-      this->stream
-          << "    tpu_bdc_set_C(fill_tensor.addr, pad_val, &fill_shape, "
-          << "(fill_tensor.default_stride ? NULL : &fill_tensor.stride), "
-          << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "  }\n";
-
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info input_view = {.shape = in_reduce_h, "
-                      ".stride = {0}, "
-                   << ".addr = " << input_tensor << ".addr, .dtype = " << dtype
-                   << ", "
-                   << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info tmp_view = {.shape = out_reduce_h, "
-                      ".stride = {0}, "
-                   << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
-                   << ", "
-                   << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_fp_avg_pool2d(tmp_view.addr, input_view.addr, "
-                      "&input_view.shape, "
-                   << "&kernel, &pad, &stride, &dilation, " << dtype
-                   << ", scale);\n";
-      this->PrintIndent();
-      this->stream << "  dim2 kernel2 = {1, eu_num};\n";
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info output_view = {.shape = out_reduce_w, "
-                      ".stride = {0}, "
-                   << ".addr = " << output_tensor << ".addr, .dtype = " << dtype
-                   << ", "
-                   << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  __tilelang_tpu_tensor_info tmp_view2 = {.shape = in_reduce_w, "
-                      ".stride = {0}, "
-                   << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
-                   << ", "
-                   << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_fp_avg_pool2d(output_view.addr, tmp_view2.addr, "
-                      "&tmp_view2.shape, "
-                   << "&kernel2, &pad, &stride, &dilation, " << dtype
-                   << ", scale);\n";
-      this->PrintIndent();
-      this->stream << "}\n";
-
-      // 结束块作用域
-      this->EndScope(sid);
-      this->PrintIndent();
-      this->stream << "}\n";
-    } else if (op_name == "ppl.rsqrt") {
-      auto dst_dtype = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      auto src_dtype = op->args[2].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      ICHECK(dst_dtype == DataType::Float(32) && src_dtype == DataType::Float(32))
-          << "ppl.rsqrt expects FP32 for dst/src0, got dst=" << dst_dtype
-          << ", src0=" << src_dtype;
-      auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
-      auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
-      auto src0_shape = buffer_shape[src0];
-      // void tpu_bdc_fp32_rsqrt(local_addr_t dst_addr, local_addr_t src_addr, const dim4 *shape)
-      this->PrintIndent();
-      this->stream << "tpu_bdc_fp32_rsqrt(" << dst << ".addr, " << src0
-                   << ".addr, "
-                   << "&" << src0 << ".shape"
-                   << ");\n";
-
-    } else if (op_name == "ppl.rope_add") {
-      auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
-      auto even_src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
-      auto even_src1 = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
-      auto odd_src0 = var_idmap_[op->args[4].as<CallNode>()->args[1].as<VarNode>()];
-      auto odd_src1 = var_idmap_[op->args[5].as<CallNode>()->args[1].as<VarNode>()];
-      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      std::string dtype;
-      int bytes_size = 0;
-      if (dtype_ == DataType::Float(16)){
-        dtype = "DT_FP16";
-        bytes_size = 2;
-      } else if (dtype_ == DataType::Float(32)) {
-        dtype = "DT_FP32";
-        bytes_size = 4;
-      } else if (dtype_ == DataType::BFloat(16)){
-        dtype = "DT_BFP16";
-        bytes_size = 2;
-      }
-      this->PrintIndent();
-      this->stream << "{\n";
-      this->PrintIndent();
-      this->stream << "dim4 half_stride;\n";
-      this->PrintIndent();
-      this->stream << "tpu_aligned_stride(&half_stride, 0, &" << dst << ".shape, " << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "half_stride.w *= 2;\n";
-      this->PrintIndent();
-      // this->stream << "dim4 half_shape = " << dst << ".shape" << ";\n";
-      this->stream << "dim4 half_shape = {.n = " << dst << ".shape.n, .c = " << dst << ".shape.c, .h = " << dst << ".shape.h, .w = " << dst << ".shape.w};\n";
-      this->PrintIndent();
-      this->stream << "half_shape.w /= 2;\n";
-      // tpu_bdc_fp_add( out.addr, x_cos.addr, x_neg_sin.addr + DtypeSize(DT_FP32), &half_shape, &half_stride, &half_stride, &half_stride, DT_FP32);
-      // tpu_bdc_fp_add( out.addr + DtypeSize(DT_FP32), x_cos.addr + DtypeSize(DT_FP32), x_sin.addr, &half_shape, &half_stride, &half_stride, &half_stride, DT_FP32);
-      this->PrintIndent();
-      this->stream << "tpu_bdc_fp_add( " << dst << ".addr, " << even_src0 << ".addr, " << even_src1 << ".addr + " << bytes_size << ", " << "&half_shape, " << "&half_stride, " << "&half_stride, " << "&half_stride, " << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "tpu_bdc_fp_add( " << dst << ".addr + " << bytes_size << ", " << odd_src0 << ".addr + " << bytes_size << ", " << odd_src1 << ".addr, " << "&half_shape, " << "&half_stride, " << "&half_stride, " << "&half_stride, " << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "}\n";
-    } else if (op_name == "ppl.gather") {
-      auto dst_var   = op->args[1].as<CallNode>()->args[1].as<VarNode>();
-      auto param_var = op->args[2].as<CallNode>()->args[1].as<VarNode>();
-      auto index_var = op->args[3].as<CallNode>()->args[1].as<VarNode>();
-
-      auto dst   = var_idmap_[dst_var];
-      if (dst.empty()) dst = this->parameter_map[dst_var->name_hint];
-      auto param = var_idmap_[param_var];
-      if (param.empty()) param = this->parameter_map[param_var->name_hint];
-      auto index = var_idmap_[index_var];
-      if (index.empty()) index = this->parameter_map[index_var->name_hint];
-
-      auto param_h = Downcast<IntImm>(op->args[4])->value;
-      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      std::string dtype;
-      if (dtype_ == DataType::Float(16)) dtype = "DT_FP16";
-      else if (dtype_ == DataType::Float(32)) dtype = "DT_FP32";
-      else if (dtype_ == DataType::BFloat(16)) dtype = "DT_BFP16";
-      this->PrintIndent();
-      this->stream << "{\n";
-      this->PrintIndent();
-      this->stream << "dim4 __gather_shape = {1, 1, " << dst << ".shape.c, " << dst << ".shape.w};\n";
-      this->PrintIndent();
-      this->stream << "tpu_gdma_h_gather_S2S("
-                   << dst << ".addr, " << param << ".addr, " << index << ".addr, "
-                   << "false, (scalar_t){.u32 = 0}, &__gather_shape, " << param_h << ", "
-                   << "NULL, NULL, NULL, " << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "}\n";
-    } else if (op_name == "ppl.topk") {
-      auto dst_data_var = op->args[1].as<CallNode>()->args[1].as<VarNode>();
-      auto dst_idx_var  = op->args[2].as<CallNode>()->args[1].as<VarNode>();
-      auto src_var      = op->args[3].as<CallNode>()->args[1].as<VarNode>();
-
-      auto dst_data = var_idmap_[dst_data_var];
-      if (dst_data.empty()) dst_data = this->parameter_map[dst_data_var->name_hint];
-
-      auto dst_idx = var_idmap_[dst_idx_var];
-      if (dst_idx.empty()) dst_idx = this->parameter_map[dst_idx_var->name_hint];
-
-      auto src = var_idmap_[src_var];
-      if (src.empty()) src = this->parameter_map[src_var->name_hint];
-
-      auto K_val = Downcast<IntImm>(op->args[4])->value;
-      auto descended_val = Downcast<IntImm>(op->args[5])->value;
-      auto length_val = Downcast<IntImm>(op->args[6])->value;
-
-      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      std::string dtype;
-      // tpu_hau_sort_natural_index 只支持 DT_FP32 / DT_INT32 / DT_UINT32
-      if (dtype_ == DataType::Float(32)) dtype = "DT_FP32";
-      else if (dtype_ == DataType::Int(32)) dtype = "DT_INT32";
-      else if (dtype_ == DataType::UInt(32)) dtype = "DT_UINT32";
-      else ICHECK(false) << "ppl.topk: unsupported dtype " << dtype_
-                         << "; HAU sort only supports fp32/int32/uint32";
-
-      this->PrintIndent();
-      this->stream << "tpu_hau_sort_natural_index(" << dst_data << ".addr, " << dst_idx  << ".addr, " << src << ".addr, " << length_val << ", " << K_val << ", " << (descended_val ? "true" : "false") << ", " << dtype << ");\n";
+    } else if (is_tpukernel_extern) {
+      ICHECK(TryEmitTPUKernelSemantic(op, op_name))
+          << "Unknown TPU-Kernel semantic operation " << op_name;
     } else {
-      // PPL-specific operations above need tensor/address lowering. RVT and
-      // other explicit C ABI calls already carry native arguments, so use the
-      // generic C emitter instead of silently dropping an unknown extern.
-      if (is_rvt_extern) {
-        ICHECK_EQ(target_programming_model_, "rv")
-            << "RVT extern " << op_name
-            << " requires target tpu-programming-model=rv";
-        ICHECK_EQ(tpukernel_extern_count_, 0)
-            << "Raw RVT rvt_* calls cannot share a kernel with TPU-Kernel calls; "
-            << "their descriptor and command-stream ownership models are distinct.";
-        ICHECK_EQ(canonical_tpu_op_count_, 0)
-            << "Raw RVT rvt_* calls cannot share a kernel with backend-neutral "
-               "tl.tpu.* operations; the compiler owns descriptors and lifecycle "
-               "for the latter.";
-        ++rvt_direct_call_count_;
-        uses_rvt_api_ = true;
-        uses_opaque_raw_rvt_ = true;
-      }
+      ICHECK(is_rvt_extern)
+          << "Unknown external call " << op_name
+          << " reached TPU codegen; only compiler-owned tl.tpu.*, matching "
+             "tl.tpukernel.*, or explicit rvt_* calls are supported";
+      ICHECK_EQ(target_programming_model_, "rv")
+          << "RVT extern " << op_name
+          << " requires target tpu-programming-model=rv";
+      ICHECK_EQ(tpukernel_extern_count_, 0)
+          << "Raw RVT rvt_* calls cannot share a kernel with TPU-Kernel calls; "
+          << "their descriptor and command-stream ownership models are distinct.";
+      ICHECK_EQ(canonical_tpu_op_count_, 0)
+          << "Raw RVT rvt_* calls cannot share a kernel with backend-neutral "
+             "tl.tpu.* operations; the compiler owns descriptors and lifecycle "
+             "for the latter.";
+      ++rvt_direct_call_count_;
+      uses_rvt_api_ = true;
+      uses_opaque_raw_rvt_ = true;
+      // Expert RVT calls already carry native C ABI arguments.
       CodeGenC::VisitExpr_(op, os);
     }
 
   } else if (op->op.same_as(builtin::if_then_else())) {
     // conditional that skips eval if cond evals to false
+    const auto *true_var = op->args[1].as<VarNode>();
+    const auto *false_var = op->args[2].as<VarNode>();
+    const bool true_is_descriptor =
+        true_var != nullptr && buffer_addrs_.count(true_var) != 0;
+    const bool false_is_descriptor =
+        false_var != nullptr && buffer_addrs_.count(false_var) != 0;
+    ICHECK(!true_is_descriptor && !false_is_descriptor)
+        << "A descriptor-valued if_then_else reached TPU codegen, but TPU "
+           "residual IR has no contract for selecting tensor descriptors; "
+           "select tensor values before lowering instead";
     std::string result = name_supply_->FreshName("condval");
     std::string cond = PrintExpr(op->args[0]);
     this->PrintIndent();
-
-    // remove hard code "shared"
-    if (auto var = op->args[1].as<VarNode>()) {
-      auto search = buffer_addrs_.find(var);
-      if (search != buffer_addrs_.end()) {
-        this->stream << "__tilelang_tpu_tensor_info ";
-      }
-    } else {
-      PrintType(op->dtype, this->stream);
-    }
-
+    PrintType(op->dtype, this->stream);
     this->stream << " " << result << ";\n";
     this->PrintIndent();
     this->stream << "if (" << cond << ") {\n";
@@ -2077,11 +1038,10 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
 }
 
 void CodeGenTileLangTPU::VisitStmt_(const LetStmtNode *op) {
-
-  if (op->body.as<Evaluate>()) {
-    Evaluate e = Downcast<Evaluate>(op->body);
-  }
-
+  const auto *value_var = op->value.as<VarNode>();
+  ICHECK(value_var == nullptr || buffer_addrs_.count(value_var) == 0)
+      << "A local tensor descriptor cannot be bound by LetStmt: descriptor "
+         "aliases have no shape/address ownership contract in TPU residual IR";
   std::string value = PrintExpr(op->value);
   if (print_ssa_form_) {
     ICHECK(!var_idmap_.count(op->var.get()));
@@ -2095,53 +1055,32 @@ void CodeGenTileLangTPU::VisitStmt_(const LetStmtNode *op) {
       PrintType(handle_data_type_.at(op->var.get()), stream);
       stream << "*)" << value << ";\n";
     } else {
-
-      // TODO: (xwh) Temporary fix
-      auto var_node_ = op->var.get();
-      std::string var_name = var_node_->name_hint;
-      if (var_name.find("shared") != std::string::npos) {
-        this->stream << "__tilelang_tpu_tensor_info " << AllocVarID(op->var.get())
-                     << " = " << value << ";\n";
-      } else {
-        PrintType(op->var.dtype(), this->stream);
-        this->stream << ' ' << AllocVarID(op->var.get()) << " = " << value
-                     << ";\n";
-      }
+      // Let bindings are scalar/pointer values. Local tensors are represented
+      // only by Allocate-owned descriptors, never inferred from name hints.
+      PrintType(op->var.dtype(), this->stream);
+      this->stream << ' ' << AllocVarID(op->var.get()) << " = " << value
+                   << ";\n";
     }
   }
   PrintStmt(op->body);
 }
 
 void CodeGenTileLangTPU::VisitStmt_(const AttrStmtNode *op) {
-  if (target_programming_model_ == "tpukernel" &&
-      op->attr_key == "tpu_parallel_start") {
-    this->PrintIndent();
-    this->stream << "tpu_parallel_start(); \n";
-
-  } else if (target_programming_model_ == "tpukernel" &&
-             op->attr_key == "tpu_parallel_end") {
-    this->PrintIndent();
-    this->stream << "tpu_parallel_end(); \n";
-  }
   this->PrintStmt(op->body);
 }
 
 std::string CodeGenTileLangTPU::AllocLocalVarID(const tir::VarNode *v) {
-  // ICHECK(!local_buffer_name_map.count(v)) << "Need input to be in SSA form
-  // dup " << v->name_hint;
   std::string key = v->name_hint;
   std::string vid = name_supply_->FreshName(key);
   std::replace(vid.begin(), vid.end(), ':', '_');
   std::replace(vid.begin(), vid.end(), '-', '_');
   std::replace(vid.begin(), vid.end(), '.', '_');
-  // var_idmap_[v].push_back()
-  local_buffer_name_map[v].push_back(vid);
   return vid;
 }
 
 static inline std::string
 Shape4ToDim4Literal(const std::vector<int64_t> &shape) {
-  ICHECK_EQ(shape.size(), 4U);
+  tl::tpuv7::ValidateDescriptorShape4(shape, "TileLang TPU codegen");
   std::ostringstream os;
   os << "{ " << shape[0] << ", " << shape[1] << ", " << shape[2] << ", "
      << shape[3] << "}";
@@ -2151,6 +1090,13 @@ Shape4ToDim4Literal(const std::vector<int64_t> &shape) {
 void CodeGenTileLangTPU::VisitStmt_(const AllocateNode *op) {
   ICHECK(!is_zero(op->condition));
   const tir::VarNode *buffer_var = op->buffer_var.get();
+  const std::string storage_scope = tir::GetPtrStorageScope(op->buffer_var);
+  ICHECK(tl::tpuv7::IsLocalMemoryScope(storage_scope))
+      << "TileLang TPU allocation " << buffer_var->name_hint
+      << " has unsupported scope " << storage_scope
+      << "; TPU descriptor allocations require one of shared, shared.dyn, "
+         "local, local.fragment";
+  alloc_storage_scope_[buffer_var] = storage_scope;
   auto old_var_it = var_idmap_.find(buffer_var);
   bool had_old_var = old_var_it != var_idmap_.end();
   std::string old_var_id;
@@ -2211,26 +1157,19 @@ void CodeGenTileLangTPU::VisitStmt_(const AllocateNode *op) {
 }
 
 void CodeGenTileLangTPU::VisitExpr_(const RampNode *op, std::ostream &os) {
-  //  int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
-  //  CHECK_LE(lanes, 4) << "ValueError: Ramp of more than 4 lanes is not
-  //  allowed."; os << "(make_"; PrintType(op->dtype, os); os << "("; for (int i
-  //  = 0; i < lanes; i++) {
-  //    os << "(" << PrintExpr(op->base) << ")"
-  //       << "+(" << PrintExpr(op->stride) << "*" << i << ")";
-  //    if (i != lanes - 1) os << ", ";
-  //  }
-  //  os << "))";
+  LOG(FATAL) << "Ramp " << GetRef<PrimExpr>(op)
+             << " reached scalar-only TPU codegen";
 }
 
 inline void PrintConst(const FloatImmNode *op, std::ostream &os,
                        CodeGenTileLangTPU *p) { // NOLINT(*)
-  // Type code is kBFloat
   if (op->dtype.is_bfloat16()) {
-    os << "bfloat16_t";
-    os << '(' << std::scientific << op->value << 'f' << ')';
+    os << "bfloat16_t(";
+    FloatImm const_f32 = FloatImm(DataType::Float(32), op->value);
+    PrintConst(const_f32.get(), os, p);
+    os << ')';
     return;
   }
-  // Type code is kFloat
   switch (op->dtype.bits()) {
   case 64:
   case 32: {
@@ -2239,9 +1178,11 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       if (op->value < 0) {
         temp << "-";
       }
-      temp << ((op->dtype.bits() == 32) ? "CUDART_INF_F" : "CUDART_INF");
+      temp << ((op->dtype.bits() == 32) ? "__builtin_inff()"
+                                        : "__builtin_inf()");
     } else if (std::isnan(op->value)) {
-      temp << ((op->dtype.bits() == 32) ? "CUDART_NAN_F" : "CUDART_NAN");
+      temp << ((op->dtype.bits() == 32) ? "__builtin_nanf(\"\")"
+                                        : "__builtin_nan(\"\")");
     } else {
       temp << std::scientific << op->value;
       if (op->dtype.bits() == 32)
@@ -2301,24 +1242,17 @@ void CodeGenTileLangTPU::VisitExpr_(const FloorDivNode *op,
   PrintBinaryExpr(op, "/", os, this);
 }
 
-void CodeGenTileLangTPU::PrintWmmaScope(const std::string &scope, DataType t,
-                                        const VarNode *variable,
-                                        std::ostream &os) {}
-
-int32_t CodeGenTileLangTPU::GetWmmaFragmentSize(const std::string &scope,
-                                                const VarNode *variable,
-                                                int32_t size) {
-  return 0;
-}
-
 void CodeGenTileLangTPU::HandleVolatileLoads(const std::string &value,
                                              const BufferLoadNode *op,
-                                             std::ostream &os) {}
+                                             std::ostream &os) {
+  os << value;
+}
 
 void CodeGenTileLangTPU::PrintVecElemLoadExpr(DataType t, int i,
                                               const std::string &value,
                                               std::ostream &os) {
-  return;
+  LOG(FATAL) << "Vector element expression at lane " << i << " with dtype "
+             << t << " reached scalar-only TPU codegen";
 }
 
 
@@ -2329,7 +1263,7 @@ void CodeGenTileLangTPU::AddFunction(const PrimFunc &f) {
   buffer_stride.clear();
   buffer_addrs_.clear();
   parameter_map.clear();
-  local_buffer_name_map.clear();
+  global_buffer_name_.clear();
   // Finish() emits one shared preamble for the entire IRModule, so this is a
   // module-level OR rather than per-function state.  Resetting it here makes
   // an RVT function silently lose rvt_api.h when a later ordinary PrimFunc is
@@ -2348,33 +1282,36 @@ void CodeGenTileLangTPU::AddFunction(const PrimFunc &f) {
   f_attrs = f->attrs;
   ICHECK(global_symbol.defined())
       << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
-  bool no_alias = f->HasNonzeroAttr(tir::attr::kNoAlias);
   auto buffer_map = f->buffer_map;
   this->PrintFuncPrefix(stream);
   CodeGenC::PrintType(f->ret_type, stream);
   this->PrintExtraAttrs(f, stream);
-  // 获取kernel名
   std::string global_name = static_cast<std::string>(global_symbol.value());
   ICHECK(global_name != "main" && global_name != "main_kernel")
       << "TPU inner-kernel global_symbol " << global_name
       << " conflicts with a generated runtime entry; use main_kernel_inner or "
          "another non-reserved name";
   this->stream << " " << global_name << "(";
-  std::vector<std::string> params_name; // 生成参数列表
-  // auto bf_map = f->buffer_map;
+  std::vector<std::string> params_name;
   std::unordered_map<const tir::VarNode *, std::string> var_global_mem_map;
 
-  //根据shape自动计算contiguous stride
+  // Compute the contiguous global tensor stride from its normalized dim4.
   auto default_stride = [this](const std::string &node) {
-    auto buf_shape = buffer_shape[node];
-    buffer_stride[node] = {1, 1, 1, 1}; // 初始化为1
-    // 倒推
+    auto shape_it = buffer_shape.find(node);
+    ICHECK(shape_it != buffer_shape.end() && shape_it->second.size() == 4U)
+        << "Cannot compute a TPU tensor stride without a normalized dim4 for "
+        << node;
+    const auto &buf_shape = shape_it->second;
+    auto [stride_it, inserted] =
+        buffer_stride.emplace(node, std::vector<int>{1, 1, 1, 1});
+    ICHECK(inserted) << "Duplicate TPU stride metadata for " << node;
+    auto &stride = stride_it->second;
     for (int i = 2; i >= 0; i--) {
-      buffer_stride[node][i] = buf_shape[i + 1] * buffer_stride[node][i + 1];
+      stride[i] = buf_shape[i + 1] * stride[i + 1];
     }
   };
 
-  // don't use name hint, but can remove later.
+  // Generated ABI identifiers are positional and independent of name_hint.
   auto allocate_name = [&, this](const Var &v, int index, int length) {
     auto v_node = v.get();
     std::string vid = "v" + std::to_string(index + 1);
@@ -2405,20 +1342,25 @@ void CodeGenTileLangTPU::AddFunction(const PrimFunc &f) {
     // stripping a presumed "_handle" suffix from the parameter Var: hand-made
     // PrimFuncs are not required to follow that naming convention.
     this->parameter_map[buffer_node->name] = rid;
+    this->global_buffer_name_[buffer_node->data.get()] = buffer_node->name;
     return vid;
   };
   int param_len = f->params.size();
   for (size_t i = 0; i < param_len; ++i) {
     tir::Var v = f->params[i];
+    ICHECK(buffer_map.count(v))
+        << "TileLang TPU source ABI supports only buffer parameters; scalar "
+           "parameter "
+        << v->name_hint << " has no host/device marshalling contract";
     std::string vid = allocate_name(v, i, param_len);
     params_name.push_back(vid);
     if (i != 0)
       stream << ", ";
-    stream << restrict_keyword_ << ' ' << vid;  // 输出函数参数
+    stream << restrict_keyword_ << ' ' << vid;
   }
   stream << ") {\n";
 
-  this->PreFunctionBody(f); // none
+  this->PreFunctionBody(f);
   int func_scope = this->BeginScope();
 
   const bool use_compiler_owned_rv_lifecycle =
@@ -2428,12 +1370,10 @@ void CodeGenTileLangTPU::AddFunction(const PrimFunc &f) {
     this->stream << "rvt_cfg_lanemask(gdma_get_lane_mask());\n";
   }
 
-  // 输出tensor_info
-  for (auto [v, inst] : var_global_mem_map) {
+  for (const auto &entry : var_global_mem_map) {
     this->PrintIndent();
-    this->stream << inst;
+    this->stream << entry.second;
   }
-  // 真正生成TIR body
   this->PrintStmt(f->body);
   this->EndScope(func_scope);
   this->PrintIndent();
@@ -2461,7 +1401,6 @@ void CodeGenTileLangTPU::AddFunction(const PrimFunc &f) {
   for (auto &name : params_name) {
     if (name_index != 0)
       this->stream << "    ";
-    // 调用真正的kernel
     this->stream << "api->" << name;
 
     if (name_index == name_len - 1)
@@ -2480,7 +1419,6 @@ void CodeGenTileLangTPU::AddFunction(const PrimFunc &f) {
     this->stream << "  rvt_sync_i(0xdeadbeef, 0);\n";
   }
   this->stream << "  return 0;\n}\n";
-  // 注册kernel给runtime
   this->stream << "TPUKERNEL_FUNC_REGISTER(" << "main_kernel)\n";
 }
 

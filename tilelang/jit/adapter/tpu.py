@@ -37,8 +37,8 @@ _TPU_RUNTIME_PROFILE: Optional[_TPURuntimeProfile] = None
 
 
 def reserve_tpu_runtime_profile(
-        tpu_config, device_id: int,
-        sdk_identity: Optional[Tuple[str, str, str]] = None) -> None:
+        tpu_target, tpu_runtime, device_id: int,
+        sdk_identity: Tuple[str, str, str]) -> None:
     """Reserve the vendor runtime identity before loading a TPU library.
 
     CModel and PCIe share process-global vendor runtime state.  Since the
@@ -50,17 +50,13 @@ def reserve_tpu_runtime_profile(
     """
     if not isinstance(device_id, int) or device_id < 0:
         raise ValueError(f"TPU runtime device id must be a non-negative int, got {device_id!r}")
-    if sdk_identity is None:
-        # Only compatibility/testing callers should omit this. LibraryGenerator
-        # always supplies a validated PPLLayout identity before actual dlopen.
-        sdk_identity = ("<unresolved-ppl-sdk>",) * 3
     if len(sdk_identity) != 3:
         raise ValueError("TPU runtime SDK identity must contain root, runtime, and backend paths")
     profile = _TPURuntimeProfile(
-        runtime_mode=tpu_config.runtime_mode,
-        chip=tpu_config.chip,
-        core_count=tpu_config.chip_spec.physical_core_count,
-        programming_model=tpu_config.programming_model,
+        runtime_mode=tpu_runtime.runtime_mode,
+        chip=tpu_target.chip,
+        core_count=tpu_target.chip_spec.physical_core_count,
+        programming_model=tpu_target.programming_model,
         device_id=device_id,
         sdk_identity=sdk_identity,
     )
@@ -83,18 +79,6 @@ def reserve_tpu_runtime_profile(
                 f"device={profile.device_id}, sdk={profile.sdk_identity[0]} "
                 "in the same process. "
                 "Use a fresh process for another TPU runtime profile.")
-
-
-def reserve_tpu_cmodel_profile(tpu_config) -> None:
-    """Compatibility wrapper for CModel-only callers.
-
-    New loading code must use :func:`reserve_tpu_runtime_profile` so the same
-    safety rule also covers CModel-to-PCIe transitions.
-    """
-    if tpu_config.runtime_mode != "cmodel":
-        return
-    reserve_tpu_runtime_profile(tpu_config, device_id=0)
-
 
 def reject_unverified_tpu_database_artifact(target) -> None:
     """Fail closed for TPU artifacts that lack a verified sidecar manifest.

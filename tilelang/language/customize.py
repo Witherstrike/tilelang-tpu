@@ -9,6 +9,130 @@ from typing import List, Union
 from .copy import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
 
 
+_TPU_LOCAL_SCOPES = {"shared", "shared.dyn", "local", "local.fragment"}
+_TPU_BASE_FLOAT_DTYPES = {"float16", "bfloat16", "float32"}
+_TPU_FP8_DTYPES = {"e4m3_float8", "e5m2_float8"}
+_TPU_ELEMENTWISE_FLOAT_DTYPES = _TPU_BASE_FLOAT_DTYPES | _TPU_FP8_DTYPES
+_TPUV7_EU_ELEMENTS = {"float16": 32, "bfloat16": 32, "float32": 16}
+_TPUV7_DESCRIPTOR_DIM_MAX = 65535
+
+
+def _require_buffer(name, value):
+    if not isinstance(value, Buffer):
+        raise TypeError(f"{name} must be a TIR Buffer, got {type(value).__name__}")
+
+
+def _static_positive_dim(operation, value):
+    static_value = value if isinstance(value, int) else getattr(value, "value", None)
+    if isinstance(static_value, bool) or not isinstance(static_value, int):
+        raise ValueError(
+            f"{operation} requires static integer dimensions, got {value}")
+    if static_value <= 0:
+        raise ValueError(
+            f"{operation} requires positive dimensions, got {static_value}")
+    return static_value
+
+
+def _require_descriptor_shape(operation, value):
+    """Validate one tensor shape before it becomes a TPUv7 ``dim4``."""
+    rank = len(value.shape)
+    if rank < 1 or rank > 4:
+        raise ValueError(
+            f"{operation} supports descriptor ranks 1 through 4, got rank {rank}")
+    for axis, dim in enumerate(value.shape):
+        extent = _static_positive_dim(f"{operation} axis {axis}", dim)
+        if extent > _TPUV7_DESCRIPTOR_DIM_MAX:
+            raise ValueError(
+                f"{operation} axis {axis} extent {extent} exceeds the TPUv7 "
+                f"descriptor limit {_TPUV7_DESCRIPTOR_DIM_MAX}")
+
+
+def _require_local_buffer(name, value):
+    _require_buffer(name, value)
+    if value.scope() not in _TPU_LOCAL_SCOPES:
+        raise ValueError(
+            f"{name} must reside in TPU local memory, got scope={value.scope()!r}")
+    _require_descriptor_shape(name, value)
+
+
+def _require_global_buffer(name, value):
+    _require_buffer(name, value)
+    if value.scope() != "global":
+        raise ValueError(
+            f"{name} must reside in global memory, got scope={value.scope()!r}")
+
+
+def _require_rank(name, value, rank):
+    if len(value.shape) != rank:
+        raise ValueError(f"{name} must be rank {rank}, got rank {len(value.shape)}")
+
+
+def _require_dtype(name, value, supported):
+    dtype = str(value.dtype)
+    if dtype not in supported:
+        expected = ", ".join(sorted(supported))
+        raise ValueError(f"{name} dtype must be one of {{{expected}}}, got {dtype}")
+
+
+def _require_same_dtype(operation, *buffers):
+    dtypes = {str(buffer.dtype) for buffer in buffers}
+    if len(dtypes) != 1:
+        raise ValueError(
+            f"{operation} requires matching buffer dtypes, got {sorted(dtypes)}")
+
+
+def _require_same_shape(operation, lhs, rhs):
+    try:
+        ir.assert_structural_equal(lhs.shape, rhs.shape)
+    except ValueError as error:
+        raise ValueError(
+            f"{operation} requires matching shapes, got {lhs.shape} and {rhs.shape}") from error
+
+
+def _require_elementwise_shapes(operation, out, lhs, rhs):
+    """Accept an equal RHS or the one supported W-broadcast form ``(M, 1)``."""
+    _require_same_shape(operation, out, lhs)
+    try:
+        _require_same_shape(operation, out, rhs)
+        return
+    except ValueError:
+        pass
+    try:
+        ir.assert_structural_equal(rhs.shape[0], out.shape[0])
+        ir.assert_structural_equal(rhs.shape[1], 1)
+    except ValueError as error:
+        raise ValueError(
+            f"{operation} RHS must match {out.shape} or use W-broadcast "
+            f"({out.shape[0]}, 1), got {rhs.shape}") from error
+
+
+def _require_storage_disjoint(operation, lhs_name, lhs, rhs_name, rhs):
+    if lhs.data.same_as(rhs.data):
+        raise ValueError(
+            f"{operation} requires {lhs_name} and {rhs_name} to use distinct storage")
+
+
+def _require_distinct_storage(operation, **buffers):
+    items = list(buffers.items())
+    for index, (lhs_name, lhs) in enumerate(items):
+        for rhs_name, rhs in items[index + 1:]:
+            _require_storage_disjoint(
+                operation, lhs_name, lhs, rhs_name, rhs)
+
+
+def _require_exp_hw_limit(operation, value):
+    """Enforce PPL's ``shape.h * shape.w <= 65535`` exp-family contract."""
+    dims = [
+        _static_positive_dim(f"{operation} axis {axis}", dim)
+        for axis, dim in enumerate(value.shape)
+    ]
+    hw = dims[-1] if len(dims) < 4 else dims[-2] * dims[-1]
+    if hw > _TPUV7_DESCRIPTOR_DIM_MAX:
+        raise ValueError(
+            f"{operation} requires descriptor h*w <= {_TPUV7_DESCRIPTOR_DIM_MAX}, "
+            f"got {hw}")
+
+
 def atomic_add(dst: Buffer, value: PrimExpr) -> PrimExpr:
     """Perform an atomic addition operation.
 
@@ -98,7 +222,7 @@ def view(src: Buffer,
     return T.Buffer(shape, dtype, src.data)
 
 
-def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, accumulate=None):
+def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, *, accumulate):
     """Launch a TPU GEMM on local/shared tiles.
 
     Args:
@@ -109,38 +233,63 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, accumulate=None):
             This option is not recommended in current TPU usage.
         transpose_B: Whether `B` should be treated as transposed.
         accumulate: Whether to compute `C += A @ B` instead of overwriting C.
-            When omitted, the compatibility default is `not transpose_B`:
-            the historical TPU-Kernel NN API accumulated while its NT API
-            overwrote. New code should pass this argument explicitly whenever
-            the distinction matters.
+            This keyword is mandatory so the read/write contract of `C` never
+            depends on a backend-specific instruction default.
 
     Returns:
         PrimExpr: Handle to the emitted GEMM extern call.
 
     Example:
-        `T.ppl_gemm(Q_shared, K_shared, acc_s, transpose_B=True)`
+        `T.ppl_gemm(Q_shared, K_shared, acc_s, transpose_B=True, accumulate=False)`
 
     Notes:
         `K` is inferred from `A` and `B`, and must match.
         The backend contract carries accumulation explicitly. TPU-Kernel does
-        not provide an accumulating right-transpose instruction, so
-        `transpose_B=True, accumulate=True` is rejected rather than silently
-        overwriting C.
+        not provide an accumulating FP16/BF16 right-transpose instruction.
+        FP8 uses the separately validated ``tpu_bdc_fp8_mm_R_trans`` form,
+        whose explicit ``result_add`` flag supports accumulation.
         `transpose_A` is not recommended in the current TPU path; prefer using
         `transpose_B=True` when a transpose form is needed.
     """
+    for name, buffer in (("A", A), ("B", B), ("C", C)):
+        _require_local_buffer(name, buffer)
+        _require_rank(name, buffer, 2)
+    _require_same_dtype("ppl_gemm inputs", A, B)
+    input_dtype = str(A.dtype)
+    if input_dtype not in {"float16", "bfloat16"} | _TPU_FP8_DTYPES:
+        raise ValueError(
+            "ppl_gemm inputs must use float16, bfloat16, or FP8; "
+            f"got {A.dtype}")
+    if not isinstance(transpose_A, bool) or not isinstance(transpose_B, bool):
+        raise TypeError("ppl_gemm transpose_A and transpose_B must be Python bools")
+    if not isinstance(accumulate, bool):
+        raise TypeError("ppl_gemm accumulate must be a Python bool")
+    if transpose_A:
+        raise ValueError("ppl_gemm does not support transpose_A=True")
+    if input_dtype in _TPU_FP8_DTYPES:
+        if str(C.dtype) != "float32":
+            raise ValueError(
+                "ppl_gemm FP8 inputs require a float32 output/accumulator")
+    elif str(C.dtype) != "float32" and not (
+            not accumulate and str(C.dtype) == input_dtype):
+        raise ValueError(
+            "ppl_gemm requires a float32 C tile when accumulate=True; "
+            "overwrite mode also permits C to match the input dtype")
+    if transpose_B and accumulate and input_dtype not in _TPU_FP8_DTYPES:
+        raise ValueError(
+            "ppl_gemm transpose_B=True with accumulate=True is supported "
+            "only for FP8 inputs on the TPU-Kernel backend")
     Aptr = A.access_ptr("r")
     Bptr = B.access_ptr("r")
-    if accumulate is None:
-        accumulate = not transpose_B
-    if not isinstance(accumulate, bool):
-        raise TypeError("ppl_gemm accumulate must be a Python bool or None")
     Cptr = C.access_ptr("rw" if accumulate else "w")
     M = C.shape[0]
     N = C.shape[1]
     K = A.shape[0] if transpose_A else A.shape[1]
     K_B = B.shape[1] if transpose_B else B.shape[0]
-    assert K == K_B, "gemm K shape check failed"
+    try:
+        ir.assert_structural_equal(K, K_B)
+    except ValueError as error:
+        raise ValueError(f"ppl_gemm K mismatch: A gives {K}, B gives {K_B}") from error
     return T.call_extern(
         "handle", "tl.tpu.gemm", Aptr, Bptr, Cptr,
         transpose_A, transpose_B, M, N, K, accumulate)
@@ -194,6 +343,16 @@ def ppl_copy(
         else:
             return None
 
+    supported_operands = (Buffer, BufferRegion, BufferLoad)
+    if not isinstance(src, supported_operands):
+        raise TypeError(
+            "ppl_copy src must be a Buffer, BufferRegion, or BufferLoad, "
+            f"got {type(src).__name__}")
+    if not isinstance(dst, supported_operands):
+        raise TypeError(
+            "ppl_copy dst must be a Buffer, BufferRegion, or BufferLoad, "
+            f"got {type(dst).__name__}")
+
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
 
@@ -237,15 +396,13 @@ def ppl_fill(buffer, value):
     Notes:
         This is typically used to initialize accumulation buffers, masks,
         or temporary outputs before later elementwise or reduction ops.
-        The common supported destination dtypes are `float16`, `bfloat16`,
-        and `float32`.
+        FP8 accepts only numerical zero; both ``0.0`` and ``-0.0`` are
+        canonicalized to the all-zero (positive-zero) bit pattern.
     """
+    _require_local_buffer("buffer", buffer)
+    _require_dtype("buffer", buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
     buffer = buffer.access_ptr("w")
     return T.call_extern("handle", "tl.tpu.fill", buffer, value)
-
-
-def ppl_clear(buffer):
-    return T.ppl_fill(buffer, T.float32(0))
 
 
 def ppl_subtract(out, inp1, inp2):
@@ -267,6 +424,12 @@ def ppl_subtract(out, inp1, inp2):
         A limited broadcast-style usage is also supported in common cases when
         the second input has shape `(M, 1)`.
     """
+    for name, buffer in (("out", out), ("inp1", inp1), ("inp2", inp2)):
+        _require_local_buffer(name, buffer)
+        _require_rank(name, buffer, 2)
+        _require_dtype(name, buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
+    _require_same_dtype("ppl_subtract", out, inp1, inp2)
+    _require_elementwise_shapes("ppl_subtract", out, inp1, inp2)
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
@@ -292,9 +455,14 @@ def ppl_mul_C(out, inp1, value):
         This is commonly used for scaling, sign flip, and normalization-style
         updates on a local tile.
     """
+    for name, buffer in (("out", out), ("inp1", inp1)):
+        _require_local_buffer(name, buffer)
+        _require_dtype(name, buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
+    _require_same_dtype("ppl_mul_C", out, inp1)
+    _require_same_shape("ppl_mul_C", out, inp1)
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
-    return T.call_extern("handle", "ppl.mul_C", outptr, inpptr1, value)
+    return T.call_extern("handle", "tl.tpukernel.mul_scalar", outptr, inpptr1, value)
 
 
 def ppl_mul(out, inp1, inp2):
@@ -317,6 +485,12 @@ def ppl_mul(out, inp1, inp2):
         A limited broadcast-style usage is also supported in common cases when
         the second input has shape `(M, 1)`.
     """
+    for name, buffer in (("out", out), ("inp1", inp1), ("inp2", inp2)):
+        _require_local_buffer(name, buffer)
+        _require_rank(name, buffer, 2)
+        _require_dtype(name, buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
+    _require_same_dtype("ppl_mul", out, inp1, inp2)
+    _require_elementwise_shapes("ppl_mul", out, inp1, inp2)
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
@@ -324,67 +498,178 @@ def ppl_mul(out, inp1, inp2):
 
 
 @T.macro
-def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
+def _ppl_exp_safe(out, work0, work1, coeff):
+    buffer = out.access_ptr("rw")
+    work0ptr = work0.access_ptr("rw")
+    work1ptr = work1.access_ptr("rw")
+    coeffptr = coeff.access_ptr("rw")
+    T.call_extern("handle", "tl.tpukernel.exp", buffer, work0ptr, work1ptr, coeffptr)
+
+
+def ppl_exp(out, work0, work1, coeff):
     """Compute `exp(out)` in place.
 
     Args:
         out: Input/output tile. The result overwrites this buffer.
         work0: Scratch tile with the same shape as `out`.
         work1: Scratch tile with the same shape as `out`.
-        coeff: FP32 coefficient buffer, typically shaped like `(64, 32)`.
-        table: FP32 lookup-table buffer, typically shaped like `(64, 192)`.
+        coeff: Coefficient buffer initialized by the TPU-Kernel API.
 
     Example:
-        `T.ppl_exp2(scores_scale, work0, work1, coeff, table)`
+        `T.ppl_exp(scores_scale, work0, work1, coeff)`
 
     Notes:
-        Despite the name `ppl_exp2`, this op computes natural exponential
-        `exp(x)`, not `2^x`.
-        `out`, `work0`, `work1`, `coeff`, and `table` should all be allocated
-        by the caller before invoking this macro.
-        The current usage requires FP32 buffers.
+        This computes natural exponential `exp(x)`.  It uses the PPL 1.7
+        `tpu_bdc_load_fp_exp_coeff` and `tpu_bdc_fp_exp` contract, which no
+        longer needs the legacy FP32 lookup-table buffer.
     """
-    buffer = out.access_ptr("rw")
-    work0ptr = work0.access_ptr("rw")
-    work1ptr = work1.access_ptr("rw")
-    coeffptr = coeff.access_ptr("rw")
-    tableptr = table.access_ptr("rw")
-    T.call_extern("handle", "ppl.exp", buffer, work0ptr, work1ptr, coeffptr, tableptr)
+    for name, buffer in (("out", out), ("work0", work0), ("work1", work1),
+                         ("coeff", coeff)):
+        _require_local_buffer(name, buffer)
+        _require_dtype(name, buffer, _TPU_BASE_FLOAT_DTYPES)
+    _require_same_dtype("ppl_exp", out, work0, work1, coeff)
+    _require_same_shape("ppl_exp", out, work0)
+    _require_same_shape("ppl_exp", out, work1)
+    _require_distinct_storage(
+        "ppl_exp", out=out, work0=work0, work1=work1, coeff=coeff)
+    _require_exp_hw_limit("ppl_exp", out)
+    _require_rank("coeff", coeff, 2)
+    try:
+        ir.assert_structural_equal(coeff.shape[0], 64)
+        ir.assert_structural_equal(coeff.shape[1], 32)
+    except ValueError as error:
+        raise ValueError(
+            f"ppl_exp expects coeff shape (64, 32), got {coeff.shape}") from error
+    return _ppl_exp_safe(out, work0, work1, coeff)
 
 
 @T.macro
-def ppl_sigmoid(out, inp, work0, work1, coeff, table):  # only support FP32
+def _ppl_sigmoid_safe(out, inp, work0, work1, coeff):
     outptr = out.access_ptr("rw")
-    inpptr = inp.access_ptr("rw")
+    inpptr = inp.access_ptr("r")
     work0ptr = work0.access_ptr("rw")
     work1ptr = work1.access_ptr("rw")
     coeffptr = coeff.access_ptr("rw")
-    tableptr = table.access_ptr("rw")
-    T.call_extern("handle", "ppl.sigmoid", outptr, inpptr, work0ptr, work1ptr, coeffptr, tableptr)
+    T.call_extern(
+        "handle", "tl.tpukernel.sigmoid", outptr, inpptr, work0ptr,
+        work1ptr, coeffptr)
+
+
+def ppl_sigmoid(out, inp, work0, work1, coeff):
+    """Compute sigmoid without the deprecated FP32 exp-table interface.
+
+    The TPU-Kernel lowering uses the PPL 1.7 generic exp coefficient loader,
+    followed by exp, scalar reciprocal, and scalar add operations.  ``work0``
+    and ``work1`` match ``out``; ``coeff`` has shape ``(64, 32)``.
+    """
+    buffers = (out, inp, work0, work1, coeff)
+    for name, buffer in zip(
+            ("out", "inp", "work0", "work1", "coeff"), buffers):
+        _require_local_buffer(name, buffer)
+        _require_dtype(name, buffer, _TPU_BASE_FLOAT_DTYPES)
+    _require_same_dtype("ppl_sigmoid", *buffers)
+    _require_same_shape("ppl_sigmoid", out, inp)
+    _require_same_shape("ppl_sigmoid", out, work0)
+    _require_same_shape("ppl_sigmoid", out, work1)
+    _require_distinct_storage(
+        "ppl_sigmoid", out=out, inp=inp, work0=work0, work1=work1,
+        coeff=coeff)
+    _require_exp_hw_limit("ppl_sigmoid", out)
+    _require_rank("coeff", coeff, 2)
+    try:
+        ir.assert_structural_equal(coeff.shape[0], 64)
+        ir.assert_structural_equal(coeff.shape[1], 32)
+    except ValueError as error:
+        raise ValueError("ppl_sigmoid expects coeff=(64, 32)") from error
+    return _ppl_sigmoid_safe(out, inp, work0, work1, coeff)
+
 
 def ppl_gather(output, param, index, param_h):
+    """Gather complete rows from one global-memory table.
+
+    Args:
+        output: Global output buffer with shape ``(count, width)``.
+        param: Global source table with shape ``(param_h, width)``.
+        index: Global ``uint32`` row indices with shape ``(count, 1)``.
+        param_h: Positive static row count, equal to ``param.shape[0]``.
+
+    Returns:
+        PrimExpr: Handle to the TPU-Kernel gather semantic operation.
+
+    Notes:
+        This is a TPU-Kernel-only system-memory operation. Output, source, and
+        index storage must be distinct. Payloads support FP8, FP16, BF16, and
+        FP32 on the two validated TPUv7 CModels.
+    """
+    for name, buffer in (("output", output), ("param", param), ("index", index)):
+        _require_global_buffer(name, buffer)
+    _require_rank("output", output, 2)
+    _require_rank("param", param, 2)
+    _require_rank("index", index, 2)
+    for name, buffer in (("output", output), ("param", param), ("index", index)):
+        _require_descriptor_shape(f"ppl_gather {name}", buffer)
+    _require_distinct_storage(
+        "ppl_gather", output=output, param=param, index=index)
+    _require_same_dtype("ppl_gather payload", output, param)
+    _require_dtype("output", output, _TPU_ELEMENTWISE_FLOAT_DTYPES)
+    if str(index.dtype) != "uint32":
+        raise ValueError(f"ppl_gather index dtype must be uint32, got {index.dtype}")
+    if not isinstance(param_h, int) or param_h <= 0:
+        raise ValueError("ppl_gather param_h must be a positive Python integer")
+    try:
+        ir.assert_structural_equal(param.shape[0], param_h)
+        ir.assert_structural_equal(output.shape[1], param.shape[1])
+        ir.assert_structural_equal(output.shape[0], index.shape[0])
+        ir.assert_structural_equal(index.shape[1], 1)
+    except ValueError as error:
+        raise ValueError(
+            "ppl_gather expects param=(param_h, width), output=(count, width), "
+            "and index=(count, 1)") from error
     outptr = output.access_ptr("w")
     paramptr = param.access_ptr("r")
     indexptr = index.access_ptr("r")
-    return T.call_extern("handle", "ppl.gather", outptr, paramptr, indexptr, param_h)
-    
+    return T.call_extern("handle", "tl.tpukernel.gather", outptr, paramptr, indexptr, param_h)
+
+
 def ppl_topk(dst_data, dst_idx, src, K, descended, length):
+    """Select the first ``K`` sorted values and their source indices.
+
+    ``src`` has ``length`` elements.  The TPU HAU primitive writes exactly
+    ``K`` values and ``K`` indices, so both destination buffers must have
+    extent ``K``; no unspecified tail allocation is part of this contract.
+    This TPU-Kernel-only operation is supported on BM1690 and is rejected for
+    SG2260E by target-specific codegen.
+    """
+    for name, buffer in (("dst_data", dst_data), ("dst_idx", dst_idx), ("src", src)):
+        _require_global_buffer(name, buffer)
+    _require_same_dtype("ppl_topk payload", dst_data, src)
+    _require_dtype("src", src, {"float32", "int32", "uint32"})
+    if str(dst_idx.dtype) != "int32":
+        raise ValueError(f"ppl_topk dst_idx dtype must be int32, got {dst_idx.dtype}")
+    if not isinstance(K, int) or not isinstance(length, int) or K <= 0 or length <= 0:
+        raise ValueError("ppl_topk K and length must be positive Python integers")
+    if K > length:
+        raise ValueError(f"ppl_topk requires K <= length, got K={K}, length={length}")
+    if not isinstance(descended, bool):
+        raise TypeError("ppl_topk descended must be a Python bool")
+    for name, buffer in (("dst_data", dst_data), ("dst_idx", dst_idx), ("src", src)):
+        _require_rank(name, buffer, 1)
+        _require_descriptor_shape(f"ppl_topk {name}", buffer)
+    _require_distinct_storage(
+        "ppl_topk", dst_data=dst_data, dst_idx=dst_idx, src=src)
+    try:
+        ir.assert_structural_equal(src.shape[0], length)
+        ir.assert_structural_equal(dst_data.shape[0], K)
+        ir.assert_structural_equal(dst_idx.shape[0], K)
+    except ValueError as error:
+        raise ValueError(
+            "ppl_topk expects src=(length,), dst_data=(K,), and dst_idx=(K,)") from error
     dst_data_ptr = dst_data.access_ptr("w")
     dst_idx_ptr = dst_idx.access_ptr("w")
     srcptr = src.access_ptr("r")
-    return T.call_extern("handle", "ppl.topk", dst_data_ptr, dst_idx_ptr, srcptr, K, descended, length)
-
-# def ppl_exp2(out, block_M, block_N, dtype): # only support FP32
-#     buffer = out.access_ptr("rw")
-#     work0 = T.alloc_shared([block_M, block_N], dtype)
-#     work1 = T.alloc_shared([block_M, block_N], dtype)
-#     coeff = T.alloc_shared([64, 32], dtype) # npu number is 64
-#     table = T.alloc_shared([64, 192], dtype) # npu number is 64
-#     work0ptr = work0.access_ptr("rw")
-#     work1ptr = work1.access_ptr("rw")
-#     coeffptr = coeff.access_ptr("rw")
-#     tableptr = table.access_ptr("rw")
-#     T.call_extern("handle", "ppl.exp", buffer, work0ptr, work1ptr, coeffptr, tableptr)
+    return T.call_extern(
+        "handle", "tl.tpukernel.topk", dst_data_ptr, dst_idx_ptr, srcptr,
+        K, descended, length)
 
 
 def ppl_rsqrt(out, inp):
@@ -401,13 +686,17 @@ def ppl_rsqrt(out, inp):
         `T.ppl_rsqrt(A_powsum, A_powsum)`
 
     Notes:
-        The current usage requires both `out` and `inp` to be FP32.
-        For FP16/BF16 workflows, first copy into an FP32 temporary buffer,
-        apply `ppl_rsqrt`, then copy back if needed.
+        PPL 1.7 exposes the same generic reciprocal-square-root instruction
+        for FP16, BF16, and FP32 on both BM1690 and SG2260E.
     """
+    for name, buffer in (("out", out), ("inp", inp)):
+        _require_local_buffer(name, buffer)
+        _require_dtype(name, buffer, _TPU_BASE_FLOAT_DTYPES)
+    _require_same_dtype("ppl_rsqrt", out, inp)
+    _require_same_shape("ppl_rsqrt", out, inp)
     inpptr = inp.access_ptr("r")
     outptr = out.access_ptr("w")
-    return T.call_extern("handle", "ppl.rsqrt", outptr, inpptr)
+    return T.call_extern("handle", "tl.tpukernel.rsqrt", outptr, inpptr)
 
 
 def ppl_add_C(out, inp1, value):
@@ -428,9 +717,14 @@ def ppl_add_C(out, inp1, value):
         This is commonly used to add epsilon, bias, or other scalar offsets to
         a local tile.
     """
+    for name, buffer in (("out", out), ("inp1", inp1)):
+        _require_local_buffer(name, buffer)
+        _require_dtype(name, buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
+    _require_same_dtype("ppl_add_C", out, inp1)
+    _require_same_shape("ppl_add_C", out, inp1)
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
-    return T.call_extern("handle", "ppl.add_C", outptr, inpptr1, value)
+    return T.call_extern("handle", "tl.tpukernel.add_scalar", outptr, inpptr1, value)
 
 
 def ppl_add(out, inp1, inp2):
@@ -453,6 +747,12 @@ def ppl_add(out, inp1, inp2):
         A limited broadcast-style usage is also supported in common cases when
         the second input has shape `(M, 1)`.
     """
+    for name, buffer in (("out", out), ("inp1", inp1), ("inp2", inp2)):
+        _require_local_buffer(name, buffer)
+        _require_rank(name, buffer, 2)
+        _require_dtype(name, buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
+    _require_same_dtype("ppl_add", out, inp1, inp2)
+    _require_elementwise_shapes("ppl_add", out, inp1, inp2)
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
@@ -479,6 +779,12 @@ def ppl_div(out, inp1, inp2):
         A limited broadcast-style usage is also supported in common cases when
         the second input has shape `(M, 1)`.
     """
+    for name, buffer in (("out", out), ("inp1", inp1), ("inp2", inp2)):
+        _require_local_buffer(name, buffer)
+        _require_rank(name, buffer, 2)
+        _require_dtype(name, buffer, _TPU_BASE_FLOAT_DTYPES)
+    _require_same_dtype("ppl_div", out, inp1, inp2)
+    _require_elementwise_shapes("ppl_div", out, inp1, inp2)
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
@@ -486,23 +792,23 @@ def ppl_div(out, inp1, inp2):
 
 
 @T.macro
-def ppl_reduce_sum_safe(inp, out, dim):
+def _tpu_reduce_sum_lowering(inp, out, dim, eu_elements):
     """Internal macro backing `ppl_reduce_sum`.
 
     Prefer calling `ppl_reduce_sum(...)` directly in user kernels.
     """
     inpptr = inp.access_ptr("rw")
-    outptr = out.access_ptr("rw")
+    outptr = out.access_ptr("w")
     with T.block("reduce_sum"):
-        tmp_shape = [inp.shape[0], 32]  # EU数量为32
+        tmp_shape = [inp.shape[0], eu_elements]
         tmp_buffer_sum = T.alloc_shared(tmp_shape, inp.dtype)
         tmp_ptr = tmp_buffer_sum.access_ptr("rw")
-        eu_num = T.int32(32)
+        eu_num = T.int32(eu_elements)
         channel = T.int32(64)
         align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num
         stride = T.ceildiv(inp.shape[0], channel) * align_w
-        # 调用底层reduce_max实现a
-        T.call_extern("handle", "ppl.reduce_sum", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
+        # Delegate the hardware-specific sequence to TPU-Kernel codegen.
+        T.call_extern("handle", "tl.tpukernel.reduce_sum", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
 
 
 def ppl_reduce_sum(inp, out, dim):
@@ -525,65 +831,78 @@ def ppl_reduce_sum(inp, out, dim):
         reduction along `dim=1`.
         The usual output shape is `(inp.shape[0], 1)`.
     """
-    assert dim == 1, "Only dim=1 is supported for reduction"
-    return ppl_reduce_sum_safe(inp, out, dim)
+    for name, buffer in (("inp", inp), ("out", out)):
+        _require_local_buffer(name, buffer)
+        _require_rank(name, buffer, 2)
+        _require_dtype(name, buffer, _TPU_BASE_FLOAT_DTYPES)
+    _require_same_dtype("ppl_reduce_sum", inp, out)
+    if dim != 1:
+        raise ValueError(f"ppl_reduce_sum only supports dim=1, got {dim}")
+    try:
+        ir.assert_structural_equal(inp.shape[0], out.shape[0])
+        ir.assert_structural_equal(out.shape[1], 1)
+    except ValueError as error:
+        raise ValueError(
+            f"ppl_reduce_sum expects output shape ({inp.shape[0]}, 1), got {out.shape}") from error
+    return _tpu_reduce_sum_lowering(inp, out, dim, _TPUV7_EU_ELEMENTS[str(inp.dtype)])
 
 
 @T.macro
-def ppl_reduce_max_safe(inp, out, dim, clear=True):
+def _tpu_reduce_max_lowering(inp, out, dim, eu_elements):
     """Internal macro backing `ppl_reduce_max`.
 
     Prefer calling `ppl_reduce_max(...)` directly in user kernels.
     """
     inpptr = inp.access_ptr("rw")
-    outptr = out.access_ptr("rw")
-    if clear:
-        T.call_extern("handle", "ppl.fill", outptr, T.float16(float('-inf')))
-    # 仅支持2D张量和dim=1
-    # assert len(shape) == 2, "Only 2D tensors are supported"
-    # 如果没有提供临时缓冲区，则创建一个
-    # 创建一个临时缓冲区用于中间结果
-    # 注意：这里的32是EU数量，可能需要根据实际情况调整
+    outptr = out.access_ptr("w")
     with T.block("reduce_max"):
-        tmp_shape = [inp.shape[0], 32]  # EU数量为32
+        tmp_shape = [inp.shape[0], eu_elements]
         tmp_buffer_max = T.alloc_shared(tmp_shape, inp.dtype)
         tmp_ptr = tmp_buffer_max.access_ptr("rw")
-        eu_num = T.int32(32)
+        eu_num = T.int32(eu_elements)
         channel = T.int32(64)
         align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num
         stride = T.ceildiv(inp.shape[0], channel) * align_w
-        # 调用底层reduce_max实现a
-        T.call_extern("handle", "ppl.reduce_max", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
+        # Delegate the hardware-specific sequence to TPU-Kernel codegen.
+        T.call_extern("handle", "tl.tpukernel.reduce_max", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
 
 
-def ppl_reduce_max(inp, out, dim, clear=True):
+def ppl_reduce_max(inp, out, dim):
     """Reduce a 2D tile along its second dimension with max.
 
     Args:
         inp: Input tile, typically shaped `(M, N)`.
         out: Output tile, typically shaped `(M, 1)`.
         dim: Reduction axis. The current TPU path only supports `dim=1`.
-        clear: Whether to initialize `out` to `-inf` before reduction.
-            Set this to `False` when you intentionally accumulate across tiles.
 
     Returns:
         PrimExpr: Handle to the emitted reduction macro call.
 
     Example:
-        `T.ppl_reduce_max(acc_s, scores_max, dim=1, clear=False)`
-        `T.ppl_reduce_max(X_shared, Y_shared, dim=1, clear=True)`
+        `T.ppl_reduce_max(acc_s, scores_max, dim=1)`
 
     Notes:
         This op is intended for 2D tiles and currently only supports
         reduction along `dim=1`.
         The usual output shape is `(inp.shape[0], 1)`.
-        Set `clear=False` only when you intentionally want to keep and update
-        the previous contents of `out`.
+        This operation always overwrites `out`.  Cross-tile accumulation must
+        be expressed as a separate max operation; the TPU-Kernel reduction
+        sequence does not consume the previous contents of `out`.
     """
-    # 在函数外部进行检查
-    assert dim == 1, "Only dim=1 is supported"
-    # 调用不含断言的宏函数
-    return ppl_reduce_max_safe(inp, out, dim, clear)
+    for name, buffer in (("inp", inp), ("out", out)):
+        _require_local_buffer(name, buffer)
+        _require_rank(name, buffer, 2)
+        _require_dtype(name, buffer, _TPU_BASE_FLOAT_DTYPES)
+    _require_same_dtype("ppl_reduce_max", inp, out)
+    if dim != 1:
+        raise ValueError(f"ppl_reduce_max only supports dim=1, got {dim}")
+    try:
+        ir.assert_structural_equal(inp.shape[0], out.shape[0])
+        ir.assert_structural_equal(out.shape[1], 1)
+    except ValueError as error:
+        raise ValueError(
+            f"ppl_reduce_max expects output shape ({inp.shape[0]}, 1), got {out.shape}") from error
+    return _tpu_reduce_max_lowering(inp, out, dim, _TPUV7_EU_ELEMENTS[str(inp.dtype)])
 
 
 def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
@@ -608,9 +927,24 @@ def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
         `x * sin(theta)`, and `-x * sin(theta)`.
         The last dimension of `out` should be even.
     """
+    buffers = (out, even_inp1, even_inp2, odd_inp1, odd_inp2)
+    for name, buffer in zip(
+            ("out", "even_inp1", "even_inp2", "odd_inp1", "odd_inp2"), buffers):
+        _require_local_buffer(name, buffer)
+        _require_rank(name, buffer, 2)
+        _require_dtype(name, buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
+        _require_same_shape("ppl_rope_add", out, buffer)
+    _require_same_dtype("ppl_rope_add", *buffers)
+    if _static_positive_dim("ppl_rope_add W", out.shape[1]) % 2:
+        raise ValueError("ppl_rope_add requires an even W dimension")
+    for name, buffer in zip(
+            ("even_inp1", "even_inp2", "odd_inp1", "odd_inp2"), buffers[1:]):
+        _require_storage_disjoint("ppl_rope_add", "out", out, name, buffer)
     outptr = out.access_ptr("w")
     even_inpptr1 = even_inp1.access_ptr("r")
     even_inpptr2 = even_inp2.access_ptr("r")
     odd_inpptr1 = odd_inp1.access_ptr("r")
     odd_inpptr2 = odd_inp2.access_ptr("r")
-    return T.call_extern("handle", "ppl.rope_add", outptr, even_inpptr1, even_inpptr2, odd_inpptr1, odd_inpptr2)
+    return T.call_extern(
+        "handle", "tl.tpukernel.rope_add", outptr, even_inpptr1,
+        even_inpptr2, odd_inpptr1, odd_inpptr2)

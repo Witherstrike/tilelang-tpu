@@ -47,7 +47,9 @@ M = 512
 N = 512
 blk_m = 32
 blk_k = 32
-kernel = tilelang.compile(rms_norm_splitk(M, N, blk_m, blk_k), out_idx=-1, target="tpu")
+kernel = tilelang.compile(
+    rms_norm_splitk(M, N, blk_m, blk_k), out_idx=-1,
+    target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
 
 a = torch.randn(M, N).float()
 b = torch.zeros(M, N).float()

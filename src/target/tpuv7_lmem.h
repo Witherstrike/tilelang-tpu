@@ -24,6 +24,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
+#include <string>
 #include <vector>
 
 namespace tvm {
@@ -38,6 +40,16 @@ constexpr int64_t kEuBytes = 64;
 constexpr int64_t kBankNum = 16;
 constexpr int64_t kBankSize = 16 * 1024;
 constexpr int64_t kTensorAlignBytes = 64;
+// PPL's TPUv7 tensor descriptors encode every N/C/H/W extent in the range
+// [1, 65535].  Keep this hardware/API boundary next to the shared TPUv7
+// geometry so address assignment and source emission cannot disagree.
+constexpr int64_t kDescriptorDimMax =
+    static_cast<int64_t>(std::numeric_limits<uint16_t>::max());
+
+inline bool IsLocalMemoryScope(const std::string &scope) {
+  return scope == "shared" || scope == "shared.dyn" || scope == "local" ||
+         scope == "local.fragment";
+}
 
 inline int64_t DivUp(int64_t value, int64_t factor) {
   ICHECK_GT(factor, 0);
@@ -49,12 +61,31 @@ inline int64_t AlignUp(int64_t value, int64_t align) {
   return DivUp(value, align) * align;
 }
 
+inline int64_t ValidateDescriptorDim(int64_t value, const char *context) {
+  ICHECK_GT(value, 0) << context << " expects a positive dimension";
+  ICHECK_LE(value, kDescriptorDimMax)
+      << context << " dimension " << value
+      << " exceeds the TPUv7/PPL dim4 limit " << kDescriptorDimMax;
+  return value;
+}
+
 inline int64_t GetIntImmValue(const PrimExpr &expr, const char *context) {
   auto *imm = expr.as<IntImmNode>();
-  ICHECK(imm) << context << " expects IntImm local tensor shapes";
-  ICHECK_GT(imm->value, 0)
-      << context << " expects positive local tensor shapes";
-  return imm->value;
+  ICHECK(imm) << context << " expects compile-time integer dimensions";
+  return ValidateDescriptorDim(imm->value, context);
+}
+
+template <typename Integer>
+inline void ValidateDescriptorShape4(const std::vector<Integer> &shape4,
+                                     const char *context) {
+  ICHECK_EQ(shape4.size(), 4U) << context << " expects a normalized dim4";
+  for (size_t axis = 0; axis < shape4.size(); ++axis) {
+    ICHECK_GT(shape4[axis], 0)
+        << context << " axis " << axis << " must be positive";
+    ICHECK_LE(shape4[axis], kDescriptorDimMax)
+        << context << " axis " << axis << " extent " << shape4[axis]
+        << " exceeds the TPUv7/PPL dim4 limit " << kDescriptorDimMax;
+  }
 }
 
 inline int64_t DTypeBytes(DataType dtype) {
@@ -92,7 +123,7 @@ inline std::vector<int64_t> NormalizeLocalShape(const Array<PrimExpr> &shape,
 
 inline int64_t TpuAlignSizeBytesFromShape4(
     const std::vector<int64_t> &shape4, DataType dtype) {
-  ICHECK_EQ(shape4.size(), 4U);
+  ValidateDescriptorShape4(shape4, "TPUv7 local tensor");
   int64_t dtype_bytes = DTypeBytes(dtype);
   int64_t eu_num = std::max<int64_t>(1, kEuBytes / dtype_bytes);
   int64_t stride_c = AlignUp(shape4[2] * shape4[3], eu_num);

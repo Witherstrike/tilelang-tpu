@@ -18,9 +18,8 @@
  */
 
 /*!
- * \file storage_rewrite.cc
- * \brief Memory access pattern analysis and optimization.
- *  Re-write data access to enable memory sharing when possible.
+ * \file address_assign.cc
+ * \brief TPUv7 local-memory lifetime, bank-conflict, and address assignment.
  */
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/type.h>
@@ -34,7 +33,6 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-// #include <map>
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -49,6 +47,7 @@
 #include "../op/bulk_copy.h"
 #include "../op/gemm.h"
 #include "../target/tpuv7_lmem.h"
+#include "../target/tpu_target_info.h"
 
 namespace tvm {
 namespace tl {
@@ -64,7 +63,7 @@ int64_t AlignUp(int64_t value, int64_t align) {
 
 class AddressAllocator : public StmtExprVisitor {
 public:
-  explicit AddressAllocator() {}
+  AddressAllocator() = default;
 
   std::vector<const BufferNode *> collectAllocOp(tir::Stmt body) {
     this->VisitStmt(body);
@@ -116,7 +115,6 @@ class MemAllocBankConflictAware {
 public:
   MemAllocBankConflictAware(int64_t bank_num, int64_t bank_size)
       : bank_num_(bank_num), bank_size_(bank_size) {
-    total_consumption_ = 0;
     mem_size_ = bank_num * bank_size;
     bank_ops.resize(bank_num);
   }
@@ -126,8 +124,7 @@ public:
       std::unordered_map<const BufferNode *, TensorLive> &liveRange,
       std::unordered_map<const BufferNode *,
                          std::unordered_set<const BufferNode *>> &conflictMap,
-      std::unordered_map<const BufferNode *, int64_t> &addrMap,
-      int64_t &totalSize) {
+      std::unordered_map<const BufferNode *, int64_t> &addrMap) {
     std::list<const BufferNode *> op_list;
     std::copy(ops.begin(), ops.end(), std::back_inserter(op_list));
 
@@ -188,13 +185,11 @@ public:
       // addrMap.Set(op, best_addr->start);
       addrMap[op] = best_addr->start;
     }
-    totalSize = total_consumption_;
     return true;
   }
 
 protected:
   void insertAddr(std::shared_ptr<OpAddr> &opAddr) {
-    total_consumption_ = std::max(total_consumption_, opAddr->end);
     auto iter =
         std::find_if(allocated_op_list_.begin(), allocated_op_list_.end(),
                      [&opAddr](std::shared_ptr<OpAddr> &p) {
@@ -272,7 +267,6 @@ protected:
 protected:
   std::list<std::shared_ptr<OpAddr>> allocated_op_list_;
   std::vector<std::vector<const BufferNode *>> bank_ops;
-  int64_t total_consumption_;
   int64_t bank_num_;
   int64_t bank_size_;
   int64_t mem_size_;
@@ -462,7 +456,7 @@ private:
     }
   }
 
-  bool VisitKnownTPUExtern(const CallNode *op) {
+  bool VisitExternEffects(const CallNode *op) {
     if (!op->op.same_as(builtin::call_extern()) || op->args.empty()) {
       return false;
     }
@@ -478,66 +472,73 @@ private:
     };
 
     OpScope scope(this);
-    if (op_name == "ppl.copy" || op_name == "tl.tpu.copy") {
+    if (op_name == "tl.tpu.copy") {
       mark_arg(1, BufferAccessKind::kRead);
       mark_arg(2, BufferAccessKind::kWrite);
-    } else if (op_name == "ppl.fill" || op_name == "tl.tpu.fill") {
+    } else if (op_name == "tl.tpu.fill") {
       mark_arg(1, BufferAccessKind::kWrite);
-    } else if (op_name == "ppl.gemm" || op_name == "tl.tpu.gemm") {
+    } else if (op_name == "tl.tpu.gemm") {
+      ICHECK_EQ(op->args.size(), 10U)
+          << "tl.tpu.gemm requires the canonical 10-argument ABI, including "
+             "an explicit accumulate flag";
       mark_arg(1, BufferAccessKind::kRead);
       mark_arg(2, BufferAccessKind::kRead);
-      bool accumulate = true;
-      if (op->args.size() >= 10) {
-        if (const auto *value = op->args[9].as<IntImmNode>()) {
-          accumulate = value->value != 0;
-        }
-      } else if (op->args.size() >= 6) {
-        // Compatibility for the original 9-argument ppl.gemm ABI.
-        if (const auto *transpose_b = op->args[5].as<IntImmNode>()) {
-          accumulate = transpose_b->value == 0;
-        }
-      }
+      const auto *accumulate_value = op->args[9].as<IntImmNode>();
+      ICHECK(accumulate_value && accumulate_value->dtype.is_bool())
+          << "tl.tpu.gemm accumulate must be a compile-time boolean";
+      bool accumulate = accumulate_value->value != 0;
       mark_arg(3, accumulate ? BufferAccessKind::kReadWrite
                              : BufferAccessKind::kWrite);
-    } else if (op_name == "ppl.sub" || op_name == "ppl.mul" ||
-               op_name == "ppl.add" || op_name == "ppl.div" ||
-               op_name == "tl.tpu.sub" || op_name == "tl.tpu.mul" ||
+    } else if (op_name == "tl.tpu.sub" || op_name == "tl.tpu.mul" ||
                op_name == "tl.tpu.add" || op_name == "tl.tpu.div") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);
-    } else if (op_name == "ppl.mul_C" || op_name == "ppl.add_C" ||
-               op_name == "ppl.rsqrt") {
+    } else if (op_name == "tl.tpukernel.mul_scalar" ||
+               op_name == "tl.tpukernel.add_scalar" ||
+               op_name == "tl.tpukernel.rsqrt") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
-    } else if (op_name == "ppl.reduce_sum" ||
-               op_name == "ppl.reduce_max") {
-      mark_arg(1, BufferAccessKind::kRead);
+    } else if (op_name == "tl.tpukernel.reduce_sum" ||
+               op_name == "tl.tpukernel.reduce_max") {
+      // The current pool-based lowering initializes the physically padded
+      // tail of the local input tile before reducing it.
+      mark_arg(1, BufferAccessKind::kReadWrite);
       mark_arg(2, BufferAccessKind::kWrite);
       mark_arg(3, BufferAccessKind::kReadWrite);
-    } else if (op_name == "ppl.exp") {
+    } else if (op_name == "tl.tpukernel.exp") {
+      // exp lowers to a multi-instruction composite.  Its output, both
+      // workspaces, and coefficient tensor are read and written at different
+      // points inside that opaque sequence, so model them as one conservative
+      // bank-conflict clique rather than trusting the outer access mask.
+      for (size_t i = 1; i <= 4; ++i) {
+        mark_arg(i, BufferAccessKind::kConservative);
+      }
+    } else if (op_name == "tl.tpukernel.sigmoid") {
+      // The PPL 1.7 sigmoid composition reuses dst/workspaces across exp,
+      // reciprocal, and add instructions.  Keep every operand distinct at
+      // the bank-planning boundary.
       for (size_t i = 1; i <= 5; ++i) {
         mark_arg(i, BufferAccessKind::kConservative);
       }
-    } else if (op_name == "ppl.sigmoid") {
-      for (size_t i = 1; i <= 6; ++i) {
-        mark_arg(i, BufferAccessKind::kConservative);
-      }
-    } else if (op_name == "ppl.gather") {
+    } else if (op_name == "tl.tpukernel.gather") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);
-    } else if (op_name == "ppl.topk") {
+    } else if (op_name == "tl.tpukernel.topk") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kWrite);
       mark_arg(3, BufferAccessKind::kRead);
-    } else if (op_name == "ppl.rope_add") {
+    } else if (op_name == "tl.tpukernel.rope_add") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);
       mark_arg(4, BufferAccessKind::kRead);
       mark_arg(5, BufferAccessKind::kRead);
     } else {
+      // Unknown/non-TPU externs have no instruction contract in this pass.
+      // Keep their buffer operands conservative; the residual-IR verifier or
+      // native TPU codegen boundary is responsible for rejecting them.
       for (size_t i = 1; i < op->args.size(); ++i) {
         mark_arg(i, BufferAccessKind::kConservative);
       }
@@ -562,7 +563,7 @@ private:
       StmtExprVisitor::VisitExpr_(op);
       return;
     }
-    if (VisitKnownTPUExtern(op)) {
+    if (VisitExternEffects(op)) {
       return;
     }
     if (IsAccessPtrCall(op)) {
@@ -619,26 +620,19 @@ PrimFunc InferAddress(PrimFunc f) {
       .Analyze(f->body);
 
   std::unordered_map<const BufferNode *, int64_t> addrMapWithBC;
-  int64_t memUsedWithBC = 0;
   MemAllocBankConflictAware allocatorBC(bank_num, bank_size);
   auto success = allocatorBC.assignAddr(
-      alloc_ops, live_ranges, bank_conflict_map, addrMapWithBC, memUsedWithBC);
+      alloc_ops, live_ranges, bank_conflict_map, addrMapWithBC);
   ICHECK(success) << "TPUv7 local memory allocation failed. buffers="
                   << alloc_ops.size() << ", lmem=" << bank_num * bank_size
                   << " bytes";
 
-  if (success) {
-    // std::unordered_map<String, PrimExpr> result;
-    auto fn = f.CopyOnWrite();
-    auto fn_attr = fn->attrs.CopyOnWrite();
-    for (auto op : alloc_ops) {
-      int64_t address = addrMapWithBC[op];
-      fn_attr->dict.Set(op->name, IntImm(DataType::Int(64), address));
-    }
+  auto fn = f.CopyOnWrite();
+  auto fn_attr = fn->attrs.CopyOnWrite();
+  for (auto op : alloc_ops) {
+    int64_t address = addrMapWithBC[op];
+    fn_attr->dict.Set(op->name, IntImm(DataType::Int(64), address));
   }
-  std::cerr << "[AddressAssign] success=" << std::boolalpha << success
-            << " buffers=" << alloc_ops.size() << " total=" << memUsedWithBC
-            << " bytes\n";
 
   return f;
 }
@@ -646,6 +640,10 @@ PrimFunc InferAddress(PrimFunc f) {
 tvm::transform::Pass AddressAssign() {
   using namespace tir::transform;
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+    Optional<Target> target = f->GetAttr<Target>(tvm::attr::kTarget);
+    ICHECK(target.defined())
+        << "AddressAssign requires a PrimFunc bound to a TPU target";
+    tpu::ResolveTarget(target.value(), "AddressAssign");
     return InferAddress(f);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.AddressAssign", {});

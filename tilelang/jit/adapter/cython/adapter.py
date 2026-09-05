@@ -4,7 +4,7 @@
 
 from ..base import BaseKernelAdapter
 import ctypes
-from typing import List, Optional, Union, Callable, Literal, Dict, Tuple, Any
+from typing import List, Optional, Union, Callable, Dict, Tuple, Any
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tilelang.engine.param import KernelParam
@@ -21,12 +21,7 @@ from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.tensor import map_torch_type
 from tilelang.contrib.cc import get_cplus_compiler
-from tilelang.engine.tpu_config import (
-    bind_tpu_target,
-    get_tpu_target_chip,
-    TPUCompileConfig,
-    resolve_tpu_compile_config,
-)
+from tilelang.engine.tpu_config import TPURuntimeConfig, TPUTargetSpec
 import torch
 import sys
 import sysconfig
@@ -166,9 +161,6 @@ class CythonKernelAdapter(BaseKernelAdapter):
     # Pass configs for the compiler
     pass_configs: Optional[Dict[str, Any]] = None
 
-    # execution mode for tpu
-    mode: Literal["pcie", "cmodel"] = "pcie"
-
     def __init__(self,
                  params: List[KernelParam],
                  result_idx: List[int],
@@ -179,8 +171,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
                  kernel_global_source: Optional[str] = None,
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None,
-                 mode: Optional[Literal["pcie", "cmodel"]] = None,
-                 tpu_config: Optional[TPUCompileConfig] = None):
+                 tpu_target: Optional[TPUTargetSpec] = None,
+                 tpu_runtime: Optional[TPURuntimeConfig] = None):
         """Initialize the adapter with the given TIR function or module.
         
         Args:
@@ -208,16 +200,19 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.buffer_device_map = self._process_buffer_device()
 
         self.verbose = verbose
-        self.tpu_config = None
-        self.mode = None
+        self.tpu_target = None
+        self.tpu_runtime = None
         if is_tpu_target(self.target):
-            self.tpu_config = tpu_config or resolve_tpu_compile_config(
-                mode=mode, target_chip=get_tpu_target_chip(self.target))
-            self.target = bind_tpu_target(self.target, self.tpu_config)
-            self.mode = self.tpu_config.runtime_mode
-        elif tpu_config is not None or mode is not None:
+            if tpu_target is None or tpu_runtime is None:
+                raise ValueError(
+                    "TPU adapter requires target and runtime configuration "
+                    "from the compiled artifact")
+            self.tpu_target = tpu_target
+            self.tpu_runtime = tpu_runtime
+        elif tpu_target is not None or tpu_runtime is not None:
             raise ValueError("TPU configuration can only be used with target='tpu'")
-        self.lib_generator = LibraryGenerator(self.target, tpu_config=self.tpu_config)
+        self.lib_generator = LibraryGenerator(
+            self.target, tpu_target=self.tpu_target, tpu_runtime=self.tpu_runtime)
         self.wrapper = TLWrapper(
             self.target, tpu_workspace_dir=self.lib_generator.tpu_workspace_dir)
 
@@ -260,7 +255,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
                       kernel_lib_path: str,
                       verbose: bool = False,
                       pass_configs: Optional[Dict[str, Any]] = None,
-                      tpu_config: Optional[TPUCompileConfig] = None):
+                      tpu_target: Optional[TPUTargetSpec] = None,
+                      tpu_runtime: Optional[TPURuntimeConfig] = None):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
@@ -282,17 +278,23 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.buffer_device_map = adapter._process_buffer_device()
 
         adapter.verbose = verbose
-        adapter.tpu_config = None
-        adapter.mode = None
+        adapter.tpu_target = None
+        adapter.tpu_runtime = None
         if is_tpu_target(adapter.target):
-            adapter.tpu_config = tpu_config or resolve_tpu_compile_config(
-                target_chip=get_tpu_target_chip(adapter.target))
-            adapter.target = bind_tpu_target(adapter.target, adapter.tpu_config)
-            adapter.mode = adapter.tpu_config.runtime_mode
-        elif tpu_config is not None:
+            if tpu_target is None or tpu_runtime is None:
+                raise ValueError(
+                    "TPU adapter requires target and runtime configuration "
+                    "from the compiled artifact")
+            adapter.tpu_target = tpu_target
+            adapter.tpu_runtime = tpu_runtime
+        elif tpu_target is not None or tpu_runtime is not None:
             raise ValueError("TPU configuration can only be used with target='tpu'")
         reject_unverified_tpu_database_artifact(adapter.target)
-        adapter.lib_generator = LibraryGenerator(adapter.target, tpu_config=adapter.tpu_config)
+        adapter.lib_generator = LibraryGenerator(
+            adapter.target,
+            tpu_target=adapter.tpu_target,
+            tpu_runtime=adapter.tpu_runtime,
+        )
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
 
         if is_tpu_target(adapter.target):

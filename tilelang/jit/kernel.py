@@ -13,13 +13,12 @@ from tilelang.jit.adapter import (
     CtypesKernelAdapter,
     CythonKernelAdapter,
 )
-from tilelang.utils.target import determine_target, AVALIABLE_TARGETS, is_tpu_target_spec
+from tilelang.utils.target import determine_target, AVAILABLE_TARGETS, is_tpu_target_spec
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.tpu_config import (
-    bind_tpu_target,
-    get_tpu_target_chip,
-    resolve_tpu_compile_config,
+    resolve_tpu_runtime,
+    resolve_tpu_target,
 )
 
 
@@ -51,10 +50,7 @@ class JITKernel(object):
         verbose: bool = False,
         pass_configs: Optional[Dict[str, Any]] = None,
         from_database: bool = False,
-        chip: Optional[str] = None,
-        device_mode: Literal["tpukernel", "rv", "atomic"] = "tpukernel",
         runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
-        mode: Optional[Literal["pcie", "cmodel"]] = None,
     ):
         """
         Initializes a TorchFunction instance.
@@ -90,32 +86,24 @@ class JITKernel(object):
         self.pass_configs = pass_configs
         # If the target is specified as a string, validate it and convert it to a TVM Target.
         if isinstance(target, str):
-            assert target in AVALIABLE_TARGETS or is_tpu_target_spec(target), \
-                f"Invalid target: {target}"
+            if target not in AVAILABLE_TARGETS and not is_tpu_target_spec(target):
+                raise ValueError(f"Invalid target: {target}")
             target = determine_target(target)
 
         # Ensure the target is always a TVM Target object.
         target = Target(target)
-        self.tpu_config = None
+        self.tpu_target = None
+        self.tpu_runtime = None
         if target.kind.name == "tpu":
-            self.tpu_config = resolve_tpu_compile_config(
-                chip=chip,
-                device_mode=device_mode,
-                runtime_mode=runtime_mode,
-                mode=mode,
-                target_chip=get_tpu_target_chip(target),
-            )
-            target = bind_tpu_target(target, self.tpu_config)
+            self.tpu_target = resolve_tpu_target(target=target)
+            self.tpu_runtime = resolve_tpu_runtime(runtime_mode=runtime_mode)
+        elif runtime_mode is not None:
+            raise ValueError("runtime_mode is only valid for a TPU target")
         self.target = target
-        # TPU runtime mode is not meaningful for CUDA/HIP/CPU backends.
-        self.mode = self.tpu_config.runtime_mode if self.tpu_config is not None else None
 
         # Validate the execution backend.
-        assert execution_backend in [
-            "dlpack",
-            "ctypes",
-            "cython",
-        ], f"Invalid execution backend. {execution_backend}"
+        if execution_backend not in ("dlpack", "ctypes", "cython"):
+            raise ValueError(f"Invalid execution backend: {execution_backend!r}")
 
         if execution_backend == "cython":
             from tilelang.contrib.cc import get_cplus_compiler
@@ -146,10 +134,7 @@ class JITKernel(object):
         out_idx: Union[List[int], int],
         execution_backend: Literal["dlpack", "ctypes", "cython"],
         pass_configs: Optional[Dict[str, Any]] = None,
-        chip: Optional[str] = None,
-        device_mode: Literal["tpukernel", "rv", "atomic"] = "tpukernel",
         runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
-        mode: Optional[Literal["pcie", "cmodel"]] = None,
     ):
         """
         Alternative constructor to create a TorchFunction directly from a database.
@@ -162,10 +147,7 @@ class JITKernel(object):
             target_host=target_host,
             pass_configs=pass_configs,
             from_database=True,
-            chip=chip,
-            device_mode=device_mode,
             runtime_mode=runtime_mode,
-            mode=mode,
         )
 
         instance.adapter = instance._create_adapter_from_database(
@@ -223,11 +205,9 @@ class JITKernel(object):
         enable_host_codegen = execution_backend == "dlpack"
         enable_device_compile = execution_backend == "dlpack"
         lower_kwargs = {}
-        if self.tpu_config is not None:
+        if self.tpu_runtime is not None:
             lower_kwargs.update(
-                chip=self.tpu_config.chip,
-                device_mode=self.tpu_config.device_mode,
-                runtime_mode=self.tpu_config.runtime_mode,
+                runtime_mode=self.tpu_runtime.runtime_mode,
             )
         with tvm.transform.PassContext(opt_level=3, config=pass_configs):
             artifact = tilelang.lower(
@@ -239,6 +219,15 @@ class JITKernel(object):
                 **lower_kwargs)
 
         self.artifact = artifact
+        if self.tpu_target is not None:
+            # The lowered artifact is the sole source consumed downstream.
+            # Equality checks catch a target/runtime mutation at the boundary.
+            if (artifact.tpu_target != self.tpu_target or
+                    artifact.tpu_runtime != self.tpu_runtime):
+                raise RuntimeError(
+                    "Lowered TPU artifact identity disagrees with the JIT selection")
+            self.tpu_target = artifact.tpu_target
+            self.tpu_runtime = artifact.tpu_runtime
 
         # Create an adapter based on the specified execution backend.
         if execution_backend == "dlpack":
@@ -259,7 +248,8 @@ class JITKernel(object):
                 kernel_global_source=artifact.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
-                tpu_config=self.tpu_config,
+                tpu_target=artifact.tpu_target,
+                tpu_runtime=artifact.tpu_runtime,
             )
         elif execution_backend == "cython":
             adapter = CythonKernelAdapter(
@@ -272,7 +262,8 @@ class JITKernel(object):
                 kernel_global_source=artifact.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
-                tpu_config=self.tpu_config,
+                tpu_target=artifact.tpu_target,
+                tpu_runtime=artifact.tpu_runtime,
             )
         else:
             # Handle invalid backend.
@@ -303,7 +294,8 @@ class JITKernel(object):
                 func_or_mod=func_or_mod,
                 kernel_global_source=kernel_global_source,
                 kernel_lib_path=kernel_lib_path,
-                tpu_config=self.tpu_config,
+                tpu_target=self.tpu_target,
+                tpu_runtime=self.tpu_runtime,
             )
         elif execution_backend == "cython":
             adapter = CythonKernelAdapter.from_database(
@@ -313,7 +305,8 @@ class JITKernel(object):
                 func_or_mod=func_or_mod,
                 kernel_global_source=kernel_global_source,
                 kernel_lib_path=kernel_lib_path,
-                tpu_config=self.tpu_config,
+                tpu_target=self.tpu_target,
+                tpu_runtime=self.tpu_runtime,
             )
         else:
             # Handle invalid backend.

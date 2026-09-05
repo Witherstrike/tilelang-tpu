@@ -87,7 +87,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--chip", choices=("sg2260e", "bm1690"))
-    parser.add_argument("--device-mode", choices=("tpukernel", "rv"))
+    parser.add_argument("--programming-model", choices=("tpukernel", "rv"))
     parser.add_argument("--case", choices=_CASES, action="append", dest="cases")
     parser.add_argument("--device-id", type=int)
     parser.add_argument("--allow-pcie", action="store_true")
@@ -108,16 +108,16 @@ def _run_matrix(args: argparse.Namespace, output_dir: Path,
     summary_path = output_dir / "summary.json"
     worker = Path(__file__).with_name("tpu_profile_worker.py")
 
-    for chip, device_mode in configurations:
+    for chip, programming_model in configurations:
         for case in cases:
-            key = f"{chip}/{device_mode}/{case}"
+            key = f"{chip}/{programming_model}/{case}"
             print(f"RUN {key}", flush=True)
             config = TPUProfilingConfig(
                 chip=chip,
-                device_mode=device_mode,
+                programming_model=programming_model,
                 runtime_mode=args.runtime_mode,
                 output_dir=output_dir,
-                label=f"{chip}-{device_mode}-{case}",
+                label=f"{chip}-{programming_model}-{case}",
                 timeout_s=args.timeout,
                 postprocess=args.runtime_mode == "pcie",
             )
@@ -192,9 +192,10 @@ def main() -> int:
     configurations = tuple(
         item for item in configurations
         if (args.chip is None or item[0] == args.chip)
-        and (args.device_mode is None or item[1] == args.device_mode))
+        and (args.programming_model is None or item[1] == args.programming_model))
     if not configurations:
-        raise RuntimeError("the requested chip/device-mode pair is not in this matrix")
+        raise RuntimeError(
+            "the requested chip/programming-model pair is not in this matrix")
     cases = tuple(args.cases) if args.cases else _CASES
     scratch_dir = Path(tempfile.mkdtemp(prefix=".scratch-", dir=output_dir))
     environment = _worker_environment(repo_root, args.runtime_mode, args.device_id)

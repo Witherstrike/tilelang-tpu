@@ -63,22 +63,25 @@ CUDA Event 和 `torch.cuda.synchronize()`；把它用于 TPU 会混淆 runtime�
 | `tilelang/jit/adapter/libgen.py` | PCIe host 链接 board `libtpuv7_rt.so` 与 PPL chip backend 的 `libtpudnn.so` |
 | `testing/python/jit/tpu_profile_worker.py` | 在子进程中 fresh-compile、加载、数值验证和 dispatch，不复用外部 `main.so` |
 
-### 3.1 统一配置，而不是另建芯片表
+### 3.1 编译身份与运行身份分离
 
-`TPUProfilingConfig` 内部使用 `TPUCompileConfig` 校验并规范化三条独立轴：
+常规 JIT 的编译身份只来自完整 TVM Target，并解析为
+`TPUTargetSpec(chip, programming_model)`；运行身份解析为独立的
+`TPURuntimeConfig(runtime_mode)`。前者决定 PPL arch、指令 ABI 和 codegen，后者只决定使用
+CModel 还是 PCIe host runtime。两者不会通过目录名或隐式芯片默认值相互推导。
 
-- `chip`: `bm1690` / `sg2260e`；
-- `device_mode`: `tpukernel` / `rv`；旧 `atomic` 只在 API 边界兼容并立即归一化；
-- `runtime_mode`: `cmodel` / `pcie`。
-
-核数同样来自 `TPUChipSpec`：BM1690 为 8，SG2260E 为 4。profiling 不维护第二份映射。
+`TPUProfilingConfig` 还要保存输出目录、超时和后处理策略，因此保留会话级的 `chip`、
+`programming_model` 和 `runtime_mode` 字段；其 `target_spec` 与 `runtime_config` 属性分别返回
+上述两个规范对象。核数统一来自 `TPUChipSpec`：BM1690 为 8 核且只支持 TPU-Kernel，
+SG2260E 为 4 核且支持 TPU-Kernel/RV。两者共享当前编译器建模的 TPUv7 LMEM 几何，
+profiling 不维护第二份能力表。
 
 ### 3.2 CModel 收集
 
-CModel worker 在自己的 cwd 中运行，使用安全的相对 `FILE_DUMP_CMD=<label>`。profiler 同时
-设置 `TPU_RT_CORE_NUM=4`（SG2260E）、`TILELANG_TPU_BENCHMARK_RUNS=0`，并删除父环境中
-可能遗留的全部 PCIe 授权。raw `.txt` 只提供 engine/core/command-id/opcode；它没有可靠
-begin/end，模块不会伪造 duration。
+CModel worker 在自己的 cwd 中运行，使用安全的相对 `FILE_DUMP_CMD=<label>`。profiler 从
+`TPUChipSpec` 设置 `TPU_RT_CORE_NUM`（SG2260E 为 4，BM1690 为 8），同时设置
+`TILELANG_TPU_BENCHMARK_RUNS=0`，并删除父环境中可能遗留的全部 PCIe 授权。raw `.txt`
+只提供 engine/core/command-id/opcode；它没有可靠 begin/end，模块不会伪造 duration。
 
 如果显式配置 `perfai_root` 或 `PPL_PERFAI_ROOT`，则运行
 `AutoRunner.sh -d <session-dir> -e <vendor-chip>`。解析器保留完整 `timeline_events`，并只把
@@ -130,20 +133,16 @@ PPL 1.7 `deps/runtime/tpuv7-runtime/lib/libtpuv7_rt.so` 依赖
 
 这一修复也是 PCIe profiling 能真实工作的必要条件，不只是链接整理。
 
-### 3.5 PCIe 离线解码与版本兼容
+### 3.5 PCIe 离线解码契约
 
-PPL 1.7 的 `autotune.py` 假定旧版 `bigTpuProfile` 有 `to_txt()`，并在缺包时自动调用 pip。
-当前可获得的 `bigTpuProfile 0.3.4` 已改为 `parse()` 返回结构化 `ProfileResult`，而其内置
-PerfAI Web 文件并不完整。TileLang 因而采用两层兼容：
+PPL 1.7 的 `autotune.py` 会调用 `to_txt()`，并在缺包时自动执行 pip；这两种行为都不进入
+TileLang 的生产路径。TileLang 只接受 `parse()` 返回结构化 `ProfileResult` 的显式外部
+decoder，读取 `bd_events/gdma_events/sdma_events/cdma_events` 后写
+`tilelang_pcie_profile.json`。本轮以隔离安装的 `bigTpuProfile 0.3.5` 验证了该契约。
 
-- 新 API：直接读取 `bd_events/gdma_events/sdma_events/cdma_events`，写
-  `tilelang_pcie_profile.json`；
-- 旧 API：若存在 `to_txt()` 和 PerfAI Web，则保留 PPL 1.7 的导出链并解析
-  `profile_data.js`。
-
-两条路径都不自动安装或升级包。稳定 JSON 保存 engine、begin/end、`ns` 单位、core、command
-id、opcode，以及 vendor 的原始 info/detail/metadata。这样上层报告不依赖 PerfAI UI 的文件
-布局变化。
+框架不会自动安装或升级包，也不保留依赖 PerfAI Web 文件布局的兼容分支。稳定 JSON 保存
+engine、begin/end、`ns` 单位、core、command id、opcode，以及 vendor 的原始
+info/detail/metadata；不满足结构化契约的 decoder 会显式报错，raw trace 保持不变。
 
 ## 4. 使用方法
 
@@ -154,7 +153,7 @@ from tilelang.jit import TPUInstructionProfiler, TPUProfilingConfig
 
 config = TPUProfilingConfig(
     chip="sg2260e",
-    device_mode="rv",             # 或 tpukernel
+    programming_model="rv",       # 或 tpukernel
     runtime_mode="cmodel",
     output_dir="./profiles",
     label="rv-control",
@@ -172,7 +171,7 @@ report = TPUInstructionProfiler(config).run_cmodel(
 ```python
 config = TPUProfilingConfig(
     chip="sg2260e",
-    device_mode="tpukernel",      # 或 rv
+    programming_model="tpukernel",  # 或 rv
     runtime_mode="pcie",
     output_dir="./profiles",
     label="matmul-on-board",
@@ -191,6 +190,20 @@ report = TPUInstructionProfiler(config).run_pcie(
 
 `command` 必须是可信 worker，并在该子进程中编译/加载自己的私有 TileLang artifact。profiler
 无法阻止恶意命令主动 `setsid()` 或 daemonize；这类逃离受控进程组的行为不受支持。
+
+worker 内的编译调用仍使用规范公共接口，例如：
+
+```python
+kernel = tilelang.compile(
+    program,
+    target=("tpu -mcpu=sg2260e "
+            "-tpu-programming-model=rv"),
+    runtime_mode="cmodel",
+)
+```
+
+裸 TPU target 会在 lowering 前失败；PCIe worker 只把上例的 `runtime_mode` 改为 `pcie`，
+不会改写编译身份。
 
 未指定 `output_dir` 时，结果保存在当前工作目录的 `tilelang-tpu-profiles/<label>-*`，不再默认
 写入 `/tmp`。每次会话创建新子目录，不删除历史报告。

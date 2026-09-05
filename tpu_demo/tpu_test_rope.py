@@ -53,7 +53,9 @@ def rope(Block_c, Block_w, C, W, dtype="float32", accum_dtype="float32"):
 
 
 func =  rope(64, 16, 128, 64)
-kernel = tilelang.compile(rope(64, 16, 128, 64), out_idx=-1, target="tpu")
+kernel = tilelang.compile(
+    rope(64, 16, 128, 64), out_idx=-1,
+    target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
 
 C, W = 128, 64
 
@@ -66,4 +68,3 @@ res = kernel(x, cos, sin, output)
 print(res)
 print("output:")
 print(output)
-

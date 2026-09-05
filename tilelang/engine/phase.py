@@ -3,74 +3,123 @@
 from tvm import tir, IRModule
 from tvm.target import Target
 import tilelang
+from tilelang.engine.tpu_config import resolve_tpu_target
+
+
+def _validate_tpu_phase_target(target: Target) -> None:
+    """Require a complete supported TPU identity at every public TPU phase.
+
+    Full lowering validates this contract before entering the pass pipeline,
+    but these phase helpers are also imported and called directly by tests and
+    downstream tooling.  Do not let that shorter path turn a bare/unknown TPU
+    target into the shared TPUv7 pass pipeline.
+    """
+    resolve_tpu_target(target=target)
 
 
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
-    # Bind the target device information to the module
+    """Bind and legalize frontend IR for the selected backend.
+
+    TPU deliberately retains semantic ``tl.tpu.*`` externs and scalar loops.
+    Layout/tile-op lowering, safe-memory rewriting, and vector legalization
+    remain outside this path until they have an explicit TPU contract.
     """
-    disable pass(TODO: need verify):
-        layout inference
-        lower Tile op
-        safememory
-    """
+    if target.kind.name == "tpu":
+        _validate_tpu_phase_target(target)
     mod = tir.transform.BindTarget(target)(mod)
 
-    # Legalize the frontend IR to make it compatible with TVM
     mod = tilelang.transform.FrontendLegalize()(mod)
-    # Simplify the IR expressions
     mod = tir.transform.Simplify()(mod)
-    # Infer memory layouts for fragments and shared memory
-    # mod = tilelang.transform.LayoutInference()(mod)
-    # Lower high-level tile operations to low-level operations
-    # mod = tilelang.transform.LowerTileOp()(mod)
-    # Legalize vectorized loops to ensure they are valid
-    mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
-    # Add safety checks for memory accesses
-    # mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
-    # Simplify again to clean up any duplicated conditions
-    # that may have been introduced by safety checks
+    # The TPU source emitter does not yet implement residual vector Ramp/load
+    # expressions.  Preserve scalar loops until that codegen contract exists;
+    # turning an explicit vectorized loop into vector IR here would otherwise
+    # let the emitter silently omit parts of an expression.
+    if target.kind.name != "tpu":
+        mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     mod = tir.transform.Simplify()(mod)
-    # Try to vectorize loop with dynamic shape
-    # mod = tilelang.transform.LoopVectorizeDynamic()(mod)
 
     return mod
 
 
-def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
-    # which may be introduced by the LegalizeSafeMemoryAccess
-    if target.arch == "sm_90":
-        mod = tilelang.transform.IfStmtBinding()(mod)
-        mod = tilelang.transform.MultiVersionBuffer()(mod)
-        mod = tilelang.transform.WarpSpecialized()(mod)
-        mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+def _finalize_scheduled_ir(
+    mod: IRModule,
+    *,
+    rewrite_storage: bool,
+    lower_opaque: bool = True,
+    vectorize: bool = True,
+) -> IRModule:
+    """Run passes whose ordering is shared after target-specific scheduling."""
+    if lower_opaque:
         mod = tir.transform.LowerOpaqueBlock()(mod)
-        mod = tilelang.transform.MergeIfStmt()(mod)
-        mod = tilelang.transform.RewriteWgmmaSync()(mod)
-        mod = tilelang.transform.InjectFenceProxy()(mod)
-    else:
-        mod = tilelang.transform.IfStmtBinding()(mod)
-        mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-        mod = tilelang.transform.PipelinePlanning()(mod)
-        mod = tilelang.transform.InjectSoftwarePipeline()(mod)
-        mod = tilelang.transform.MergeIfStmt()(mod)
-
-    # TODO(lei): may need a pass to fuse the if-then-else in the
-    # pipeline loop when we meet dynamic branch.
-    mod = tir.transform.LowerOpaqueBlock()(mod)
-    # no need flatten buffer due to tpu has 4D tensor
-    # mod = tir.transform.FlattenBuffer()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tir.transform.Simplify()(mod)
-    mod = tilelang.transform.VectorizeLoop()(mod)
-    # StorageRewrite assumes FlattenBuffer/StorageFlatten-style IR, where
-    # Allocate/DeclBuffer pairs have already been normalized. The TPU path
-    # intentionally keeps multi-dimensional buffers for downstream region-based
-    # codegen, so running StorageRewrite after LowerOpaqueBlock introduces
-    # duplicate declarations for the same buffer var.
-    if target.kind.name != "tpu":
+    if vectorize:
+        mod = tilelang.transform.VectorizeLoop()(mod)
+    if rewrite_storage:
         mod = tir.transform.StorageRewrite()(mod)
     mod = tir.transform.UnrollLoop()(mod)
     mod = tir.transform.RenormalizeSplitPattern()(mod)
-    mod = tir.transform.Simplify()(mod)
-    mod = tilelang.transform.AddressAssign()(mod)
-    return mod
+    return tir.transform.Simplify()(mod)
+
+
+def _optimize_tpu(mod: IRModule) -> IRModule:
+    """Apply only transformations with a validated conservative TPU meaning."""
+    mod = tilelang.transform.IfStmtBinding()(mod)
+    mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
+    mod = tilelang.transform.MergeIfStmt()(mod)
+    # StorageRewrite assumes flattened storage and can duplicate the
+    # structured DeclBuffer/Allocate pairs consumed by TPU codegen. BM1690 and
+    # SG2260E share this LMEM geometry; their programming models diverge later
+    # at the target-selected emitter, not in these semantic passes.
+    # Software-pipeline planning/injection remains disabled until TPU DMA and
+    # compute operations have an explicit dependency/token model.  Likewise,
+    # vectorization must not run before the TPU emitter supports residual
+    # vector IR.  Both optimizations have previously produced source that was
+    # syntactically plausible but did not preserve the serial program.
+    return _finalize_scheduled_ir(
+        mod, rewrite_storage=False, vectorize=False)
+
+
+def _optimize_hopper(mod: IRModule) -> IRModule:
+    mod = tilelang.transform.IfStmtBinding()(mod)
+    mod = tilelang.transform.MultiVersionBuffer()(mod)
+    mod = tilelang.transform.WarpSpecialized()(mod)
+    mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+    mod = tir.transform.LowerOpaqueBlock()(mod)
+    mod = tilelang.transform.MergeIfStmt()(mod)
+    mod = tilelang.transform.RewriteWgmmaSync()(mod)
+    mod = tilelang.transform.InjectFenceProxy()(mod)
+    return _finalize_scheduled_ir(
+        mod, rewrite_storage=True, lower_opaque=False)
+
+
+def _optimize_generic(mod: IRModule) -> IRModule:
+    mod = tilelang.transform.IfStmtBinding()(mod)
+    mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
+    mod = tilelang.transform.PipelinePlanning()(mod)
+    mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+    mod = tilelang.transform.MergeIfStmt()(mod)
+    return _finalize_scheduled_ir(mod, rewrite_storage=True)
+
+
+def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
+    """Dispatch one explicit pass pipeline per backend family."""
+    if target.kind.name == "tpu":
+        _validate_tpu_phase_target(target)
+        return _optimize_tpu(mod)
+    if target.kind.name == "cuda" and target.arch == "sm_90":
+        return _optimize_hopper(mod)
+    return _optimize_generic(mod)
+
+
+def AssignTPUAddresses(mod: IRModule, target: Target) -> IRModule:
+    """Assign TPUv7 LMEM addresses after the final TPU contract check.
+
+    Address assignment consumes backend-specific operand effects and memory
+    geometry, so accepting a non-TPU target here would be a compiler bug rather
+    than a harmless no-op.
+    """
+    if target.kind.name != "tpu":
+        raise ValueError("AssignTPUAddresses requires a TPU target")
+    _validate_tpu_phase_target(target)
+    return tilelang.transform.AddressAssign()(mod)

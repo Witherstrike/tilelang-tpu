@@ -37,7 +37,9 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
             T.copy(Q_shared, Q_gemm)
             T.copy(K_shared, K_gemm)
             T.ppl_fill(acc_s, T.float32(0))
-            T.ppl_gemm(Q_gemm, K_gemm, acc_s, transpose_B=True)
+            T.ppl_gemm(
+                Q_gemm, K_gemm, acc_s,
+                transpose_B=True, accumulate=False)
 
         @T.macro
         def MMA1(
@@ -52,7 +54,7 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
         ):
             T.copy(V[bz, k * block_N:(k + 1) * block_N, by, :], V_shared)
             T.copy(V_shared, V_gemm)
-            T.ppl_gemm(acc_s_cast, V_gemm, acc_o)
+            T.ppl_gemm(acc_s_cast, V_gemm, acc_o, accumulate=True)
 
         @T.macro
         def Softmax(
@@ -66,21 +68,19 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
         ):
             T.copy(scores_max, scores_max_prev)
             T.ppl_fill(scores_max, -T.infinity(accum_dtype))
-            T.ppl_reduce_max(acc_s, scores_max, dim=1, clear=False)
+            T.ppl_reduce_max(acc_s, scores_max, dim=1)
             T.ppl_subtract(scores_scale, scores_max_prev, scores_max)
             T.ppl_mul_C(scores_scale, scores_scale, scale)
             work0 = T.alloc_shared([block_M, 1], accum_dtype)
             work1 = T.alloc_shared([block_M, 1], accum_dtype)
             coeff = T.alloc_shared([64, 32], accum_dtype)  # npu number is 64
-            table = T.alloc_shared([64, 192], accum_dtype)  # npu number is 64
-            T.ppl_exp2(scores_scale, work0, work1, coeff, table)
+            T.ppl_exp(scores_scale, work0, work1, coeff)
             T.ppl_subtract(acc_s, acc_s, scores_max)
             T.ppl_mul_C(acc_s, acc_s, scale)
             work0_1 = T.alloc_shared([block_M, block_N], accum_dtype)
             work1_1 = T.alloc_shared([block_M, block_N], accum_dtype)
             coeff_1 = T.alloc_shared([64, 32], accum_dtype)  # npu number is 64
-            table_1 = T.alloc_shared([64, 192], accum_dtype)  # npu number is 64
-            T.ppl_exp2(acc_s, work0_1, work1_1, coeff_1, table_1)
+            T.ppl_exp(acc_s, work0_1, work1_1, coeff_1)
             T.ppl_reduce_sum(acc_s, scores_sum, dim=1)
             T.ppl_mul(logsum, logsum, scores_scale)
             T.ppl_add(logsum, logsum, scores_sum)
@@ -168,7 +168,7 @@ kernel = tilelang.compile(
         is_causal=is_causal,
     )(block_M, block_N, num_stages, threads),
     out_idx=-1,
-    target="tpu",
+    target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel",
 )
 
 q = torch.randn(batch, seq_len, heads, dim).float()

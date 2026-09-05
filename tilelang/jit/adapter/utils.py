@@ -15,8 +15,10 @@ from tilelang.engine.lower import (
     determine_target,
     canon_target_host,
     is_cpu_device_backend,
+    validate_target_module_contract,
 )
 from tilelang.engine.phase import (
+    AssignTPUAddresses,
     LowerAndLegalize,
     OptimizeForTarget,
 )
@@ -64,8 +66,9 @@ def is_cpu_target(target: Target) -> bool:
     return target.kind.name in ["c"]
 
 def is_tpu_target(target: Target) -> bool:
-    if isinstance(target,str):
-        return target=="tpu"
+    if isinstance(target, str):
+        tokens = target.strip().split(maxsplit=1)
+        return bool(tokens) and tokens[0] == "tpu"
     return target.kind.name == "tpu"
 
 def get_tpu_template_dir() -> str:
@@ -93,6 +96,7 @@ def get_annotated_mod(
         target = determine_target(target)
     target_host = tvm.target.Target.canon_target(canon_target_host(target, target_host))
     target = tvm.target.Target(target, target_host)
+    target_contract = validate_target_module_contract(mod, target)
 
     _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
     _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
@@ -100,6 +104,9 @@ def get_annotated_mod(
     # Apply transformations
     mod = LowerAndLegalize(mod, target)
     mod = OptimizeForTarget(mod, target)
+    if target_contract is not None:
+        validate_target_module_contract(mod, target)
+        mod = AssignTPUAddresses(mod, target)
 
     # Define dispatch dictionary for different model types
     dispatch = {

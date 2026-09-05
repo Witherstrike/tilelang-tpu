@@ -841,15 +841,6 @@ private:
     PopulateWaitCounts(new_blocks, &async_states_local);
     auto stmts = CompletePipelineLoopStatements(new_blocks, async_states_local);
 
-    if (!unroll_loop) {
-      Stmt no_op = Evaluate(0);
-      auto parallel_start = AttrStmt(make_zero(DataType::Int(32)),
-                                     "tpu_parallel_start", 0, no_op);
-      stmts.insert(stmts.begin(), parallel_start);
-      auto parallel_end =
-          AttrStmt(make_zero(DataType::Int(32)), "tpu_parallel_end", 0, no_op);
-      stmts.push_back(parallel_end);
-    }
     Stmt new_loop{nullptr};
 
     if (stmts.empty()) {

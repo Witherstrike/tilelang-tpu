@@ -92,7 +92,9 @@ def rope_ref_torch(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> tor
     return out
 
 func =  rope(64, 16, 128, 64)
-kernel = tilelang.compile(rope(64, 16, 128, 64), out_idx=-1, target="tpu")
+kernel = tilelang.compile(
+    rope(64, 16, 128, 64), out_idx=-1,
+    target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
 
 
 def read_txt_per_line(path: str, C: int, W: int, dtype=torch.float16, device="cpu"):
@@ -133,4 +135,3 @@ print("\n=== 差异分析 ===")
 print("最大差异:", diff.abs().max().item())
 print("平均差异:", diff.abs().mean().item())
 print("check close:", torch.allclose(out_kernel, out_ref, atol=1e-2, rtol=1e-2))
-

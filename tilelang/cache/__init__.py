@@ -22,10 +22,7 @@ def cached(
     execution_backend: Optional[Literal["dlpack", "ctypes", "cython"]] = "cython",
     verbose: Optional[bool] = False,
     pass_configs: Optional[dict] = None,
-    chip: Optional[str] = None,
-    device_mode: Literal["tpukernel", "rv", "atomic"] = "tpukernel",
     runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
-    mode: Optional[Literal["pcie", "cmodel"]] = None,
 ) -> JITKernel:
     """
     Caches and reuses compiled kerne(ls (using KernelCache class).
@@ -39,10 +36,7 @@ def cached(
         execution_backend=execution_backend,
         verbose=verbose,
         pass_configs=pass_configs,
-        chip=chip,
-        device_mode=device_mode,
         runtime_mode=runtime_mode,
-        mode=mode,
     )
 
 

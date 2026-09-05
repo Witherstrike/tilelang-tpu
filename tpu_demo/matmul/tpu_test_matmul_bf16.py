@@ -24,14 +24,16 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="bfloat16", accum_dtype="bf
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=1):
                 T.ppl_copy(A[by * block_M, k * block_K], A_shared)
                 T.ppl_copy(B[k * block_K, bx * block_N], B_shared)
-                T.ppl_gemm(A_shared, B_shared, C_shared)
+                T.ppl_gemm(A_shared, B_shared, C_shared, accumulate=True)
             T.ppl_copy(C_shared, C_shared_ori)
             T.ppl_copy(C_shared_ori, C[by * block_M, bx * block_N])
     return main_kernel_inner
 
 
 
-kernel = tilelang.compile(matmul(64,64,64,32,32,32), out_idx=-1, target="tpu")
+kernel = tilelang.compile(
+    matmul(64, 64, 64, 32, 32, 32), out_idx=-1,
+    target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
 
 a = torch.randn(64, 64).bfloat16()
 b = torch.randn(64, 64).bfloat16()
@@ -54,4 +56,3 @@ print(f"最大差异: {max_diff}")
 print(f"平均差异: {avg_diff}")
 print("check close:")
 print(torch.allclose(c, ref, atol=1e-2, rtol=1e-2))
-

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-from typing import Tuple
+from typing import Mapping, Optional, Tuple
 
 from tilelang.engine.tpu_config import get_tpu_chip_spec
 
@@ -14,10 +14,7 @@ from tilelang.engine.tpu_config import get_tpu_chip_spec
 @dataclass(frozen=True)
 class PPLLayout:
     root: Path
-    logical_chip: str
-    arch: str
-    max_core_num: int
-    compile_definitions: Tuple[str, ...]
+    chip: str
     kernel_include: Path
     kernel_common_include: Path
     device_utils_include: Path
@@ -33,13 +30,25 @@ class PPLLayout:
     toolchains_root: Path
 
     @property
-    def runtime_identity(self) -> Tuple[str, str, str]:
-        """Canonical CModel SDK/runtime paths kept for compatibility."""
-        return tuple(
-            str(path.resolve())
-            for path in (self.root, self.runtime_lib, self.backend_lib))
+    def arch(self) -> str:
+        """PPL architecture selected by the canonical chip capability table."""
 
-    def pcie_runtime_lib(self) -> Path:
+        return get_tpu_chip_spec(self.chip).ppl_arch
+
+    @property
+    def physical_core_count(self) -> int:
+        """Physical cores exposed by this chip's CModel runtime."""
+
+        return get_tpu_chip_spec(self.chip).physical_core_count
+
+    @property
+    def compile_definitions(self) -> Tuple[str, ...]:
+        """Vendor compile definitions for the selected physical chip."""
+
+        return get_tpu_chip_spec(self.chip).ppl_compile_definitions
+
+    def pcie_runtime_lib(
+            self, environment: Optional[Mapping[str, str]] = None) -> Path:
         """Resolve the installed board runtime, never the SDK CModel runtime.
 
         PPL 1.7 compiles against headers in ``deps/`` but prepends the installed
@@ -49,7 +58,8 @@ class PPLLayout:
         An explicit override supports non-standard driver installations.
         """
 
-        raw_path = os.environ.get(
+        source = os.environ if environment is None else environment
+        raw_path = source.get(
             "TILELANG_TPU_PCIE_RUNTIME_PATH",
             "/opt/tpuv7/tpuv7-current/lib",
         )
@@ -66,13 +76,17 @@ class PPLLayout:
                 "set TILELANG_TPU_PCIE_RUNTIME_PATH to its lib directory.")
         return runtime_lib
 
-    def runtime_identity_for(self, runtime_mode: str) -> Tuple[str, str, str]:
+    def runtime_identity_for(
+            self,
+            runtime_mode: str,
+            environment: Optional[Mapping[str, str]] = None,
+    ) -> Tuple[str, str, str]:
         """Return the SDK/runtime identity for one validated host mode."""
 
         if runtime_mode == "cmodel":
             runtime_lib = self.runtime_lib
         elif runtime_mode == "pcie":
-            runtime_lib = self.pcie_runtime_lib()
+            runtime_lib = self.pcie_runtime_lib(environment)
         else:
             raise ValueError(f"Unsupported TPU runtime mode: {runtime_mode!r}")
         return tuple(
@@ -81,15 +95,111 @@ class PPLLayout:
 
     @property
     def include_dirs(self) -> Tuple[Path, ...]:
-        return tuple(
-            path for path in (
-                self.kernel_include,
-                self.kernel_common_include,
-                self.device_utils_include,
-                self.host_include,
-                self.runtime_include,
-                self.tpudnn_include,
-            ) if path.is_dir())
+        """Base PPL include directories, excluding optional profiling APIs."""
+
+        return (
+            self.kernel_include,
+            self.kernel_common_include,
+            self.device_utils_include,
+        )
+
+    def include_dirs_for(
+            self, runtime_mode: str, *, profiling: bool = False,
+            environment: Optional[Mapping[str, str]] = None,
+    ) -> Tuple[Path, ...]:
+        """Return validated includes for one concrete build configuration."""
+
+        self.require_runtime(runtime_mode, environment=environment)
+        includes = self.include_dirs + (self.host_include, self.runtime_include)
+        if profiling:
+            self.require_profiling(runtime_mode, environment=environment)
+            if runtime_mode == "pcie":
+                includes += (self.tpudnn_include,)
+        return includes
+
+    def require_base(self) -> "PPLLayout":
+        """Validate files shared by every PPL 1.7 device/host compilation."""
+
+        return _require_paths(
+            self,
+            "base compilation",
+            {
+                "kernel headers": self.kernel_include,
+                "common kernel headers": self.kernel_common_include,
+                "device helper headers": self.device_utils_include,
+                "ppl_helper.c": self.ppl_helper_source,
+            },
+        )
+
+    def require_runtime(
+            self,
+            runtime_mode: str,
+            *,
+            environment: Optional[Mapping[str, str]] = None,
+    ) -> "PPLLayout":
+        """Validate only the artifacts needed by one host runtime mode."""
+
+        self.require_base()
+        if runtime_mode not in ("cmodel", "pcie"):
+            raise ValueError(f"Unsupported TPU runtime mode: {runtime_mode!r}")
+        _require_paths(
+            self,
+            f"{runtime_mode} host compilation",
+            {
+                "host headers": self.host_include,
+                "TPUv7 runtime headers": self.runtime_include,
+            },
+        )
+        if runtime_mode == "cmodel":
+            return _require_paths(
+                self,
+                "CModel runtime",
+                {
+                    "TPUv7 CModel runtime": self.runtime_lib / "libtpuv7_rt.so",
+                    "CModel daemon": self.runtime_lib / "libcdm_daemon_emulator.so",
+                    "TPUv7 emulator": self.emulator_library,
+                },
+            )
+        if runtime_mode == "pcie":
+            # These resolvers also reject an SDK emulator runtime and an
+            # ambiguous/missing cross-toolchain before compilation starts.
+            self.pcie_runtime_lib(environment)
+            self.pcie_cross_gcc()
+            return _require_paths(
+                self,
+                "PCIe runtime",
+                {"firmware archive": self.firmware_archive},
+            )
+        raise AssertionError("validated TPU runtime mode was not handled")
+
+    def require_profiling(
+            self,
+            runtime_mode: str,
+            *,
+            environment: Optional[Mapping[str, str]] = None,
+    ) -> "PPLLayout":
+        """Validate extra vendor artifacts used by instruction profiling.
+
+        CModel tracing is enabled by ``FILE_DUMP_CMD`` and needs no TPUDNN
+        dependency.  PCIe recording is implemented through TPUDNN and thus
+        validates its header and library only for an actual PCIe profile.
+        """
+
+        self.require_runtime(runtime_mode, environment=environment)
+        if runtime_mode == "cmodel":
+            return self
+        if runtime_mode == "pcie":
+            return _require_paths(
+                self,
+                "PCIe profiling",
+                {
+                    "TPUDNN profiling headers": self.tpudnn_include,
+                    "TPUDNN profiling library": self.tpudnn_library,
+                },
+            )
+        # ``require_runtime`` rejects this first; retain a local guard so this
+        # method stays correct if its implementation changes later.
+        raise ValueError(f"Unsupported TPU runtime mode: {runtime_mode!r}")
 
     @property
     def rvt_api_header(self) -> Path:
@@ -97,8 +207,8 @@ class PPLLayout:
         return self.kernel_include / "rvt_api.h"
 
     def require_rvt_api(self) -> Path:
-        """Return the RVT header or explain why ``device_mode=\"rv\"`` is invalid."""
-        spec = get_tpu_chip_spec(self.logical_chip)
+        """Return the RVT header or explain why the RV target is invalid."""
+        spec = get_tpu_chip_spec(self.chip)
         if not spec.supports("rv"):
             raise ValueError(
                 f"TPU chip {spec.name!r} does not support the RV programming model")
@@ -130,79 +240,66 @@ class PPLLayout:
         return candidates[0]
 
 
-def _require_paths(layout: PPLLayout) -> PPLLayout:
-    required = {
-        "kernel headers": layout.kernel_include,
-        "device helper headers": layout.device_utils_include,
-        "host headers": layout.host_include,
-        "TPUv7 runtime headers": layout.runtime_include,
-        "TPUDNN profiling headers": layout.tpudnn_include,
-        "TPUv7 runtime libraries": layout.runtime_lib,
-        "chip backend libraries": layout.backend_lib,
-        "TPUDNN profiling library": layout.tpudnn_library,
-        "ppl_helper.c": layout.ppl_helper_source,
-        "TPUv7 emulator": layout.emulator_library,
-        "firmware archive": layout.firmware_archive,
-    }
+def _require_paths(
+        layout: PPLLayout, requirement_group: str,
+        required: Mapping[str, Path]) -> PPLLayout:
     missing = [f"{name}: {path}" for name, path in required.items() if not path.exists()]
     if missing:
-        raise FileNotFoundError("Incomplete PPL SDK layout:\n  " + "\n  ".join(missing))
+        raise FileNotFoundError(
+            f"Incomplete PPL 1.7 {requirement_group} requirements:\n  "
+            + "\n  ".join(missing))
     return layout
 
 
-def resolve_ppl_layout(ppl_root: str, logical_chip: str = "bm1690") -> PPLLayout:
-    """Return the PPL 1.7 toolchain paths for ``logical_chip``.
+def resolve_ppl_layout(ppl_root: str, chip: str) -> PPLLayout:
+    """Return the PPL 1.7 toolchain paths for one physical ``chip``.
 
     TileLang-TPU deliberately supports only the PPL 1.7 ``deps/`` release
-    layout. Keeping one layout avoids silently compiling a kernel with a
-    legacy header/library mixture after the SDK has been upgraded.
+    layout. Keeping one layout avoids silently compiling a kernel with an
+    inconsistent header/library mixture.
     """
-    chip_spec = get_tpu_chip_spec(logical_chip)
-    logical_chip = chip_spec.name
+    chip_spec = get_tpu_chip_spec(chip)
+    chip = chip_spec.name
     root = Path(ppl_root).expanduser().resolve()
     chip_map_path = root / "deps/chip/chip_map.json"
     if not chip_map_path.is_file():
         raise FileNotFoundError(
             "PPL 1.7 SDK layout is required; expected chip map at "
-            f"{chip_map_path}. The legacy PPL runtime/ layout is unsupported."
+            f"{chip_map_path}."
         )
 
     try:
         chip_map = json.loads(chip_map_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid PPL 1.7 chip map: {chip_map_path}") from exc
-    if not isinstance(chip_map, dict) or logical_chip not in chip_map:
-        raise ValueError(f"Chip {logical_chip!r} is not present in {chip_map_path}")
+    if not isinstance(chip_map, dict) or chip not in chip_map:
+        raise ValueError(f"Chip {chip!r} is not present in {chip_map_path}")
 
-    arch = chip_map[logical_chip]
+    arch = chip_map[chip]
     if not isinstance(arch, str):
-        raise ValueError(f"Invalid architecture for chip {logical_chip!r} in {chip_map_path}")
+        raise ValueError(f"Invalid architecture for chip {chip!r} in {chip_map_path}")
     if arch != chip_spec.ppl_arch:
         raise ValueError(
             "PPL SDK chip map disagrees with TileLang's validated capability "
-            f"for {logical_chip!r}: expected {chip_spec.ppl_arch!r}, got {arch!r}")
+            f"for {chip!r}: expected {chip_spec.ppl_arch!r}, got {arch!r}")
 
     chip_root = root / "deps/chip" / arch
     runtime_root = root / "deps/runtime/tpuv7-runtime"
     common_root = root / "deps/common"
-    return _require_paths(
-        PPLLayout(
-            root=root,
-            logical_chip=logical_chip,
-            arch=arch,
-            max_core_num=chip_spec.physical_core_count,
-            compile_definitions=chip_spec.ppl_compile_definitions,
-            kernel_include=chip_root / "TPU1686/kernel/include",
-            kernel_common_include=common_root / "dev/kernel",
-            device_utils_include=common_root / "dev/utils/include",
-            host_include=common_root / "host/include",
-            runtime_include=runtime_root / "include",
-            tpudnn_include=chip_root / "TPU1686/tpuDNN/include",
-            runtime_lib=runtime_root / "lib",
-            backend_lib=chip_root / "lib",
-            tpudnn_library=chip_root / "lib/libtpudnn.so",
-            ppl_helper_source=common_root / "dev/utils/src/ppl_helper.c",
-            emulator_library=chip_root / "lib/libtpuv7_emulator.so",
-            firmware_archive=chip_root / "lib/libfirmware_core.a",
-            toolchains_root=root / "third_party/toolchains_dir",
-        ))
+    return PPLLayout(
+        root=root,
+        chip=chip,
+        kernel_include=chip_root / "TPU1686/kernel/include",
+        kernel_common_include=common_root / "dev/kernel",
+        device_utils_include=common_root / "dev/utils/include",
+        host_include=common_root / "host/include",
+        runtime_include=runtime_root / "include",
+        tpudnn_include=chip_root / "TPU1686/tpuDNN/include",
+        runtime_lib=runtime_root / "lib",
+        backend_lib=chip_root / "lib",
+        tpudnn_library=chip_root / "lib/libtpudnn.so",
+        ppl_helper_source=common_root / "dev/utils/src/ppl_helper.c",
+        emulator_library=chip_root / "lib/libtpuv7_emulator.so",
+        firmware_archive=chip_root / "lib/libfirmware_core.a",
+        toolchains_root=root / "third_party/toolchains_dir",
+    ).require_base()

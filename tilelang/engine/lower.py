@@ -12,13 +12,10 @@ from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.engine.param import KernelParam, CompiledArtifact
-from tilelang.engine.tpu_config import (
-    bind_tpu_target,
-    get_tpu_target_chip,
-    resolve_tpu_compile_config,
-)
+from tilelang.engine.tpu_config import resolve_tpu_runtime, resolve_tpu_target
 from tilelang.utils.target import determine_target
 from tilelang.engine.phase import (
+    AssignTPUAddresses,
     LowerAndLegalize,
     OptimizeForTarget,
 )
@@ -56,12 +53,92 @@ def get_host_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]:
     return lambda func: not get_device_call(is_device_c)(func)
 
 
-# ``tl.tpu.*`` is the backend-neutral semantic ABI produced by the public
-# ``T.ppl_*`` compatibility helpers.  Vendor namespaces stay model-specific:
-# ``ppl.``/``tpu_`` are TPU-Kernel calls and ``rvt_`` is the expert raw RV ABI.
+# ``tl.tpu.*`` is the backend-neutral semantic ABI produced by portable public
+# helpers.  Backend-specific operations live in an explicit namespace:
+# ``tl.tpukernel.*`` is the semantic TPU-Kernel ABI and ``rvt_`` is the expert
+# raw RV ABI.  Raw ``tpu_*`` calls never formed a stable TIR contract: their C
+# signatures, address spaces, and lifecycle requirements are SDK details.  We
+# classify them only to reject them with a precise error, just like the removed
+# historical ``ppl.*`` namespace.
 _PORTABLE_TPU_EXTERN_PREFIX = "tl.tpu."
-_TPUKERNEL_EXTERN_PREFIXES = ("ppl.", "tpu_")
+_TPUKERNEL_EXTERN_PREFIX = "tl.tpukernel."
 _RVT_EXTERN_PREFIX = "rvt_"
+_REMOVED_RAW_TPUKERNEL_EXTERN_PREFIX = "tpu_"
+_REMOVED_PPL_EXTERN_PREFIX = "ppl."
+
+# Keep this list deliberately closed.  Adding a semantic operation requires a
+# frontend definition, address/effect analysis, target-specific codegen, and a
+# contract test; accepting an arbitrary name from either namespace would let a
+# typo fall through to CodeGenC's generic extern emitter.
+_PORTABLE_TPU_EXTERNS = frozenset({
+    "tl.tpu.add",
+    "tl.tpu.copy",
+    "tl.tpu.div",
+    "tl.tpu.fill",
+    "tl.tpu.gemm",
+    "tl.tpu.mul",
+    "tl.tpu.sub",
+})
+_TPUKERNEL_EXTERNS = frozenset({
+    "tl.tpukernel.add_scalar",
+    "tl.tpukernel.exp",
+    "tl.tpukernel.gather",
+    "tl.tpukernel.mul_scalar",
+    "tl.tpukernel.reduce_max",
+    "tl.tpukernel.reduce_sum",
+    "tl.tpukernel.rope_add",
+    "tl.tpukernel.rsqrt",
+    "tl.tpukernel.sigmoid",
+    "tl.tpukernel.topk",
+})
+
+# CUDA/HIP synchronization has no implicit TPU meaning.  Some operations have
+# ``barrier`` in their registered name while the async-copy queue primitives do
+# not, so retain both a pattern and an explicit set.
+_GPU_SYNC_OPS = frozenset({
+    "tir.tvm_storage_sync",
+    "tir.tvm_global_barrier_kinit",
+    "tir.ptx_commit_group",
+    "tir.ptx_wait_group",
+    "tl.SyncThreadsPartialOp",
+    "tl.FenceProxyAsyncOp",
+})
+
+
+def _tpu_contract_error(
+    target: Target, function_name: str, node_category: str, detail: str
+) -> ValueError:
+    """Create one diagnostic format for every residual-IR rejection."""
+    return ValueError(
+        "TPU residual-IR contract violation: "
+        f"target={str(target)!r}; PrimFunc={function_name!r}; "
+        f"node category={node_category}; {detail}")
+
+
+def _has_vector_lanes(dtype) -> bool:
+    """Return whether a TVM dtype is a fixed/scalable vector dtype."""
+    if dtype is None:
+        return False
+    try:
+        return int(tvm.DataType(dtype).lanes) > 1
+    except (AttributeError, TypeError, ValueError):
+        # A symbolic/scalable lane count must also fail closed.  Scalar TVM
+        # DataType instances always expose an integer lane count of one.
+        return True
+
+
+def _vector_dtype_in_type(type_annotation):
+    """Return a vector element dtype nested in an IR type, if present."""
+    if isinstance(type_annotation, tvm.ir.PrimType):
+        return type_annotation.dtype if _has_vector_lanes(type_annotation.dtype) else None
+    if isinstance(type_annotation, tvm.ir.PointerType):
+        return _vector_dtype_in_type(type_annotation.element_type)
+    if isinstance(type_annotation, tvm.ir.TupleType):
+        for field in type_annotation.fields:
+            vector_dtype = _vector_dtype_in_type(field)
+            if vector_dtype is not None:
+                return vector_dtype
+    return None
 
 
 def _tpu_extern_programming_model(call: tir.Call) -> Optional[str]:
@@ -71,12 +148,20 @@ def _tpu_extern_programming_model(call: tir.Call) -> Optional[str]:
     name = getattr(call.args[0], "value", None)
     if not isinstance(name, str):
         return None
-    if name.startswith(_PORTABLE_TPU_EXTERN_PREFIX):
+    if name in _PORTABLE_TPU_EXTERNS:
         return "portable"
+    if name.startswith(_PORTABLE_TPU_EXTERN_PREFIX):
+        return "unknown-portable"
+    if name.startswith(_REMOVED_PPL_EXTERN_PREFIX):
+        return "removed-ppl"
+    if name.startswith(_REMOVED_RAW_TPUKERNEL_EXTERN_PREFIX):
+        return "removed-raw-tpukernel"
     if name.startswith(_RVT_EXTERN_PREFIX):
         return "rv"
-    if name.startswith(_TPUKERNEL_EXTERN_PREFIXES):
+    if name in _TPUKERNEL_EXTERNS:
         return "tpukernel"
+    if name.startswith(_TPUKERNEL_EXTERN_PREFIX):
+        return "unknown-tpukernel"
     return None
 
 
@@ -85,7 +170,7 @@ def _collect_tpu_externs(mod: tvm.IRModule):
 
     This is intentionally limited to the vendor namespaces above.  The result
     is used both to validate a selected TPU programming model and to prevent a
-    legacy TPU program from silently lowering as C/CUDA/HIP after
+    TPU-specific program from silently lowering as C/CUDA/HIP after
     ``target='auto'`` no longer guesses a TPU.
     """
     externs = []
@@ -114,34 +199,223 @@ def _reject_tpu_externs_for_non_tpu_target(mod: tvm.IRModule, target: Target) ->
         f"{func}: {name} ({model})" for func, name, model in externs)
     raise ValueError(
         f"TPU externs cannot lower for target={target.kind.name!r}: {rendered}. "
-        "Use an explicit TPU target such as 'tpu -mcpu=sg2260e'. Portable "
-        "tl.tpu.* calls select their backend through device_mode; raw ppl./tpu_* "
-        "calls require 'tpukernel' and raw rvt_* calls require 'rv'.")
+        "Use a complete TPU target such as 'tpu -mcpu=sg2260e "
+        "-tpu-programming-model=rv'. Portable tl.tpu.* calls select their "
+        "backend through the Target; explicit tl.tpukernel.* and raw rvt_* "
+        "calls must match that programming model.")
 
 
-def _validate_tpu_programming_model(mod: tvm.IRModule, tpu_config) -> None:
-    """Reject known extern families that disagree with the selected TPU mode.
+def _validate_tpu_residual_ir(
+    mod: tvm.IRModule, target: Target, tpu_config
+) -> None:
+    """Reject residual IR without a defined TPU source-emission contract.
 
-    The C++ source guards remain a final safety net, but diagnosing this from
-    final TIR avoids cross-compiling a kernel that was explicitly requested for
-    the wrong programming model.  Unknown externs are deliberately not
-    classified here; they retain the normal codegen diagnostics.
+    This verifier intentionally runs both before and after target passes.  The
+    first check gives frontend authors an immediate diagnostic; the second
+    check prevents a pass from introducing CUDA vector/synchronization IR or
+    an unowned external call immediately before address assignment/codegen.
     """
-    incompatible = [
-        (func, name, model)
-        for func, name, model in _collect_tpu_externs(mod)
-        if model != "portable" and model != tpu_config.programming_model
-    ]
+    for global_var, function in mod.functions.items():
+        if not isinstance(function, tir.PrimFunc):
+            continue
+        function_name = global_var.name_hint
 
-    if incompatible:
-        rendered = ", ".join(
-            f"{func}: {name} ({model})" for func, name, model in incompatible)
-        raise ValueError(
-            f"TPU device_mode={tpu_config.programming_model!r} cannot lower "
-            f"externs from a different programming model: {rendered}. "
-            "Portable tl.tpu.* calls work with either backend; use "
-            "device_mode='tpukernel' for raw ppl./tpu_* calls or "
-            "device_mode='rv' for raw rvt_* calls.")
+        # Source PrimFuncs are not target-bound until LowerAndLegalize.  An
+        # explicitly different target is not a harmless mixed-module member:
+        # the TPU build path emits the full module through one TPU codegen
+        # invocation, so skipping it here would let that function cross the
+        # wrong backend boundary.
+        function_target = function.attrs.get("target") if function.attrs else None
+        if function_target is not None and function_target.kind.name != "tpu":
+            raise _tpu_contract_error(
+                target, function_name, "PrimFunc-target",
+                "function is bound to target kind "
+                f"{function_target.kind.name!r}, but the module is being "
+                "compiled as TPU")
+        if function_target is not None:
+            function_tpu_target = resolve_tpu_target(target=function_target)
+            if function_tpu_target != tpu_config:
+                raise _tpu_contract_error(
+                    target, function_name, "PrimFunc-target",
+                    "function TPU identity disagrees with the compilation "
+                    f"target: function={function_tpu_target}, "
+                    f"compilation={tpu_config}")
+
+        externs_by_model = {}
+
+        def collect_extern_model(node):
+            if not isinstance(node, tir.Call):
+                return
+            model = _tpu_extern_programming_model(node)
+            if model is None:
+                return
+            extern_name = getattr(node.args[0], "value", "<dynamic-name>")
+            externs_by_model.setdefault(model, []).append(str(extern_name))
+
+        tir.stmt_functor.post_order_visit(function.body, collect_extern_model)
+
+        for parameter in function.params:
+            vector_dtype = _vector_dtype_in_type(parameter.type_annotation)
+            if (_has_vector_lanes(getattr(parameter, "dtype", None)) or
+                    vector_dtype is not None):
+                raise _tpu_contract_error(
+                    target, function_name, "vector-parameter-dtype",
+                    f"parameter {parameter.name!r} has unsupported dtype "
+                    f"{vector_dtype or parameter.dtype}")
+            if parameter not in function.buffer_map:
+                raise _tpu_contract_error(
+                    target, function_name, "scalar-parameter",
+                    f"parameter {parameter.name!r} is not buffer-backed; "
+                    "the TPU host/device ABI currently marshals Tensor "
+                    "parameters only")
+        return_vector_dtype = _vector_dtype_in_type(function.ret_type)
+        if return_vector_dtype is not None:
+            raise _tpu_contract_error(
+                target, function_name, "vector-return-dtype",
+                f"PrimFunc return type contains unsupported dtype "
+                f"{return_vector_dtype}")
+        for buffer in function.buffer_map.values():
+            if _has_vector_lanes(buffer.dtype):
+                raise _tpu_contract_error(
+                    target, function_name, "vector-buffer-dtype",
+                    f"buffer {buffer.name!r} has unsupported dtype {buffer.dtype}")
+
+        def visit(node):
+            if isinstance(node, tir.Ramp):
+                raise _tpu_contract_error(
+                    target, function_name, "Ramp",
+                    f"vector index {node} has no TPU residual-IR lowering")
+
+            if isinstance(node, (tir.Allocate, tir.AllocateConst)) and \
+                    _has_vector_lanes(node.dtype):
+                raise _tpu_contract_error(
+                    target, function_name, "vector-allocation-dtype",
+                    f"allocation {node.buffer_var.name!r} has unsupported "
+                    f"dtype {node.dtype}")
+
+            if isinstance(node, (tir.DeclBuffer, tir.BufferRealize)) and \
+                    _has_vector_lanes(node.buffer.dtype):
+                raise _tpu_contract_error(
+                    target, function_name, "vector-buffer-dtype",
+                    f"buffer {node.buffer.name!r} has unsupported dtype "
+                    f"{node.buffer.dtype}")
+
+            if isinstance(node, tir.BufferLoad) and (
+                    _has_vector_lanes(node.dtype) or
+                    _has_vector_lanes(node.buffer.dtype)):
+                raise _tpu_contract_error(
+                    target, function_name, "vector-load",
+                    f"load from buffer {node.buffer.name!r} has dtype {node.dtype}")
+
+            if isinstance(node, tir.BufferStore) and (
+                    _has_vector_lanes(node.value.dtype) or
+                    _has_vector_lanes(node.buffer.dtype)):
+                raise _tpu_contract_error(
+                    target, function_name, "vector-store",
+                    f"store to buffer {node.buffer.name!r} has value dtype "
+                    f"{node.value.dtype}")
+
+            if not isinstance(node, tir.Call):
+                if isinstance(node, tir.PrimExpr) and _has_vector_lanes(node.dtype):
+                    raise _tpu_contract_error(
+                        target, function_name, "vector-dtype",
+                        f"{type(node).__name__} has unsupported dtype {node.dtype}")
+                return
+
+            op_name = getattr(node.op, "name", "<unregistered-call>")
+            if _has_vector_lanes(node.dtype):
+                raise _tpu_contract_error(
+                    target, function_name, "vector-call",
+                    f"call {op_name!r} returns unsupported dtype {node.dtype}")
+
+            lowered_op_name = op_name.lower()
+            if (op_name in _GPU_SYNC_OPS or
+                    "barrier" in lowered_op_name):
+                raise _tpu_contract_error(
+                    target, function_name, "gpu-synchronization",
+                    f"GPU synchronization intrinsic {op_name!r} has no TPU "
+                    "residual-IR meaning")
+
+            if op_name == "tir.call_pure_extern":
+                extern_name = (
+                    getattr(node.args[0], "value", "<dynamic-name>")
+                    if node.args else "<missing-name>")
+                raise _tpu_contract_error(
+                    target, function_name, "call_pure_extern",
+                    f"pure external call {extern_name!r} is not part of the "
+                    "side-effecting TPU semantic ABI")
+            if op_name != "tir.call_extern":
+                return
+
+            extern_name = (
+                getattr(node.args[0], "value", None) if node.args else None)
+            if not isinstance(extern_name, str):
+                raise _tpu_contract_error(
+                    target, function_name, "call_extern",
+                    "external function name must be a compile-time string")
+            model = _tpu_extern_programming_model(node)
+            if model == "portable":
+                return
+            if model == "tpukernel":
+                if tpu_config.programming_model == "tpukernel":
+                    return
+                raise _tpu_contract_error(
+                    target, function_name, "call_extern",
+                    "externs from a different programming model cannot be "
+                    f"lowered: {extern_name!r} requires 'tpukernel', selected "
+                    f"{tpu_config.programming_model!r}; incompatible externs: "
+                    f"{', '.join(externs_by_model.get('tpukernel', []))}")
+            if model == "rv":
+                if tpu_config.programming_model == "rv":
+                    return
+                raise _tpu_contract_error(
+                    target, function_name, "call_extern",
+                    "externs from a different programming model cannot be "
+                    f"lowered: {extern_name!r} requires 'rv', selected "
+                    f"{tpu_config.programming_model!r}; incompatible externs: "
+                    f"{', '.join(externs_by_model.get('rv', []))}")
+            if model == "removed-ppl":
+                raise _tpu_contract_error(
+                    target, function_name, "call_extern",
+                    "The internal ppl.* TIR ABI has been removed; use "
+                    "backend-neutral tl.tpu.* or explicit tl.tpukernel.* "
+                    f"operations. Found {extern_name!r}")
+            if model == "removed-raw-tpukernel":
+                raise _tpu_contract_error(
+                    target, function_name, "call_extern",
+                    "Raw tpu_* call_extern is not a supported TIR ABI; use an "
+                    "explicit tl.tpukernel.* semantic operation. Found "
+                    f"{extern_name!r}")
+            if model in {"unknown-portable", "unknown-tpukernel"}:
+                raise _tpu_contract_error(
+                    target, function_name, "call_extern",
+                    f"unknown TPU semantic extern {extern_name!r}; only "
+                    "compiler-owned operations in the closed tl.tpu.* and "
+                    "tl.tpukernel.* sets are allowed")
+            raise _tpu_contract_error(
+                target, function_name, "call_extern",
+                f"unknown external call {extern_name!r}; TPU kernels only "
+                "allow compiler-owned tl.tpu.*, matching tl.tpukernel.*, or "
+                "raw rvt_* calls isolated to the RV programming model")
+
+        tir.stmt_functor.post_order_visit(function.body, visit)
+
+
+def validate_target_module_contract(
+    mod: tvm.IRModule, target: Target
+):
+    """Validate backend extern ownership and return the TPU target identity.
+
+    This is shared by the full lowering path and annotation-only wrapper
+    analysis so neither entry point can bypass complete TPU Target validation.
+    Non-TPU modules return ``None`` after rejecting any TPU-only externs.
+    """
+    if target.kind.name == "tpu":
+        tpu_target = resolve_tpu_target(target=target)
+        _validate_tpu_residual_ir(mod, target, tpu_target)
+        return tpu_target
+    _reject_tpu_externs_for_non_tpu_target(mod, target)
+    return None
 
 
 @tvm.register_func("tilelang_callback_cuda_compile", override=True)
@@ -292,8 +566,6 @@ def lower(
     runtime_only=False,
     enable_host_codegen=False,
     enable_device_compile=False,
-    chip: Optional[str] = None,
-    device_mode: str = "tpukernel",
     runtime_mode: Optional[str] = None,
 ) -> CompiledArtifact:
     '''
@@ -318,22 +590,18 @@ def lower(
     target_host = tvm.target.Target.canon_target(target_host)
     target = tvm.target.Target(target, target_host)
     is_tpu = target.kind.name == "tpu"
-    tpu_config = None
+    tpu_target = None
+    tpu_runtime = None
     if is_tpu:
         # TPU target selection is resolved at the backend boundary.  Do not
         # manufacture a BM1690 configuration while lowering CUDA/HIP/etc.;
         # those backends keep their own target and codegen paths.
-        target_chip = get_tpu_target_chip(target)
-        tpu_config = resolve_tpu_compile_config(
-            chip=chip,
-            device_mode=device_mode,
-            runtime_mode=runtime_mode,
-            target_chip=target_chip,
-        )
-        target = bind_tpu_target(target, tpu_config, target_host)
-        _validate_tpu_programming_model(mod, tpu_config)
+        tpu_target = validate_target_module_contract(mod, target)
+        tpu_runtime = resolve_tpu_runtime(runtime_mode=runtime_mode)
     else:
-        _reject_tpu_externs_for_non_tpu_target(mod, target)
+        if runtime_mode is not None:
+            raise ValueError("runtime_mode is only valid for a TPU target")
+        validate_target_module_contract(mod, target)
 
     _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
     _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
@@ -343,16 +611,27 @@ def lower(
 
     # Phase 2: Optimize the IR for the target
     mod = OptimizeForTarget(mod, target)
+    if is_tpu:
+        # Passes may introduce or rewrite extern calls. Validate the final TIR
+        # contract before the TPU-specific address/effect analysis consumes it.
+        validate_target_module_contract(mod, target)
+        mod = AssignTPUAddresses(mod, target)
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     device_mod = tir.transform.Filter(_is_device_call)(mod)
 
     if is_tpu:
-        # PPL codegen needs the full module because TPU host/device ownership
-        # is represented by the generated PPL ABI rather than TVM's ordinary
+        # TPU codegen needs the full module because host/device ownership is
+        # represented by the generated TPU ABI rather than TVM's ordinary
         # device module split.
         kernel_source = tvm._ffi.get_global_func("target.build.tilelang_tpu")(mod, target)
         return CompiledArtifact(
-            host_mod, device_mod, params, kernel_source, tpu_config=tpu_config)
+            host_mod,
+            device_mod,
+            params,
+            kernel_source,
+            tpu_target=tpu_target,
+            tpu_runtime=tpu_runtime,
+        )
 
     # Preserve the normal TileLang backend dispatch.  TPU capability/config
     # logic is intentionally absent from this branch, just as CUDA and HIP

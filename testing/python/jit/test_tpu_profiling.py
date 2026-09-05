@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+from tilelang.engine.tpu_config import TPURuntimeConfig, TPUTargetSpec
 from tilelang.jit.adapter import tpu_profiling as tpu_profiling_module
 from tilelang.jit.adapter.tpu_profiling import (
     TPUInstructionProfiler,
@@ -27,7 +28,8 @@ from tilelang.jit.adapter.tpu_profiling import (
 )
 
 
-def _fake_trace_worker(label: str, device_mode: str = "tpukernel", sleep_s: float = 0.0):
+def _fake_trace_worker(
+        label: str, programming_model: str = "tpukernel", sleep_s: float = 0.0):
     """A child command that models the CModel's relative FILE_DUMP_CMD output."""
 
     source = (
@@ -39,7 +41,8 @@ def _fake_trace_worker(label: str, device_mode: str = "tpukernel", sleep_s: floa
         "assert '/' not in label\n"
         "assert os.environ['TPU_RT_CORE_NUM'] == '4'\n"
         "assert os.environ['TILELANG_TPU_PROFILE_CHIP'] == 'sg2260e'\n"
-        f"assert os.environ['TILELANG_TPU_PROFILE_DEVICE_MODE'] == '{device_mode}'\n"
+        "assert os.environ['TILELANG_TPU_PROFILE_PROGRAMMING_MODEL'] == "
+        f"'{programming_model}'\n"
         "assert os.environ['TILELANG_TPU_PROFILE_RUNTIME_MODE'] == 'cmodel'\n"
         "assert os.environ['TILELANG_TPU_BENCHMARK_RUNS'] == '0'\n"
         "assert 'TILELANG_TPU_ALLOW_PCIE_LOAD' not in os.environ\n"
@@ -55,7 +58,7 @@ def _fake_trace_worker(label: str, device_mode: str = "tpukernel", sleep_s: floa
     return [sys.executable, "-c", source]
 
 
-def _fake_pcie_trace_worker(device_mode: str = "tpukernel"):
+def _fake_pcie_trace_worker(programming_model: str = "tpukernel"):
     """Model the environment and recorder artifact of one PCIe launch."""
 
     source = (
@@ -64,7 +67,8 @@ def _fake_pcie_trace_worker(device_mode: str = "tpukernel"):
         "assert 'FILE_DUMP_CMD' not in os.environ\n"
         "assert os.environ['TILELANG_TPU_PROFILE_SESSION'] == '1'\n"
         "assert os.environ['TILELANG_TPU_PROFILE_CHIP'] == 'sg2260e'\n"
-        f"assert os.environ['TILELANG_TPU_PROFILE_DEVICE_MODE'] == '{device_mode}'\n"
+        "assert os.environ['TILELANG_TPU_PROFILE_PROGRAMMING_MODEL'] == "
+        f"'{programming_model}'\n"
         "assert os.environ['TILELANG_TPU_PROFILE_RUNTIME_MODE'] == 'pcie'\n"
         "assert os.environ['TILELANG_TPU_BENCHMARK_RUNS'] == '0'\n"
         "assert os.environ['TILELANG_TPU_ALLOW_PCIE_LOAD'] == '1'\n"
@@ -97,35 +101,14 @@ def _create_fake_pcie_decoder_packages(root: Path) -> Path:
     big_profile.mkdir(parents=True)
     (big_profile / "__init__.py").write_text("__version__ = '0.2.0'\n", encoding="utf-8")
     (big_profile / "bmprofile_perfAI_2260.py").write_text(
-        "from pathlib import Path\n"
         "from types import SimpleNamespace\n"
         "class BMProfileParserPerfAI:\n"
         "    def parse(self, path):\n"
-        "        assert Path(path).name.startswith('cdm_profile_data_dev')\n"
         "        record = ({\"Function Name\": \"rvt_fadd\", "
         "\"Start Time(ns)\": 5, \"End Time(ns)\": 12, \"Cmd Id\": 3}, "
         "None, {\"Core Id\": 0})\n"
         "        return SimpleNamespace(bd_events=[[record]], gdma_events=[], "
-        "sdma_events=[], cdma_events=[])\n"
-        "    def to_txt(self, output, frequency):\n"
-        "        assert frequency == 1000\n"
-        "        Path(output).mkdir(parents=True, exist_ok=True)\n",
-        encoding="utf-8",
-    )
-    run_web_root = package_root / "perfAI/perfAIWeb"
-    run_web_root.mkdir(parents=True)
-    (package_root / "perfAI/__init__.py").write_text("", encoding="utf-8")
-    (run_web_root / "__init__.py").write_text("", encoding="utf-8")
-    (run_web_root / "run_web.py").write_text(
-        "from pathlib import Path\n"
-        "def run_web(source, name, *args):\n"
-        "    output = Path(source) / name\n"
-        "    output.mkdir(parents=True, exist_ok=True)\n"
-        "    (output / 'profile_data.js').write_text(\n"
-        "        'let categories = [\"bdc\"];\\n'\n"
-        "        'let time_header = [\"engine\", \"begin_us\", \"end_us\", \"instruction\"];\\n'\n"
-        "        'let time_data = [[0, 5, 12, \"rvt_fadd\"]];\\n',\n"
-        "        encoding='utf-8')\n",
+        "sdma_events=[], cdma_events=[])\n",
         encoding="utf-8",
     )
     return package_root
@@ -266,31 +249,72 @@ def test_rv_profile_uses_the_vendor_perfai_target_spelling(tmp_path):
     perfai_root = _create_fake_perfai(tmp_path, expected_chip="sg2260erv")
     config = TPUProfilingConfig(
         chip="sg2260e",
-        device_mode="rv",
+        programming_model="rv",
         output_dir=tmp_path / "profile",
         label="unit-trace",
         perfai_root=perfai_root,
     )
 
     report = TPUInstructionProfiler(config).run_cmodel(
-        _fake_trace_worker(config.label, device_mode="rv"),
+        _fake_trace_worker(config.label, programming_model="rv"),
         environment={"TILELANG_PROFILE_TEST_TOKEN": "inherited"},
     )
 
     assert report.parser_status == "ready"
 
 
-def test_profile_config_rejects_invalid_chip_mode_and_nonfinite_timeout():
-    with pytest.raises(ValueError, match="does not support device_mode='rv'"):
-        TPUProfilingConfig(chip="bm1690", device_mode="rv")
+def test_profile_config_rejects_invalid_chip_model_and_nonfinite_timeout():
+    with pytest.raises(ValueError, match="does not support programming model.*rv"):
+        TPUProfilingConfig(chip="bm1690", programming_model="rv")
+    with pytest.raises(ValueError, match="Unsupported TPU programming model"):
+        TPUProfilingConfig(chip="sg2260e", programming_model="legacy")
     with pytest.raises(ValueError, match="positive number"):
         TPUProfilingConfig(chip="sg2260e", timeout_s=float("nan"))
     with pytest.raises(ValueError, match="positive number"):
         TPUProfilingConfig(chip="sg2260e", timeout_s=float("inf"))
-    with pytest.warns(DeprecationWarning, match="device_mode='atomic'"):
-        config = TPUProfilingConfig(chip="sg2260e", device_mode="atomic")
-    assert config.device_mode == "tpukernel"
-    assert config.compile_config.chip_spec.physical_core_count == 4
+    config = TPUProfilingConfig(chip="sg2260e", programming_model="tpukernel")
+    assert config.programming_model == "tpukernel"
+    assert config.target_spec == TPUTargetSpec("sg2260e", "tpukernel")
+    assert config.target_spec.chip_spec.physical_core_count == 4
+    assert config.runtime_config == TPURuntimeConfig("cmodel")
+
+
+@pytest.mark.parametrize("runtime_mode", ("cmodel", "pcie"))
+def test_profiler_preflights_only_the_selected_runtime_contract(
+        monkeypatch, runtime_mode):
+    calls = []
+
+    class FakeLayout:
+
+        def require_profiling(self, selected_runtime, *, environment):
+            calls.append((selected_runtime, environment["PPL_PROJECT_ROOT"]))
+
+    def fake_resolve(root, chip):
+        calls.append((root, chip))
+        return FakeLayout()
+
+    monkeypatch.setattr(
+        tpu_profiling_module, "resolve_ppl_layout", fake_resolve)
+    profiler = TPUInstructionProfiler(TPUProfilingConfig(
+        chip="sg2260e", runtime_mode=runtime_mode))
+
+    profiler._validate_ppl_dependencies({"PPL_PROJECT_ROOT": "/ppl-1.7"})
+
+    assert calls == [
+        ("/ppl-1.7", "sg2260e"),
+        (runtime_mode, "/ppl-1.7"),
+    ]
+
+
+def test_profiler_allows_generic_parser_worker_without_a_ppl_sdk(monkeypatch):
+    monkeypatch.setattr(
+        tpu_profiling_module,
+        "resolve_ppl_layout",
+        lambda *_args: pytest.fail("generic worker must not resolve PPL"),
+    )
+    profiler = TPUInstructionProfiler(TPUProfilingConfig(chip="sg2260e"))
+
+    profiler._validate_ppl_dependencies({})
 
 
 def test_cmodel_profile_timeout_terminates_the_worker_process_group(tmp_path):
@@ -548,7 +572,7 @@ def test_pcie_profile_environment_requires_two_acknowledgements():
 def test_pcie_profile_worker_isolated_and_keeps_raw_trace(tmp_path):
     config = TPUProfilingConfig(
         chip="sg2260e",
-        device_mode="rv",
+        programming_model="rv",
         runtime_mode="pcie",
         output_dir=tmp_path / "profile",
         postprocess=False,
@@ -588,7 +612,7 @@ def test_pcie_profile_decodes_with_preinstalled_vendor_packages(tmp_path):
         item for item in (str(package_root), inherited_pythonpath) if item)
     config = TPUProfilingConfig(
         chip="sg2260e",
-        device_mode="rv",
+        programming_model="rv",
         runtime_mode="pcie",
         output_dir=tmp_path / "profile",
     )
@@ -701,7 +725,7 @@ def test_sg2260e_tpukernel_cmodel_profile_worker_collects_real_raw_trace(tmp_pat
         pytest.skip("PPL_PROJECT_ROOT is not configured")
     config = TPUProfilingConfig(
         chip="sg2260e",
-        device_mode="tpukernel",
+        programming_model="tpukernel",
         output_dir=tmp_path,
         label="sg2260e-tpukernel-matmul",
         timeout_s=60,
@@ -728,7 +752,7 @@ def test_sg2260e_rv_cmodel_profile_worker_runs_control_path(tmp_path):
         pytest.skip("PPL_PROJECT_ROOT is not configured")
     config = TPUProfilingConfig(
         chip="sg2260e",
-        device_mode="rv",
+        programming_model="rv",
         output_dir=tmp_path,
         label="sg2260e-rv-control",
         timeout_s=60,
@@ -754,7 +778,7 @@ def test_sg2260e_tpukernel_pcie_profile_worker_collects_real_raw_trace(tmp_path)
         pytest.skip("PPL_PROJECT_ROOT is not configured")
     config = TPUProfilingConfig(
         chip="sg2260e",
-        device_mode="tpukernel",
+        programming_model="tpukernel",
         runtime_mode="pcie",
         output_dir=tmp_path,
         label="sg2260e-pcie-tpukernel-matmul",
@@ -784,7 +808,7 @@ def test_sg2260e_rv_pcie_profile_worker_runs_control_path(tmp_path):
         pytest.skip("PPL_PROJECT_ROOT is not configured")
     config = TPUProfilingConfig(
         chip="sg2260e",
-        device_mode="rv",
+        programming_model="rv",
         runtime_mode="pcie",
         output_dir=tmp_path,
         label="sg2260e-pcie-rv-control",

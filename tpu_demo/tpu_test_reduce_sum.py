@@ -27,7 +27,9 @@ def reduce_sum(M, N, block_M, block_N, dtype="float16", accum_dtype="float16"):
 
 
 M, N, block_M, block_N = 64, 64, 32, 64
-kernel = tilelang.compile(reduce_sum(M, N, block_M, block_N), out_idx=-1, target="tpu")
+kernel = tilelang.compile(
+    reduce_sum(M, N, block_M, block_N), out_idx=-1,
+    target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
 
 x = torch.randn(M, N).half()
 y = torch.zeros(M, 1).half()

@@ -37,10 +37,9 @@ def deepseek_v3_mlp_fp32(
         work0: T.Tensor((Block_bs, Block_i), accum_dtype),
         work1: T.Tensor((Block_bs, Block_i), accum_dtype),
         coeff: T.Tensor((64, 32), accum_dtype),
-        table: T.Tensor((64, 192), accum_dtype)
     ):
         T.ppl_mul_C(x_neg, gate_in, T.float32(-1.0))
-        T.ppl_exp2(x_neg, work0, work1, coeff, table)
+        T.ppl_exp(x_neg, work0, work1, coeff)
         T.ppl_add(x_neg_exp_1, x_neg, ones)
         T.ppl_div(silu_out, gate_in, x_neg_exp_1)
 
@@ -77,7 +76,6 @@ def deepseek_v3_mlp_fp32(
             exp_work0 = T.alloc_shared((Block_bs, Block_i), accum_dtype)
             exp_work1 = T.alloc_shared((Block_bs, Block_i), accum_dtype)
             exp_coeff = T.alloc_shared((64, 32), accum_dtype)
-            exp_table = T.alloc_shared((64, 192), accum_dtype)
             T.ppl_fill(ones, T.float32(1.0))
 
             # load global -> local (FP32)
@@ -103,18 +101,26 @@ def deepseek_v3_mlp_fp32(
             T.copy(down_weight_block, down_weight_block_bf16)
 
             # ---------- GATE GEMM ----------
-            T.ppl_gemm(x_block_bf16, gate_weight_block_bf16, gate_out_block_bf16, transpose_B=True)
+            T.ppl_gemm(
+                x_block_bf16, gate_weight_block_bf16, gate_out_block_bf16,
+                transpose_B=True, accumulate=False)
             T.copy(gate_out_block_bf16, gate_out_block)  # BF16 -> FP32
-            SiLU(gate_out_block, silu_out_block, x_neg, ones, x_neg_exp_1, exp_work0, exp_work1, exp_coeff, exp_table)
+            SiLU(
+                gate_out_block, silu_out_block, x_neg, ones, x_neg_exp_1,
+                exp_work0, exp_work1, exp_coeff)
 
             # ---------- UP GEMM ----------
-            T.ppl_gemm(x_block_bf16, up_weight_block_bf16, up_out_block_bf16, transpose_B=True)
+            T.ppl_gemm(
+                x_block_bf16, up_weight_block_bf16, up_out_block_bf16,
+                transpose_B=True, accumulate=False)
             T.copy(up_out_block_bf16, up_out_block)
             T.ppl_mul(gated_up_block, silu_out_block, up_out_block)
             T.copy(gated_up_block, gated_up_block_bf16)  # FP32 -> BF16
 
             # ---------- DOWN GEMM ----------
-            T.ppl_gemm(gated_up_block_bf16, down_weight_block_bf16, down_out_block_bf16, transpose_B=True)
+            T.ppl_gemm(
+                gated_up_block_bf16, down_weight_block_bf16, down_out_block_bf16,
+                transpose_B=True, accumulate=False)
             T.copy(down_out_block_bf16, down_out_block)
 
             # 写回 global output
@@ -148,4 +154,3 @@ if __name__ == "__main__":
         f.write(str(func_fixed))
     with open(mlp_kernel_file_fixed, "w") as f:
         f.write(mod_fixed)
-

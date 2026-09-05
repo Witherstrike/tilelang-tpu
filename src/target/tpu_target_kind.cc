@@ -17,9 +17,9 @@
 namespace tvm {
 
 // The target kind belongs to the TileLang TPU backend, not to a copied TVM
-// source file.  A few historic installations already have the old target
-// registered by a patched TVM.  Register only when it is genuinely absent so
-// registering this target kind is safe with either installation shape.
+// source file. Register only when it is genuinely absent. An existing but
+// incomplete registration is a build mismatch, not an API to repair at
+// process startup.
 // ``mcpu`` is the canonical physical-chip selector; ``model`` remains a
 // generic TVM annotation and is supplied by the common target options below.
 void RegisterTPUTargetKindIfAbsent() {
@@ -31,18 +31,18 @@ void RegisterTPUTargetKindIfAbsent() {
         << "An existing TVM target kind named 'tpu' does not accept -mcpu; "
         << "TileLang TPU requires -mcpu=<bm1690|sg2260e>. Rebuild against a "
         << "compatible TVM target registration.";
-    if (!options.count("tpu-programming-model")) {
-      // Old installations only registered the physical-chip option.  Extend
-      // that compatible target kind with TileLang's internal model attribute
-      // instead of replacing or patching TVM source files.
-      TargetKindRegEntry::RegisterOrGet("tpu")
-          .add_attr_option<String>("tpu-programming-model");
-    }
+    ICHECK(options.count("tpu-programming-model"))
+        << "An existing TVM target kind named 'tpu' lacks "
+        << "-tpu-programming-model=<tpukernel|rv>. Rebuild TVM/TileLang "
+        << "instead of extending an incompatible registration at runtime.";
     return;
   }
 
   TargetKindRegEntry::RegisterOrGet("tpu")
       .set_name()
+      // Generated TPU host wrappers use ordinary host pointers and are not a
+      // TVM DeviceAPI. Keep kDLCPU as that ABI marker; scheduling/backend
+      // dispatch uses the dedicated `tpu` key and target kind below.
       .set_default_device_type(kDLCPU)
       .add_attr_option<Array<String>>("keys")
       .add_attr_option<String>("tag")
@@ -57,7 +57,7 @@ void RegisterTPUTargetKindIfAbsent() {
       .add_attr_option<String>("march")
       .add_attr_option<Integer>("workspace-byte-alignment")
       .add_attr_option<Integer>("constants-byte-alignment")
-      .set_default_keys({"cpu"});
+      .set_default_keys({"tpu"});
 }
 
 struct TPUTargetKindRegistrar {

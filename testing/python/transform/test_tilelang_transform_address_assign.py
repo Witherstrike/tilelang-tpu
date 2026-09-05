@@ -4,9 +4,12 @@
 import contextlib
 import io
 
+import pytest
+
+import tilelang
 from tilelang import tvm
 import tilelang.language as T
-from tilelang.engine.phase import LowerAndLegalize, OptimizeForTarget
+from tilelang.engine.phase import AssignTPUAddresses, LowerAndLegalize, OptimizeForTarget
 
 
 BANK_SIZE = 16 * 1024
@@ -14,10 +17,12 @@ BANK_SIZE = 16 * 1024
 
 def _assigned_attrs(func):
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
-    target = tvm.target.Target("tpu")
+    target = tvm.target.Target(
+        "tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
     with contextlib.redirect_stdout(io.StringIO()):
         mod = LowerAndLegalize(mod, target)
         mod = OptimizeForTarget(mod, target)
+        mod = AssignTPUAddresses(mod, target)
     return mod["main"].attrs
 
 
@@ -40,12 +45,12 @@ def test_ppl_gemm_readwrite_accumulator_is_separated_from_both_inputs():
     @T.prim_func
     def main():
         with T.Kernel(1, is_cpu=True) as _:
-            a_shared = T.alloc_shared((64, 1024), "float32")
-            b_shared = T.alloc_shared((1024, 64), "float32")
+            a_shared = T.alloc_shared((64, 1024), "float16")
+            b_shared = T.alloc_shared((1024, 64), "float16")
             c_shared = T.alloc_shared((64, 64), "float32")
 
             T.ppl_fill(c_shared, T.float32(0.0))
-            T.ppl_gemm(a_shared, b_shared, c_shared)
+            T.ppl_gemm(a_shared, b_shared, c_shared, accumulate=True)
 
     attrs = _assigned_attrs(main)
     a_addr = _addr(attrs, "a_shared")
@@ -68,7 +73,7 @@ def test_elementwise_reads_are_bank_separated_while_outputs_remain_flexible():
         with T.Kernel(1, is_cpu=True) as _:
             src0 = T.alloc_shared((64, 1024), "float32")
             src1 = T.alloc_shared((64, 1024), "float32")
-            dst = T.alloc_shared((64, 64), "float32")
+            dst = T.alloc_shared((64, 1024), "float32")
 
             T.ppl_add(dst, src0, src1)
 
@@ -108,9 +113,7 @@ def test_exp_composite_operands_are_conservative_bank_clique():
             work0 = T.alloc_shared((64, 1024), "float32")
             work1 = T.alloc_shared((64, 1024), "float32")
             coeff = T.alloc_shared((64, 32), "float32")
-            table = T.alloc_shared((64, 192), "float32")
-
-            T.ppl_exp2(out, work0, work1, coeff, table)
+            T.ppl_exp(out, work0, work1, coeff)
 
     attrs = _assigned_attrs(main)
     banks = {
@@ -118,10 +121,56 @@ def test_exp_composite_operands_are_conservative_bank_clique():
         _addr(attrs, "work0") // BANK_SIZE,
         _addr(attrs, "work1") // BANK_SIZE,
         _addr(attrs, "coeff") // BANK_SIZE,
-        _addr(attrs, "table") // BANK_SIZE,
     }
 
-    assert len(banks) == 5
+    assert len(banks) == 4
+
+
+def test_address_assignment_rejects_non_tpu_target():
+    @T.prim_func
+    def main():
+        T.evaluate(0)
+
+    mod = tvm.IRModule({"main": main})
+    target = tvm.target.Target("c")
+    mod = tvm.tir.transform.BindTarget(target)(mod)
+
+    with pytest.raises(ValueError, match="requires a TPU target"):
+        AssignTPUAddresses(mod, target)
+
+    with pytest.raises(tvm.error.TVMError, match="requires a TPU Target"):
+        tilelang.transform.AddressAssign()(mod)
+
+
+@pytest.mark.parametrize("target_spec, message, native_message", [
+    ("tpu", "explicit physical chip", "supported target chip"),
+    (
+        "tpu -mcpu=sg2260e",
+        "explicit programming model",
+        "requires a normalized target",
+    ),
+    (
+        "tpu -mcpu=bm1690 -tpu-programming-model=rv",
+        "does not support programming model",
+        "does not support",
+    ),
+])
+def test_address_assignment_requires_a_complete_supported_tpu_target(
+        target_spec, message, native_message):
+    @T.prim_func
+    def main():
+        T.evaluate(0)
+
+    target = tvm.target.Target(target_spec)
+    mod = tvm.tir.transform.BindTarget(target)(tvm.IRModule({"main": main}))
+
+    with pytest.raises(ValueError, match=message):
+        AssignTPUAddresses(mod, target)
+
+    # The native transform is independently fail-closed for callers that
+    # bypass tilelang.engine.phase.
+    with pytest.raises(tvm.error.TVMError, match=native_message):
+        tilelang.transform.AddressAssign()(mod)
 
 
 if __name__ == "__main__":
@@ -129,3 +178,4 @@ if __name__ == "__main__":
     test_elementwise_reads_are_bank_separated_while_outputs_remain_flexible()
     test_reduce_tmp_is_separated_from_input_bank()
     test_exp_composite_operands_are_conservative_bank_clique()
+    test_address_assignment_rejects_non_tpu_target()

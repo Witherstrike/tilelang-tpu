@@ -105,7 +105,7 @@ def run(
     *,
     operation: str = "add",
     chip: str = "sg2260e",
-    device_mode: str = "tpukernel",
+    programming_model: str = "tpukernel",
     runtime_mode: str = "cmodel",
     allow_pcie: bool = False,
     device_id: Optional[int] = None,
@@ -117,20 +117,20 @@ def run(
         raise ValueError(f"unsupported elementwise operation: {operation!r}")
     if chip not in ("bm1690", "sg2260e"):
         raise ValueError(f"unsupported TPU chip: {chip!r}")
-    if device_mode not in ("tpukernel", "rv"):
-        raise ValueError(f"unsupported device mode: {device_mode!r}")
+    if programming_model not in ("tpukernel", "rv"):
+        raise ValueError(f"unsupported programming model: {programming_model!r}")
     if runtime_mode not in ("cmodel", "pcie"):
         raise ValueError(f"unsupported runtime mode: {runtime_mode!r}")
-    if chip == "bm1690" and device_mode == "rv":
-        raise ValueError("BM1690 does not support device_mode='rv'")
+    if chip == "bm1690" and programming_model == "rv":
+        raise ValueError("BM1690 does not support the RV programming model")
     _configure_runtime_safety(runtime_mode, allow_pcie, device_id)
 
     torch.manual_seed(seed)
     kernel = tilelang.compile(
         elementwise(operation),
         out_idx=-1,
-        target=f"tpu -mcpu={chip}",
-        device_mode=device_mode,
+        target=(f"tpu -mcpu={chip} "
+                f"-tpu-programming-model={programming_model}"),
         runtime_mode=runtime_mode,
     )
     a = torch.randn(M, N, dtype=torch.float32)
@@ -156,7 +156,7 @@ def run(
     passed = torch.allclose(actual, expected, atol=atol, rtol=rtol)
     print(
         "ELEMENTWISE_RESULT "
-        f"operation={operation} chip={chip} device_mode={device_mode} "
+        f"operation={operation} chip={chip} programming_model={programming_model} "
         f"runtime_mode={runtime_mode} max_abs_error={max_abs_error:.8g} "
         f"mean_abs_error={mean_abs_error:.8g} passed={passed}",
         flush=True,
@@ -177,7 +177,7 @@ def _parser() -> argparse.ArgumentParser:
         "--chip", choices=("bm1690", "sg2260e"), default="sg2260e"
     )
     parser.add_argument(
-        "--device-mode", choices=("tpukernel", "rv"), default="tpukernel"
+        "--programming-model", choices=("tpukernel", "rv"), default="tpukernel"
     )
     parser.add_argument(
         "--runtime-mode", choices=("cmodel", "pcie"), default="cmodel"
@@ -199,7 +199,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         run(
             operation=args.operation,
             chip=args.chip,
-            device_mode=args.device_mode,
+            programming_model=args.programming_model,
             runtime_mode=args.runtime_mode,
             allow_pcie=args.allow_pcie,
             device_id=args.device_id,

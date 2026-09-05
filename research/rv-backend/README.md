@@ -6,7 +6,7 @@
 
 当前已覆盖的中立算子是 `copy`、`fill`、`gemm`、`add`、`sub`、`mul` 和 `div`。面向用户的示例位于 `tpu_demo/matmul/tpu_test_matmul_fp16.py` 与 `tpu_demo/elementwise/tpu_test_elementwise.py`。
 
-这里的 “PPL” 仅指 PPL 1.7 SDK/ABI；它不是 TileLang 的编程模型名称。源码按职责拆为 `codegen_tpu_common.cc`、`codegen_tpukernel.cc` 和 `codegen_rv.cc`，不再用 `codegen_ppl` 这一含混名称。
+这里的 “PPL” 仅指 PPL 1.7 SDK/ABI；它不是 TileLang 的编程模型名称。源码按职责拆为 `codegen_tpu_common.cc`、`codegen_tpukernel.cc` 和 `codegen_rv.cc`。
 
 ## 2. 选择模型与硬件边界
 
@@ -16,11 +16,23 @@
 | 编程模型 | `tpukernel`、`rv` | 选择指令 ABI 与 codegen。BM1690 仅允许前者；SG2260E 允许两者。 |
 | 运行时 | `cmodel`、`pcie` | 选择模拟器或板端 runtime；不改变指令语义。 |
 
-`TPUChipSpec` 是上述能力的唯一注册表：BM1690 映射到 `tpub_7_1`、8 个物理核；SG2260E 映射到 `tpub_7_1_e`、4 个物理核。两者在本项目当前使用的 TPUv7 LMEM 几何相同，故共享内存档案；PPL arch、宏、物理核数和 RV 能力不能由目录名或默认 BM1690 假设推断。
+Python 编译编排以 `TPUChipSpec` 为能力注册表：BM1690 映射到 `tpub_7_1`、8 个物理核；SG2260E 映射到 `tpub_7_1_e`、4 个物理核。两者在本项目当前使用的 TPUv7 LMEM 几何相同，故共享内存档案；PPL arch、宏、物理核数和 RV 能力不能由目录名或默认 BM1690 假设推断。native codegen 边界目前仍镜像校验受支持的 chip/model 组合，后续应由同一份声明生成，消除人工同步点。
 
 物理核数不等于当前 kernel 的并行发射核数。CModel 会按 4/8 核拓扑初始化，但现有 host 模板的 `core_num=1`，示例也以串行 grid 工作负载验证语义。因此本报告只声称单核工作负载在正确拓扑下运行；多核切分、跨核同步和性能扩展仍是后续工作。
 
-历史 `device_mode="atomic"` 是传统 TPU-Kernel 路径的误称，不表示原子指令。API 边界仍暂时接受它并给出弃用告警，随后立即规范化为 `tpukernel`；内部配置、target 属性和 source guard 均只使用 `tpukernel`/`rv`。
+公共 API 只保留一份编译身份：完整 TVM Target 解析为
+`TPUTargetSpec(chip, programming_model)`。host 承载方式单独解析为
+`TPURuntimeConfig(runtime_mode)`，不参与指令选择。裸 `target="tpu"`、缺少 `-mcpu` 或
+`-tpu-programming-model` 的 target，以及 BM1690+RV 组合都会在 lowering 前失败。
+
+```python
+kernel = tilelang.compile(
+    program,
+    target=("tpu -mcpu=sg2260e "
+            "-tpu-programming-model=rv"),
+    runtime_mode="cmodel",
+)
+```
 
 ## 3. 编译与代码生成架构
 
@@ -29,7 +41,7 @@ T.ppl_* 前端
     │  生成 tl.tpu.{copy,fill,gemm,add,sub,mul,div}
     ▼
 TileLang TPU lowering + AddressAssign
-    │  target: tpu -mcpu=<chip>, tpu-programming-model=<mode>
+    │  target: tpu -mcpu=<chip> -tpu-programming-model=<model>
     ├── tpukernel ──► codegen_tpukernel.cc ──► tpu_kernel.h ABI
     └── rv        ──► codegen_rv.cc        ──► rvt_api.h ABI
                          │
@@ -37,7 +49,8 @@ TileLang TPU lowering + AddressAssign
                  PPL 1.7 编译/链接 ──► CModel 或 PCIe host
 ```
 
-`target.build.tilelang_tpu` 是规范 FFI 入口；`target.build.tilelang_ppl` 仅保留为兼容别名。TPU codegen 限制一个模块只含一个 `PrimFunc`，并拒绝将保留的 host 入口名当作 device kernel，避免 ABI 歧义。
+`target.build.tilelang_tpu` 是唯一 FFI 入口。TPU codegen 限制一个模块只含一个
+`PrimFunc`，并拒绝将保留的 host 入口名当作 device kernel，避免 ABI 歧义。
 
 共同层负责解析 TIR 参数、region、dtype、LMEM 地址和读写 effect；专属层只做指令选择。此分层使同一 `tl.tpu.*` 语义能有两种指令实现，并避免把 RV descriptor 细节泄漏到前端。原始 `ppl.*`/`tpu_*` extern 被视为 TPU-Kernel 专属，原始 `rvt_*` extern 被视为专家级 ABI escape hatch；二者与中立 RV lowering 的混用会在 codegen 阶段失败，而不是生成含义不明的命令流。
 
@@ -64,9 +77,14 @@ RV kernel 生命周期为 `rvt_kernel_start()`，先配置 GDMA lane mask，执�
 
 ## 4. 工具链与运行时隔离
 
-`ppl_layout.py` 只解析 PPL 1.7 的 `deps/` 发布布局，不再探测或兼容旧版 PPL 目录。它从 `TPUChipSpec` 取得 arch 和核数，检查 kernel header、helper、CModel runtime、固件/模拟器与 RV header；当 SDK 未提供 `rvt_api.h` 时，`device_mode="rv"` 在编译前失败。
+`ppl_layout.py` 只解析 PPL 1.7 的 `deps/` 发布布局。它从 `TPUChipSpec` 取得 arch 和核数，
+检查 kernel header、helper、CModel runtime、固件/模拟器与 RV header；当 SG2260E target
+选择 RV 而 SDK 未提供 `rvt_api.h` 时，构建会在调用工具链前失败。
 
-CModel 使用 SDK runtime；PCIe 使用安装在板端环境中的 `libtpuv7_rt.so`，禁止误把 CModel runtime 当作板端 runtime。一次 JIT 加载会绑定 `(runtime, chip, physical_core_count, programming_model, device, SDK/runtime 路径)`，切换这些身份会被拒绝，防止同一进程混用 CModel/PCIe、BM/SG 或两个 ABI。
+CModel 使用 SDK runtime；PCIe 使用安装在板端环境中的 `libtpuv7_rt.so`，禁止误把
+CModel runtime 当作板端 runtime。一次 JIT 加载会绑定 `TPUTargetSpec`、
+`TPURuntimeConfig`、device id 与 SDK/runtime 路径；切换其中任一身份都会被拒绝，防止同一
+进程混用 CModel/PCIe、BM/SG 或两个 ABI。
 
 ## 5. Profiling 与板端安全
 
@@ -80,11 +98,11 @@ PCIe 默认拒绝加载。测试必须显式同时确认 `--allow-pcie` 与 `--a
 2. RV fill 暂限零，GEMM 暂限二维 FP16/BF16 输入；更广的 RV ISA 应逐条写入 descriptor/layout/synchronization 契约并配数值回归，不能将 raw ABI 调用算作算子支持。
 3. 本轮正确性示例故意使用串行 K 循环。现有通用 software-pipeline pass 会把 `num_stages=1` 的生产者 DMA 与立即消费它的 GEMM 放入 TPU 并行区，PCIe 已证明这会产生数据冒险；后续须建立 TPU dependency/hazard 模型后才可重新开放重叠。
 4. 当前工作负载单核发射。后续需要以 tile partitioner 分配 4/8 核、明确 core-local 地址与跨核同步，再建立按核心的数值和缩放测试。
-5. 上游化应先抽取无私有 SDK 依赖的 target normalizer、backend capability/op contract 和测试接口；PPL 工具链与 RV ABI 保留在本仓库可选后端中。这样能与 CUDA/HIP 等按 target 分流的结构一致，而不在通用 engine 堆积 TPU 特判。
+5. 上游化应先抽取无私有 SDK 依赖的 target resolver、backend capability/op contract 和测试接口；PPL 工具链与 RV ABI 保留在本仓库可选后端中。这样能与 CUDA/HIP 等按 target 分流的结构一致，而不在通用 engine 堆积 TPU 特判。
 
 ## 7. 相关文件
 
-- `tilelang/engine/tpu_config.py`：芯片/模型/运行时配置与兼容归一化。
+- `tilelang/engine/tpu_config.py`：`TPUChipSpec`、`TPUTargetSpec`、`TPURuntimeConfig` 与严格解析。
 - `tilelang/jit/adapter/ppl_layout.py`、`libgen.py`：PPL 1.7 解析、CModel/PCIe 构建与链接。
 - `src/target/codegen_tpu_common.{h,cc}`：中立 TIR 解析、ABI guard、公共元数据。
 - `src/target/codegen_tpukernel.cc`、`src/target/codegen_rv.cc`：两条指令选择路径。

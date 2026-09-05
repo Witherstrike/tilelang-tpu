@@ -17,12 +17,7 @@ from tilelang.jit.adapter.tpu import (
     make_tpu_forward,
     reject_unverified_tpu_database_artifact,
 )
-from tilelang.engine.tpu_config import (
-    bind_tpu_target,
-    get_tpu_target_chip,
-    TPUCompileConfig,
-    resolve_tpu_compile_config,
-)
+from tilelang.engine.tpu_config import TPURuntimeConfig, TPUTargetSpec
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 
@@ -63,7 +58,8 @@ class CtypesKernelAdapter(BaseKernelAdapter):
                  kernel_global_source: Optional[str] = None,
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None,
-                 tpu_config: Optional[TPUCompileConfig] = None):
+                 tpu_target: Optional[TPUTargetSpec] = None,
+                 tpu_runtime: Optional[TPURuntimeConfig] = None):
         """Initialize the adapter with the given TIR function or module.
         
         Args:
@@ -100,14 +96,19 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
         self.target = Target.canon_target(determine_target(target))
         self.verbose = verbose
-        self.tpu_config = None
+        self.tpu_target = None
+        self.tpu_runtime = None
         if is_tpu_target(self.target):
-            self.tpu_config = tpu_config or resolve_tpu_compile_config(
-                target_chip=get_tpu_target_chip(self.target))
-            self.target = bind_tpu_target(self.target, self.tpu_config)
-        elif tpu_config is not None:
+            if tpu_target is None or tpu_runtime is None:
+                raise ValueError(
+                    "TPU adapter requires target and runtime configuration "
+                    "from the compiled artifact")
+            self.tpu_target = tpu_target
+            self.tpu_runtime = tpu_runtime
+        elif tpu_target is not None or tpu_runtime is not None:
             raise ValueError("TPU configuration can only be used with target='tpu'")
-        self.lib_generator = LibraryGenerator(self.target, tpu_config=self.tpu_config)
+        self.lib_generator = LibraryGenerator(
+            self.target, tpu_target=self.tpu_target, tpu_runtime=self.tpu_runtime)
         self.wrapper = TLWrapper(
             self.target, tpu_workspace_dir=self.lib_generator.tpu_workspace_dir)
 
@@ -139,7 +140,8 @@ class CtypesKernelAdapter(BaseKernelAdapter):
                       kernel_lib_path: str,
                       verbose: bool = False,
                       pass_configs: Optional[Dict[str, Any]] = None,
-                      tpu_config: Optional[TPUCompileConfig] = None):
+                      tpu_target: Optional[TPUTargetSpec] = None,
+                      tpu_runtime: Optional[TPURuntimeConfig] = None):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
@@ -169,15 +171,23 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
         adapter.target = Target.canon_target(determine_target(target))
         adapter.verbose = verbose
-        adapter.tpu_config = None
+        adapter.tpu_target = None
+        adapter.tpu_runtime = None
         if is_tpu_target(adapter.target):
-            adapter.tpu_config = tpu_config or resolve_tpu_compile_config(
-                target_chip=get_tpu_target_chip(adapter.target))
-            adapter.target = bind_tpu_target(adapter.target, adapter.tpu_config)
-        elif tpu_config is not None:
+            if tpu_target is None or tpu_runtime is None:
+                raise ValueError(
+                    "TPU adapter requires target and runtime configuration "
+                    "from the compiled artifact")
+            adapter.tpu_target = tpu_target
+            adapter.tpu_runtime = tpu_runtime
+        elif tpu_target is not None or tpu_runtime is not None:
             raise ValueError("TPU configuration can only be used with target='tpu'")
         reject_unverified_tpu_database_artifact(adapter.target)
-        adapter.lib_generator = LibraryGenerator(adapter.target, tpu_config=adapter.tpu_config)
+        adapter.lib_generator = LibraryGenerator(
+            adapter.target,
+            tpu_target=adapter.tpu_target,
+            tpu_runtime=adapter.tpu_runtime,
+        )
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
         if is_tpu_target(adapter.target):
             adapter.tpu_forward = make_tpu_forward(

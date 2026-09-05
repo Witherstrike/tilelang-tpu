@@ -59,16 +59,20 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
 
                 # 2) scores tile = Q@K^T + Q_pe@K_pe^T
-                T.ppl_clear(acc_s)
-                T.ppl_gemm(Q_shared, KV_shared, acc_s, transpose_B=True)
-                T.ppl_clear(acc_s_pe)
-                T.ppl_gemm(Q_pe_shared, K_pe_shared, acc_s_pe, transpose_B=True)
+                T.ppl_fill(acc_s, T.float32(0))
+                T.ppl_gemm(
+                    Q_shared, KV_shared, acc_s,
+                    transpose_B=True, accumulate=False)
+                T.ppl_fill(acc_s_pe, T.float32(0))
+                T.ppl_gemm(
+                    Q_pe_shared, K_pe_shared, acc_s_pe,
+                    transpose_B=True, accumulate=False)
                 T.ppl_add(acc_s, acc_s, acc_s_pe)
 
                 # 3) online softmax (row-wise)
                 T.copy(scores_max, scores_max_prev)
                 T.ppl_fill(scores_max, -T.infinity(accum_dtype))
-                T.ppl_reduce_max(acc_s, scores_max, dim=1, clear=False)
+                T.ppl_reduce_max(acc_s, scores_max, dim=1)
 
                 # for i in T.Parallel(VALID_BLOCK_H):
                 #     scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
@@ -80,8 +84,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 work0 = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
                 work1 = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
                 coeff = T.alloc_shared([64, 32], accum_dtype)  # npu number is 64
-                table = T.alloc_shared([64, 192], accum_dtype)  # npu number is 64
-                T.ppl_exp2(scores_scale, work0, work1, coeff, table)
+                T.ppl_exp(scores_scale, work0, work1, coeff)
 
                 # for i, j in T.Parallel(VALID_BLOCK_H, block_N):
                 #     acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
@@ -91,7 +94,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.ppl_subtract(acc_s, acc_s, scores_scaled)
                 work0_1 = T.alloc_shared([VALID_BLOCK_H, block_N], accum_dtype)
                 work1_1 = T.alloc_shared([VALID_BLOCK_H, block_N], accum_dtype)
-                T.ppl_exp2(acc_s, work0_1, work1_1, coeff, table)
+                T.ppl_exp(acc_s, work0_1, work1_1, coeff)
 
                 T.ppl_reduce_sum(acc_s, scores_sum, dim=1)
                 T.copy(acc_s, S_shared)
@@ -107,7 +110,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.ppl_mul(acc_o, acc_o, scores_scale)
 
                 # 4) output accumulate: O += S @ V
-                T.ppl_gemm(S_shared, KV_shared, acc_o)
+                T.ppl_gemm(S_shared, KV_shared, acc_o, accumulate=True)
 
             # 5) final normalize: O /= logsum
             # for i, j in T.Parallel(VALID_BLOCK_H, dim):

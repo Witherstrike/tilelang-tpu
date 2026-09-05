@@ -25,9 +25,9 @@ def _profile_selection():
     if os.environ.get("TILELANG_TPU_PROFILE_SESSION") != "1":
         raise RuntimeError("tpu_profile_worker must run through TPUInstructionProfiler.")
     chip = os.environ.get("TILELANG_TPU_PROFILE_CHIP")
-    device_mode = os.environ.get("TILELANG_TPU_PROFILE_DEVICE_MODE")
+    programming_model = os.environ.get("TILELANG_TPU_PROFILE_PROGRAMMING_MODEL")
     runtime_mode = os.environ.get("TILELANG_TPU_PROFILE_RUNTIME_MODE")
-    if not chip or not device_mode or runtime_mode not in ("cmodel", "pcie"):
+    if not chip or not programming_model or runtime_mode not in ("cmodel", "pcie"):
         raise RuntimeError("missing or invalid TileLang TPU profile selection.")
     if os.environ.get("TILELANG_TPU_BENCHMARK_RUNS") != "0":
         raise RuntimeError("instruction profiling requires exactly one TileLang launch.")
@@ -49,10 +49,10 @@ def _profile_selection():
         device_id = os.environ.get("TILELANG_TPU_DEVICE_ID", "")
         if not device_id.isdecimal():
             raise RuntimeError("PCIe profile worker requires a numeric device ID.")
-    return chip, device_mode, runtime_mode
+    return chip, programming_model, runtime_mode
 
 
-def _matmul(chip: str, device_mode: str, runtime_mode: str) -> None:
+def _matmul(chip: str, programming_model: str, runtime_mode: str) -> None:
     @T.prim_func
     def matmul(
             A: T.Tensor((64, 64), "float16"),
@@ -72,7 +72,7 @@ def _matmul(chip: str, device_mode: str, runtime_mode: str) -> None:
             for k in T.serial(2):
                 T.ppl_copy(A[by * 32, k * 32], A_shared)
                 T.ppl_copy(B[k * 32, bx * 32], B_shared)
-                T.ppl_gemm(A_shared, B_shared, C_acc)
+                T.ppl_gemm(A_shared, B_shared, C_acc, accumulate=True)
             T.ppl_copy(C_acc, C_out)
             T.ppl_copy(C_out, C[by * 32, bx * 32])
 
@@ -80,8 +80,8 @@ def _matmul(chip: str, device_mode: str, runtime_mode: str) -> None:
     kernel = tilelang.compile(
         matmul,
         out_idx=-1,
-        target=f"tpu -mcpu={chip}",
-        device_mode=device_mode,
+        target=(f"tpu -mcpu={chip} "
+                f"-tpu-programming-model={programming_model}"),
         runtime_mode=runtime_mode,
     )
     a = torch.randn(64, 64).half()
@@ -92,10 +92,10 @@ def _matmul(chip: str, device_mode: str, runtime_mode: str) -> None:
     if not torch.allclose(c, reference, atol=1e-2, rtol=1e-2):
         difference = float(torch.max(torch.abs(reference - c)))
         raise RuntimeError(
-            f"{device_mode} matmul mismatch; max abs difference={difference}")
+            f"{programming_model} matmul mismatch; max abs difference={difference}")
 
 
-def _elementwise(operation: str, chip: str, device_mode: str,
+def _elementwise(operation: str, chip: str, programming_model: str,
                  runtime_mode: str) -> None:
     @T.prim_func
     def elementwise(
@@ -123,8 +123,8 @@ def _elementwise(operation: str, chip: str, device_mode: str,
     kernel = tilelang.compile(
         elementwise,
         out_idx=-1,
-        target=f"tpu -mcpu={chip}",
-        device_mode=device_mode,
+        target=(f"tpu -mcpu={chip} "
+                f"-tpu-programming-model={programming_model}"),
         runtime_mode=runtime_mode,
     )
     a = torch.randn(64, 64, dtype=torch.float32)
@@ -146,13 +146,13 @@ def _elementwise(operation: str, chip: str, device_mode: str,
     if not torch.allclose(c, reference, atol=atol, rtol=rtol):
         difference = float(torch.max(torch.abs(reference - c)))
         raise RuntimeError(
-            f"{device_mode} elementwise-{operation} mismatch; "
+            f"{programming_model} elementwise-{operation} mismatch; "
             f"max abs difference={difference}")
 
 
-def _rv_control(chip: str, device_mode: str, runtime_mode: str) -> None:
-    if device_mode != "rv":
-        raise RuntimeError("rv-control requires device_mode='rv'.")
+def _rv_control(chip: str, programming_model: str, runtime_mode: str) -> None:
+    if programming_model != "rv":
+        raise RuntimeError("rv-control requires programming_model='rv'.")
 
     @T.prim_func
     def control(A: T.Tensor((1,), "float32")):
@@ -163,8 +163,8 @@ def _rv_control(chip: str, device_mode: str, runtime_mode: str) -> None:
     kernel = tilelang.compile(
         control,
         out_idx=[],
-        target=f"tpu -mcpu={chip}",
-        device_mode=device_mode,
+        target=(f"tpu -mcpu={chip} "
+                f"-tpu-programming-model={programming_model}"),
         runtime_mode=runtime_mode,
     )
     kernel(torch.zeros(1, dtype=torch.float32))
@@ -186,17 +186,18 @@ def main() -> None:
         required=True,
     )
     args = parser.parse_args()
-    chip, device_mode, runtime_mode = _profile_selection()
+    chip, programming_model, runtime_mode = _profile_selection()
     if args.case in ("matmul", "tpukernel-matmul"):
-        _matmul(chip, device_mode, runtime_mode)
+        _matmul(chip, programming_model, runtime_mode)
     elif args.case.startswith("elementwise-"):
-        _elementwise(args.case.removeprefix("elementwise-"), chip, device_mode,
+        _elementwise(args.case.removeprefix("elementwise-"), chip, programming_model,
                      runtime_mode)
     else:
-        _rv_control(chip, device_mode, runtime_mode)
+        _rv_control(chip, programming_model, runtime_mode)
     print(
         "TPU_PROFILE_WORKER_OK "
-        f"case={args.case} chip={chip} device_mode={device_mode} runtime_mode={runtime_mode}",
+        f"case={args.case} chip={chip} programming_model={programming_model} "
+        f"runtime_mode={runtime_mode}",
         flush=True,
     )
 

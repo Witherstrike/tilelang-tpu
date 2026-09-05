@@ -15,7 +15,7 @@ import pytest
 import tilelang
 from tilelang import tvm
 import tilelang.language as T
-from tilelang.engine.tpu_config import TPUCompileConfig
+from tilelang.engine.tpu_config import TPURuntimeConfig, TPUTargetSpec
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.wrapper import TLWrapper
 
@@ -41,7 +41,7 @@ def _portable_core_ops(
         T.ppl_fill(acc_shared, T.float32(0))
         T.ppl_copy(A, a_shared)
         T.ppl_copy(B, b_shared)
-        T.ppl_gemm(a_shared, b_shared, acc_shared)
+        T.ppl_gemm(a_shared, b_shared, acc_shared, accumulate=True)
         T.ppl_copy(acc_shared, C)
 
         T.ppl_copy(X, x_shared)
@@ -71,9 +71,9 @@ def _portable_and_raw_rv(
 
 
 @T.prim_func
-def _ffi_alias_probe(A: T.Tensor((1,), "float32")):
-    T.func_attr({"global_symbol": "ffi_alias_probe", "tir.noalias": T.bool(True)})
-    T.evaluate(T.call_extern("handle", "tpu_sync_all_bdc"))
+def _reserved_entry_probe(A: T.Tensor((1,), "float32")):
+    T.func_attr({"global_symbol": "reserved_entry_probe", "tir.noalias": T.bool(True)})
+    A[0] = A[0]
 
 
 @T.prim_func
@@ -104,16 +104,6 @@ def _local_integer_convert():
 
 
 @T.prim_func
-def _rank4_elementwise():
-    T.func_attr({"global_symbol": "rank4_elementwise"})
-    with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
-        lhs = T.alloc_shared((2, 4, 1, 8), "float32")
-        rhs = T.alloc_shared((2, 4, 1, 8), "float32")
-        out = T.alloc_shared((2, 4, 1, 8), "float32")
-        T.ppl_add(out, lhs, rhs)
-
-
-@T.prim_func
 def _overwrite_fp16_gemm():
     T.func_attr({"global_symbol": "overwrite_fp16_gemm"})
     with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
@@ -123,11 +113,27 @@ def _overwrite_fp16_gemm():
         T.ppl_gemm(lhs, rhs, out, accumulate=False)
 
 
-def _lower_core_ops(chip, device_mode):
+@T.prim_func
+def _tpukernel_topk(
+        Input: T.Tensor((257,), "float32"),
+        Output: T.Tensor((11,), "float32"),
+        Indices: T.Tensor((11,), "int32")):
+    T.func_attr({"global_symbol": "tpukernel_topk", "tir.noalias": T.bool(True)})
+    with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
+        T.ppl_topk(Output, Indices, Input, 11, True, 257)
+
+
+def _tpu_target(chip, programming_model):
+    return (
+        f"tpu -mcpu={chip} "
+        f"-tpu-programming-model={programming_model}"
+    )
+
+
+def _lower_core_ops(chip, programming_model):
     return tilelang.lower(
         _portable_core_ops,
-        target=f"tpu -mcpu={chip}",
-        device_mode=device_mode,
+        target=_tpu_target(chip, programming_model),
         runtime_mode="cmodel",
     ).kernel_source
 
@@ -164,7 +170,7 @@ def test_sg2260e_tpukernel_selects_only_tpukernel_instructions(sg2260e_sources):
     source = sg2260e_sources["tpukernel"]
 
     assert "TileLang TPU target: sg2260e, programming model: tpukernel" in source
-    assert "TPU-Kernel externs require TPU device_mode=tpukernel" in source
+    assert "TPU-Kernel externs require -tpu-programming-model=tpukernel" in source
     assert "tpu_initialize()" in source
     assert "tpu_poll()" in source
     for instruction in (
@@ -187,7 +193,7 @@ def test_sg2260e_rv_selects_only_rv_tensor_instructions(sg2260e_sources):
     source = sg2260e_sources["rv"]
 
     assert "TileLang TPU target: sg2260e, programming model: rv" in source
-    assert "RVT externs require TPU device_mode=rv" in source
+    assert "RVT externs require -tpu-programming-model=rv" in source
     assert '#include "atomic_def.h"' in source
     assert '#include "rvt_api.h"' in source
     assert "TILELANG_TPU_OPAQUE_RAW_RVT_ABI" not in source
@@ -243,40 +249,41 @@ def test_bm1690_tpukernel_source_regression_and_rv_rejection():
     assert "tpu_bdc_fp_add(" in source
     assert '#include "rvt_api.h"' not in source
 
-    with pytest.raises(ValueError, match="bm1690.*does not support device_mode='rv'"):
+    with pytest.raises(ValueError, match="bm1690.*does not support programming model.*rv"):
         _lower_core_ops("bm1690", "rv")
+
+
+def test_topk_capability_is_chip_specific_and_fails_before_runtime():
+    bm1690_source = tilelang.lower(
+        _tpukernel_topk,
+        target=_tpu_target("bm1690", "tpukernel"),
+        runtime_mode="cmodel",
+    ).kernel_source
+    assert "tpu_hau_sort_natural_index(" in bm1690_source
+
+    with pytest.raises(tvm.error.TVMError, match="unavailable on SG2260E"):
+        tilelang.lower(
+            _tpukernel_topk,
+            target=_tpu_target("sg2260e", "tpukernel"),
+            runtime_mode="cmodel",
+        )
 
 
 def test_portable_ops_and_raw_rv_abi_cannot_share_a_kernel():
     with pytest.raises(tvm.error.TVMError, match="cannot share a kernel with raw.*rvt"):
         tilelang.lower(
             _portable_and_raw_rv,
-            target="tpu -mcpu=sg2260e",
-            device_mode="rv",
+            target=_tpu_target("sg2260e", "rv"),
             runtime_mode="cmodel",
         )
 
 
-def test_legacy_codegen_registry_alias_matches_the_neutral_name():
-    target = tvm.target.Target({
-        "kind": "tpu",
-        "mcpu": "sg2260e",
-        "tpu-programming-model": "tpukernel",
-    })
-    module = tvm.IRModule({"ffi_alias_probe": _ffi_alias_probe})
-    canonical = tvm._ffi.get_global_func("target.build.tilelang_tpu")
-    compatibility = tvm._ffi.get_global_func("target.build.tilelang_ppl")
-
-    assert canonical(module, target) == compatibility(module, target)
-
-
 def test_reserved_runtime_entry_name_is_rejected():
-    reserved = _ffi_alias_probe.with_attr("global_symbol", "main_kernel")
+    reserved = _reserved_entry_probe.with_attr("global_symbol", "main_kernel")
     with pytest.raises(tvm.error.TVMError, match="conflicts with a generated runtime entry"):
         tilelang.lower(
             reserved,
-            target="tpu -mcpu=sg2260e",
-            device_mode="tpukernel",
+            target=_tpu_target("sg2260e", "tpukernel"),
             runtime_mode="cmodel",
         )
 
@@ -284,14 +291,12 @@ def test_reserved_runtime_entry_name_is_rejected():
 def test_global_to_global_copy_uses_system_memory_instruction():
     tpukernel = tilelang.lower(
         _global_to_global_copy,
-        target="tpu -mcpu=sg2260e",
-        device_mode="tpukernel",
+        target=_tpu_target("sg2260e", "tpukernel"),
         runtime_mode="cmodel",
     ).kernel_source
     rv = tilelang.lower(
         _global_to_global_copy,
-        target="tpu -mcpu=sg2260e",
-        device_mode="rv",
+        target=_tpu_target("sg2260e", "rv"),
         runtime_mode="cmodel",
     ).kernel_source
 
@@ -305,15 +310,13 @@ def test_copy_conversion_capabilities_fail_closed():
     with pytest.raises(tvm.error.TVMError, match="does not support direct FP16/BF16"):
         tilelang.lower(
             _local_fp16_to_bf16_copy,
-            target="tpu -mcpu=sg2260e",
-            device_mode="tpukernel",
+            target=_tpu_target("sg2260e", "tpukernel"),
             runtime_mode="cmodel",
         )
 
     rv_source = tilelang.lower(
         _local_fp16_to_bf16_copy,
-        target="tpu -mcpu=sg2260e",
-        device_mode="rv",
+        target=_tpu_target("sg2260e", "rv"),
         runtime_mode="cmodel",
     ).kernel_source
     assert "rvt_cvt_f2f(9, 8)" in rv_source
@@ -321,34 +324,33 @@ def test_copy_conversion_capabilities_fail_closed():
     with pytest.raises(tvm.error.TVMError, match="rvt_cvt_f2f only accepts"):
         tilelang.lower(
             _local_integer_convert,
-            target="tpu -mcpu=sg2260e",
-            device_mode="rv",
+            target=_tpu_target("sg2260e", "rv"),
             runtime_mode="cmodel",
         )
 
 
-@pytest.mark.parametrize("device_mode", ("tpukernel", "rv"))
-def test_portable_elementwise_rejects_non_matrix_local_layout(device_mode):
-    with pytest.raises(tvm.error.TVMError, match="requires N=1"):
-        tilelang.lower(
-            _rank4_elementwise,
-            target="tpu -mcpu=sg2260e",
-            device_mode=device_mode,
-            runtime_mode="cmodel",
-        )
+def test_portable_elementwise_rejects_non_matrix_local_layout_at_frontend():
+    with pytest.raises(tvm.error.DiagnosticError):
+
+        @T.prim_func
+        def _rank4_elementwise():
+            T.func_attr({"global_symbol": "rank4_elementwise"})
+            with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
+                lhs = T.alloc_shared((2, 4, 1, 8), "float32")
+                rhs = T.alloc_shared((2, 4, 1, 8), "float32")
+                out = T.alloc_shared((2, 4, 1, 8), "float32")
+                T.ppl_add(out, lhs, rhs)
 
 
 def test_overwrite_gemm_accepts_input_dtype_and_selects_non_accumulating_form():
     tpukernel = tilelang.lower(
         _overwrite_fp16_gemm,
-        target="tpu -mcpu=sg2260e",
-        device_mode="tpukernel",
+        target=_tpu_target("sg2260e", "tpukernel"),
         runtime_mode="cmodel",
     ).kernel_source
     rv = tilelang.lower(
         _overwrite_fp16_gemm,
-        target="tpu -mcpu=sg2260e",
-        device_mode="rv",
+        target=_tpu_target("sg2260e", "rv"),
         runtime_mode="cmodel",
     ).kernel_source
 
@@ -358,23 +360,35 @@ def test_overwrite_gemm_accepts_input_dtype_and_selects_non_accumulating_form():
     assert "rvt_fmm2a_nn(" not in rv
 
 
-@pytest.mark.parametrize("device_mode", ("tpukernel", "rv"))
-def test_sg2260e_pcie_core_ops_compile_and_link_without_loading(device_mode):
+@pytest.mark.parametrize("programming_model", ("tpukernel", "rv"))
+@pytest.mark.parametrize("profiling", (False, True))
+def test_sg2260e_pcie_core_ops_compile_and_link_without_loading(
+        programming_model, profiling, monkeypatch):
     """Validate the board artifact boundary without dlopen or dispatch."""
     if not os.environ.get("PPL_PROJECT_ROOT"):
         pytest.skip("PPL_PROJECT_ROOT is not configured")
+    monkeypatch.delenv("TILELANG_TPU_PROFILE_SESSION", raising=False)
+    monkeypatch.delenv("TILELANG_TPU_PROFILE_CHIP", raising=False)
+    monkeypatch.delenv(
+        "TILELANG_TPU_PROFILE_PROGRAMMING_MODEL", raising=False)
+    monkeypatch.delenv("TILELANG_TPU_PROFILE_RUNTIME_MODE", raising=False)
+    if profiling:
+        monkeypatch.setenv("TILELANG_TPU_PROFILE_SESSION", "1")
+        monkeypatch.setenv("TILELANG_TPU_PROFILE_CHIP", "sg2260e")
+        monkeypatch.setenv(
+            "TILELANG_TPU_PROFILE_PROGRAMMING_MODEL", programming_model)
+        monkeypatch.setenv("TILELANG_TPU_PROFILE_RUNTIME_MODE", "pcie")
 
-    config = TPUCompileConfig(
-        chip="sg2260e", device_mode=device_mode, runtime_mode="pcie")
-    target = tvm.target.Target("tpu -mcpu=sg2260e")
+    target_spec = TPUTargetSpec("sg2260e", programming_model)
+    runtime_config = TPURuntimeConfig("pcie")
+    target = tvm.target.Target(_tpu_target("sg2260e", programming_model))
     artifact = tilelang.lower(
         _portable_core_ops,
         target=target,
-        chip=config.chip,
-        device_mode=config.device_mode,
-        runtime_mode=config.runtime_mode,
+        runtime_mode=runtime_config.runtime_mode,
     )
-    generator = LibraryGenerator(target, tpu_config=config)
+    generator = LibraryGenerator(
+        target, tpu_target=target_spec, tpu_runtime=runtime_config)
     try:
         wrapper = TLWrapper(
             target, tpu_workspace_dir=generator.tpu_workspace_dir)
@@ -388,8 +402,11 @@ def test_sg2260e_pcie_core_ops_compile_and_link_without_loading(device_mode):
         workspace = Path(generator.tpu_workspace_dir)
         assert (workspace / "libkernel.so").is_file()
         assert (workspace / "main.so").is_file()
+        has_tpudnn_dependency = (
+            b"libtpudnn.so" in (workspace / "main.so").read_bytes())
+        assert has_tpudnn_dependency is profiling
         kernel_source = (workspace / "kernel.c").read_text(encoding="utf-8")
-        if device_mode == "rv":
+        if programming_model == "rv":
             assert "rvt_fmm2a_nn(" in kernel_source
             assert "tpu_initialize()" not in kernel_source
         else:

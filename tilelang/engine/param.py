@@ -10,7 +10,7 @@ from tvm.tir import Buffer, IntImm, Var
 from tilelang.utils.tensor import map_torch_type
 
 if TYPE_CHECKING:
-    from tilelang.engine.tpu_config import TPUCompileConfig
+    from tilelang.engine.tpu_config import TPURuntimeConfig, TPUTargetSpec
 
 
 @dataclass
@@ -110,4 +110,5 @@ class CompiledArtifact:
     kernel_source: str  # Raw source code of the generated kernel
     rt_mod: Optional[
         tvm.runtime.Module] = None  # Runtime module for execution, may be lazily initialized
-    tpu_config: Optional["TPUCompileConfig"] = None
+    tpu_target: Optional["TPUTargetSpec"] = None
+    tpu_runtime: Optional["TPURuntimeConfig"] = None

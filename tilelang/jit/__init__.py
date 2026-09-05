@@ -30,7 +30,7 @@ from tilelang.jit.adapter.tpu_profiling import (
     run_tpu_cmodel_profile,
     run_tpu_pcie_profile,
 )
-from tilelang.utils.target import determine_target, AVALIABLE_TARGETS, is_tpu_target_spec
+from tilelang.utils.target import determine_target, AVAILABLE_TARGETS, is_tpu_target_spec
 from tilelang.cache import cached
 from logging import getLogger
 
@@ -66,8 +66,9 @@ def jit(
     target : Union[str, Target], optional
         The compilation target for TVM. If set to "auto", an appropriate target
         will be inferred automatically. Otherwise, must be one of the supported
-        strings in AVALIABLE_TARGETS, a TPU target such as
-        ``"tpu -mcpu=sg2260e"``, or a TVM Target instance.
+        strings in AVAILABLE_TARGETS, a TPU target such as
+        ``"tpu -mcpu=sg2260e -tpu-programming-model=rv"``, or a
+        TVM Target instance.
 
     Returns
     -------
@@ -77,19 +78,20 @@ def jit(
 
     Raises
     ------
-    AssertionError
+    ValueError
         If the provided target is an unsupported target string.
     """
 
     # If the target is specified as a string, ensure it is valid and convert to a TVM Target.
     if isinstance(target, str):
-        assert target in AVALIABLE_TARGETS or is_tpu_target_spec(target), \
-            f"Invalid target: {target}"
+        if target not in AVAILABLE_TARGETS and not is_tpu_target_spec(target):
+            raise ValueError(f"Invalid target: {target}")
         target = determine_target(target)
 
     target = Target(target)
 
-    assert execution_backend in ["dlpack", "ctypes", "cython"], "Invalid execution backend."
+    if execution_backend not in ("dlpack", "ctypes", "cython"):
+        raise ValueError(f"Invalid execution backend: {execution_backend!r}")
 
     def _compile_and_create_adapter(tilelang_func: PrimFunc) -> BaseKernelAdapter:
         """
@@ -135,10 +137,7 @@ def compile(
     target_host: Union[str, Target] = None,
     verbose: bool = False,
     pass_configs: Optional[Dict[str, Any]] = None,
-    chip: Optional[str] = None,
-    device_mode: Literal["tpukernel", "rv", "atomic"] = "tpukernel",
     runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
-    mode: Optional[Literal["pcie", "cmodel"]] = None,
 ) -> JITKernel:
     """
     Compile the given TileLang PrimFunc with TVM and build a JITKernel.
@@ -151,8 +150,5 @@ def compile(
         target_host=target_host,
         verbose=verbose,
         pass_configs=pass_configs,
-        chip=chip,
-        device_mode=device_mode,
         runtime_mode=runtime_mode,
-        mode=mode,
     )

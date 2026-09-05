@@ -6,10 +6,17 @@ import pytest
 import tilelang
 from tilelang import tvm
 import tilelang.language as T
-from tilelang.engine.tpu_config import TPUCompileConfig
+from tilelang.engine.tpu_config import TPURuntimeConfig, TPUTargetSpec
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.ppl_layout import resolve_ppl_layout
 from tilelang.jit.adapter.wrapper import TLWrapper
+
+
+def _tpu_target(chip="sg2260e", programming_model="rv"):
+    return (
+        f"tpu -mcpu={chip} "
+        f"-tpu-programming-model={programming_model}"
+    )
 
 
 @T.prim_func
@@ -69,25 +76,25 @@ def test_rvt_frontend_emits_vendor_extern_calls():
 def test_rvt_lowering_keeps_explicit_vendor_calls():
     artifact = tilelang.lower(
         _rvt_codegen_primfunc,
-        target="tpu",
-        chip="sg2260e",
-        device_mode="rv",
+        target=_tpu_target("sg2260e", "rv"),
         runtime_mode="cmodel",
     )
+    assert artifact.tpu_target == TPUTargetSpec("sg2260e", "rv")
+    assert artifact.tpu_runtime == TPURuntimeConfig("cmodel")
     source = artifact.kernel_source
     assert '#ifndef TILELANG_TPU_RV' in source
-    assert '#error "RVT externs require TPU device_mode=rv"' in source
+    assert '#error "RVT externs require -tpu-programming-model=rv"' in source
     assert '#include "rvt_api.h"' in source
     assert "rvt_kernel_start()" in source
     assert "rvt_fadd((uint64_t)10, (uint64_t)8, (uint64_t)9)" in source
     assert "rvt_sync_all()" in source
 
-    with pytest.raises(ValueError, match="device_mode='tpukernel'.*rvt_fadd"):
+    with pytest.raises(
+            ValueError,
+            match=r"programming.model.*tpukernel.*rvt_fadd"):
         tilelang.lower(
             _rvt_codegen_primfunc,
-            target="tpu",
-            chip="sg2260e",
-            device_mode="tpukernel",
+            target=_tpu_target("sg2260e", "tpukernel"),
             runtime_mode="cmodel",
         )
 
@@ -101,9 +108,7 @@ def test_tpu_codegen_rejects_a_multifunction_runtime_module():
     with pytest.raises(tvm.error.TVMError, match="exactly one PrimFunc"):
         tilelang.lower(
             module,
-            target="tpu",
-            chip="sg2260e",
-            device_mode="rv",
+            target=_tpu_target("sg2260e", "rv"),
             runtime_mode="cmodel",
         )
 
@@ -111,14 +116,13 @@ def test_tpu_codegen_rejects_a_multifunction_runtime_module():
 def test_tpukernel_externs_have_a_separate_programming_model_fence():
     source = tilelang.lower(
         _tpukernel_fill_primfunc,
-        target="tpu -mcpu=sg2260e",
-        device_mode="tpukernel",
+        target=_tpu_target("sg2260e", "tpukernel"),
         runtime_mode="cmodel",
     ).kernel_source
 
     assert "/* TileLang TPU target: sg2260e, programming model: tpukernel */" in source
     assert '#ifndef TILELANG_TPU_TPUKERNEL' in source
-    assert '#error "TPU-Kernel externs require TPU device_mode=tpukernel"' in source
+    assert '#error "TPU-Kernel externs require -tpu-programming-model=tpukernel"' in source
 
 
 @pytest.mark.parametrize("extern_name", [
@@ -126,27 +130,32 @@ def test_tpukernel_externs_have_a_separate_programming_model_fence():
     "tpu_sdma_test_only",
     "tpu_sync_all_bdc",
 ])
-def test_raw_tpukernel_extern_cannot_bypass_the_rv_model_fence(extern_name):
+@pytest.mark.parametrize("programming_model", ["tpukernel", "rv"])
+def test_raw_tpukernel_extern_is_not_a_supported_tir_abi(
+        extern_name, programming_model):
     raw_tpukernel = tvm.tir.PrimFunc(
         [],
         tvm.tir.Evaluate(tvm.tir.call_extern("handle", extern_name)),
     )
     module = tvm.IRModule({"raw_tpukernel": raw_tpukernel})
 
-    with pytest.raises(ValueError, match=f"device_mode='rv'.*{extern_name}"):
+    with pytest.raises(
+            ValueError,
+            match=rf"Raw tpu_\* call_extern.*{extern_name}"):
         tilelang.lower(
             module,
-            target="tpu -mcpu=sg2260e",
-            device_mode="rv",
+            target=_tpu_target("sg2260e", programming_model),
             runtime_mode="cmodel",
         )
 
 
 @pytest.mark.parametrize("extern_name,programming_model", [
+    ("tpu_sdma_test_only", "tpukernel"),
     ("tpu_sdma_test_only", "rv"),
     ("rvt_fadd", "tpukernel"),
 ])
-def test_native_codegen_fences_direct_ffi_externs(extern_name, programming_model):
+def test_native_codegen_fences_contractless_direct_ffi_externs(
+        extern_name, programming_model):
     """The native target guard must survive callers that bypass lower()."""
     raw_extern = tvm.tir.PrimFunc(
         [],
@@ -179,21 +188,21 @@ def test_native_codegen_rejects_an_unsupported_chip_model_pair():
         codegen(tvm.IRModule({"bm_rv_is_invalid": rvt_extern}), target)
 
 
-def test_native_codegen_rejects_an_unknown_chip_like_legacy_model():
+def test_native_codegen_ignores_workload_model_metadata_for_chip_selection():
     raw_extern = tvm.tir.PrimFunc(
         [],
-        tvm.tir.Evaluate(tvm.tir.call_extern("handle", "tpu_sync_all_bdc")),
-    ).with_attr("global_symbol", "unknown_legacy_model")
+        tvm.tir.Evaluate(tvm.tir.call_extern("handle", "rvt_sync_all")),
+    ).with_attr("global_symbol", "workload_model_metadata")
     target = tvm.target.Target({
         "kind": "tpu",
         "mcpu": "sg2260e",
-        "model": "SG2260ERV",
-        "tpu-programming-model": "tpukernel",
+        "model": "matmul_smoke",
+        "tpu-programming-model": "rv",
     })
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
-    with pytest.raises(tvm.error.TVMError, match="legacy target model"):
-        codegen(tvm.IRModule({"unknown_legacy_model": raw_extern}), target)
+    source = codegen(tvm.IRModule({"workload_model_metadata": raw_extern}), target)
+    assert "TileLang TPU target: sg2260e, programming model: rv" in source
 
 
 def test_local_sg2260e_ppl_rvt_header_if_sdk_is_configured():
@@ -205,14 +214,16 @@ def test_local_sg2260e_ppl_rvt_header_if_sdk_is_configured():
     assert layout.require_rvt_api().name == "rvt_api.h"
 
     generator = LibraryGenerator(
-        tvm.target.Target("tpu"),
-        tpu_config=TPUCompileConfig(
-            chip="sg2260e", device_mode="rv", runtime_mode="cmodel"),
+        tvm.target.Target(_tpu_target("sg2260e", "rv")),
+        tpu_target=TPUTargetSpec("sg2260e", "rv"),
+        tpu_runtime=TPURuntimeConfig("cmodel"),
     )
     try:
-        definitions, _ = generator._ppl_compile_flags(layout, ".", "rv")
+        definitions, _ = generator._ppl_compile_flags(
+            layout, ".", "rv", "cmodel")
         assert "-DTILELANG_TPU_RV" in definitions
-        tpukernel_definitions, _ = generator._ppl_compile_flags(layout, ".", "tpukernel")
+        tpukernel_definitions, _ = generator._ppl_compile_flags(
+            layout, ".", "tpukernel", "cmodel")
         assert "-DTILELANG_TPU_TPUKERNEL" in tpukernel_definitions
     finally:
         generator.remove_lib()
@@ -223,19 +234,19 @@ def test_rvt_cmodel_compile_is_private_if_sdk_is_configured():
     if not os.environ.get("PPL_PROJECT_ROOT"):
         pytest.skip("PPL_PROJECT_ROOT is not configured")
 
-    config = TPUCompileConfig(
-        chip="sg2260e", device_mode="rv", runtime_mode="cmodel")
+    target_spec = TPUTargetSpec("sg2260e", "rv")
+    runtime_config = TPURuntimeConfig("cmodel")
+    target = tvm.target.Target(_tpu_target("sg2260e", "rv"))
     artifact = tilelang.lower(
         _rvt_codegen_primfunc,
-        target="tpu",
-        chip=config.chip,
-        device_mode=config.device_mode,
-        runtime_mode=config.runtime_mode,
+        target=target,
+        runtime_mode=runtime_config.runtime_mode,
     )
-    generator = LibraryGenerator(tvm.target.Target("tpu"), tpu_config=config)
+    generator = LibraryGenerator(
+        target, tpu_target=target_spec, tpu_runtime=runtime_config)
     try:
         wrapper = TLWrapper(
-            tvm.target.Target("tpu"), tpu_workspace_dir=generator.tpu_workspace_dir)
+            target, tpu_workspace_dir=generator.tpu_workspace_dir)
         wrapper.assign_optimized_module(tvm.IRModule({"rvt_codegen": _rvt_codegen_primfunc}))
         wrapper.assign_host_module(artifact.host_mod)
         wrapper.assign_device_module(artifact.device_mod)
@@ -263,16 +274,16 @@ def test_tpukernel_pcie_compile_is_private_if_sdk_is_configured():
     if not os.environ.get("PPL_PROJECT_ROOT"):
         pytest.skip("PPL_PROJECT_ROOT is not configured")
 
-    config = TPUCompileConfig(
-        chip="sg2260e", device_mode="tpukernel", runtime_mode="pcie")
+    target_spec = TPUTargetSpec("sg2260e", "tpukernel")
+    runtime_config = TPURuntimeConfig("pcie")
+    target = tvm.target.Target(_tpu_target("sg2260e", "tpukernel"))
     artifact = tilelang.lower(
         _tpukernel_fill_primfunc,
-        target="tpu -mcpu=sg2260e",
-        device_mode=config.device_mode,
-        runtime_mode=config.runtime_mode,
+        target=target,
+        runtime_mode=runtime_config.runtime_mode,
     )
     generator = LibraryGenerator(
-        tvm.target.Target("tpu -mcpu=sg2260e"), tpu_config=config)
+        target, tpu_target=target_spec, tpu_runtime=runtime_config)
     try:
         wrapper = TLWrapper(
             generator.target, tpu_workspace_dir=generator.tpu_workspace_dir)
@@ -288,7 +299,7 @@ def test_tpukernel_pcie_compile_is_private_if_sdk_is_configured():
         assert (workspace / "main.so").is_file()
         source = (workspace / "kernel.c").read_text(encoding="utf-8")
         assert "TileLang TPU target: sg2260e" in source
-        assert "TPU-Kernel externs require TPU device_mode=tpukernel" in source
+        assert "TPU-Kernel externs require -tpu-programming-model=tpukernel" in source
         header = (workspace / "kernel.h").read_text(encoding="utf-8")
         assert "__bm1690__" not in header
         assert "TPU chip macro is required" in header
@@ -296,7 +307,7 @@ def test_tpukernel_pcie_compile_is_private_if_sdk_is_configured():
         assert "tpudnnHandleFromStream" in main_source
         assert "tpudnnEnableProfile" in main_source
         assert "tpudnnDisableProfile" in main_source
-        assert b"libtpudnn.so" in (workspace / "main.so").read_bytes()
+        assert b"libtpudnn.so" not in (workspace / "main.so").read_bytes()
         assert b"libcdm_daemon_emulator.so" not in (
             workspace / "main.so").read_bytes()
     finally:
@@ -308,19 +319,19 @@ def test_rvt_pcie_compile_is_private_without_loading_if_sdk_is_configured():
     if not os.environ.get("PPL_PROJECT_ROOT"):
         pytest.skip("PPL_PROJECT_ROOT is not configured")
 
-    config = TPUCompileConfig(
-        chip="sg2260e", device_mode="rv", runtime_mode="pcie")
+    target_spec = TPUTargetSpec("sg2260e", "rv")
+    runtime_config = TPURuntimeConfig("pcie")
+    target = tvm.target.Target(_tpu_target("sg2260e", "rv"))
     artifact = tilelang.lower(
         _rvt_codegen_primfunc,
-        target="tpu",
-        chip=config.chip,
-        device_mode=config.device_mode,
-        runtime_mode=config.runtime_mode,
+        target=target,
+        runtime_mode=runtime_config.runtime_mode,
     )
-    generator = LibraryGenerator(tvm.target.Target("tpu"), tpu_config=config)
+    generator = LibraryGenerator(
+        target, tpu_target=target_spec, tpu_runtime=runtime_config)
     try:
         wrapper = TLWrapper(
-            tvm.target.Target("tpu"), tpu_workspace_dir=generator.tpu_workspace_dir)
+            target, tpu_workspace_dir=generator.tpu_workspace_dir)
         wrapper.assign_optimized_module(tvm.IRModule({"rvt_codegen": _rvt_codegen_primfunc}))
         wrapper.assign_host_module(artifact.host_mod)
         wrapper.assign_device_module(artifact.device_mod)
@@ -333,9 +344,9 @@ def test_rvt_pcie_compile_is_private_without_loading_if_sdk_is_configured():
         assert kernel_path.is_file() and main_path.is_file()
         assert b"rvt_fadd" in (workspace / "kernel.c").read_bytes()
         assert str(kernel_path).encode() in main_path.read_bytes()
-        assert b"tpudnnEnableProfile" in main_path.read_bytes()
-        assert b"tpudnnDisableProfile" in main_path.read_bytes()
-        assert b"libtpudnn.so" in main_path.read_bytes()
+        assert b"tpudnnEnableProfile" not in main_path.read_bytes()
+        assert b"tpudnnDisableProfile" not in main_path.read_bytes()
+        assert b"libtpudnn.so" not in main_path.read_bytes()
         assert b"libcdm_daemon_emulator.so" not in main_path.read_bytes()
     finally:
         generator.remove_lib()
