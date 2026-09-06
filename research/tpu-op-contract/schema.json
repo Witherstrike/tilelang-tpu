@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tilelang.local/schemas/tpu-op-contract/v1.schema.json",
+  "$id": "https://tilelang.local/schemas/tpu-op-contract/v1.2.schema.json",
   "title": "TileLang TPU operation capability contract",
   "description": "Machine-readable operation semantics and evidence-scoped capability results for TileLang TPU targets.",
   "type": "object",
@@ -10,6 +10,7 @@
     "schema_version",
     "contract_id",
     "reviewed_at",
+    "validated_source_revision",
     "scope",
     "invariants",
     "vocabulary",
@@ -24,13 +25,17 @@
       "const": "./schema.json"
     },
     "schema_version": {
-      "const": "1.1.0"
+      "const": "1.2.0"
     },
     "contract_id": {
       "$ref": "#/$defs/id"
     },
     "reviewed_at": {
       "$ref": "#/$defs/timestamp"
+    },
+    "validated_source_revision": {
+      "$ref": "#/$defs/gitRevision",
+      "description": "Clean tracked source revision against which current passed numerical stages were recorded."
     },
     "scope": {
       "type": "object",
@@ -153,6 +158,10 @@
     "timestamp": {
       "type": "string",
       "format": "date-time"
+    },
+    "gitRevision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
     },
     "nonEmptyStringMap": {
       "type": "object",
@@ -600,9 +609,89 @@
         "time_precision": {
           "enum": ["second", "minute", "hour", "day"]
         },
+        "source_revision": {
+          "$ref": "#/$defs/gitRevision",
+          "description": "Tracked Git revision reported or recorded for this evidence run."
+        },
+        "identity_source": {
+          "enum": ["runner_recorded", "operator_recorded"],
+          "description": "Whether source_revision came from the runner itself or an external experiment record."
+        },
+        "runtime_expectation": {
+          "$ref": "#/$defs/runtimeExpectation",
+          "description": "Machine-checkable assertions applied when the ignored runtime report is available locally."
+        },
         "summary": {
           "type": "string",
           "minLength": 1
+        }
+      },
+      "dependentRequired": {
+        "source_revision": ["identity_source"],
+        "identity_source": ["source_revision"]
+      }
+    },
+    "runtimeExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_mode",
+        "complete",
+        "case_count",
+        "all_cases_passed",
+        "claim_targets",
+        "capability_ids",
+        "target_case_counts"
+      ],
+      "properties": {
+        "runtime_mode": {
+          "enum": ["cmodel", "pcie"]
+        },
+        "complete": {
+          "const": true
+        },
+        "case_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "all_cases_passed": {
+          "const": true
+        },
+        "claim_targets": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "capability_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "target_case_counts": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "#/$defs/id"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required_case_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*/[A-Za-z0-9._-]+$"
+          }
         }
       }
     },
@@ -622,7 +711,7 @@
       "required": ["status", "evidence_ids", "scope", "reason"],
       "properties": {
         "status": {
-          "enum": ["passed", "failed", "unverified", "not_applicable"]
+          "enum": ["passed", "historical_passed", "failed", "unverified", "not_applicable"]
         },
         "evidence_ids": {
           "$ref": "#/$defs/evidenceIds"
@@ -641,7 +730,7 @@
           "if": {
             "properties": {
               "status": {
-                "enum": ["passed", "failed"]
+                "enum": ["passed", "historical_passed", "failed"]
               }
             }
           },
@@ -650,6 +739,20 @@
               "evidence_ids": {
                 "minItems": 1
               }
+            }
+          }
+        }
+      ]
+    },
+    "currentStageResult": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/stageResult"
+        },
+        {
+          "properties": {
+            "status": {
+              "enum": ["passed", "failed", "unverified", "not_applicable"]
             }
           }
         }
@@ -666,15 +769,15 @@
       ],
       "properties": {
         "declared": {
-          "$ref": "#/$defs/stageResult",
+          "$ref": "#/$defs/currentStageResult",
           "description": "Target-independent reachability through the current public TileLang frontend. The status must be identical across target_results for one capability."
         },
         "codegen_passed": {
-          "$ref": "#/$defs/stageResult",
+          "$ref": "#/$defs/currentStageResult",
           "description": "Evidence that the exact selector passed target-specific lowering/source emission. Device compilation, load, and execution require explicit evidence in this stage or a later numerical stage."
         },
         "cmodel_numeric_passed": {
-          "$ref": "#/$defs/stageResult",
+          "$ref": "#/$defs/currentStageResult",
           "description": "Numerical evidence from the exact chip CModel and stated oracle scope."
         },
         "pcie_numeric_passed": {
@@ -682,7 +785,7 @@
           "description": "Numerical evidence from a real PCIe-attached chip; never inferred from CModel."
         },
         "sdk_declared": {
-          "$ref": "#/$defs/stageResult",
+          "$ref": "#/$defs/currentStageResult",
           "description": "Declaration-only SDK/manual evidence that cannot promote any TileLang stage."
         }
       }

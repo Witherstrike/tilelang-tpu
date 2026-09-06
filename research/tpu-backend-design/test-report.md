@@ -2,7 +2,7 @@
 
 ## 1. 范围与判定
 
-本报告汇总 2026-09-04 至 2026-09-07 的已保存实验与 source-only 回归。每个数值 case 都在独立进程中 fresh-compile、加载、单次执行并与 PyTorch/精确 oracle 比较；矩阵采用首错停止。CModel 和 PCIe 是独立证据层，未执行的层级保持 `unverified`。当前数值基线绑定到实现提交 `1a7ca50`；之后的文档或 source-only 整理不会被冒充为新的数值证据。
+本报告汇总 2026-09-04 至 2026-09-07 的已保存实验与 source-only 回归。每个数值 case 都在独立进程中 fresh-compile、加载、单次执行并与 PyTorch/精确 oracle 比较；矩阵采用首错停止。CModel 和 PCIe 是独立证据层，未执行的层级保持 `unverified`。当前 CModel 数值基线绑定到实现提交 `596a7363a8054d5290b69bfd6f8fef0c48dad83d`；板端结果按其实际实验日期与提交层级单独陈述，不从历史结果外推到当前提交。
 
 `research/artifacts/**` 已由 Git 忽略。下文只使用仓库相对路径引用实验结果；机器可读状态以 `research/tpu-op-contract/contract.json` 为准。
 
@@ -10,26 +10,32 @@
 
 | 日期 | runtime | target | 结果 | 结论 |
 | --- | --- | --- | ---: | --- |
-| 2026-09-05 | CModel | `1a7ca50`：SG2260E/TPU-Kernel | 140/140 | 精确基线重跑的全部适用 case 通过；topk 按芯片能力未调度 |
-| 2026-09-05 | CModel | `1a7ca50`：BM1690/TPU-Kernel | 146/146 | 精确基线重跑的共同矩阵与 6 个 K-sized、稳定重复键 topk case 全部通过 |
-| 2026-09-05 | CModel | `1a7ca50`：两芯片/TPU-Kernel FP8 | 76/76 | 两芯片 × 两格式 × 19 个公开 case 全部通过，每例保留 CModel raw 命令 trace |
+| 2026-09-07 | CModel | `596a736`：SG2260E/TPU-Kernel | 141/141 | region ABI 下全部适用 case 通过；`(2,3,17)` FP32 rank-3 copy 的 102 个元素精确；topk 按芯片能力未调度 |
+| 2026-09-07 | CModel | `596a736`：BM1690/TPU-Kernel | 147/147 | 与 SG 共同的 141 项及 6 个 K-sized、稳定重复键 topk 全部通过 |
+| 2026-09-07 | CModel | `596a736`：两芯片/TPU-Kernel FP8 | 76/76 | 两芯片 × 两格式 × 19 个公开 case 全部通过，每例保留 CModel raw 命令 trace |
+| 2026-09-07 | CModel profiling | `596a736`：三组合法 target 的核心矩阵 | 27/27 | 每组 9 项：四则、GEMM、FP16/FP32 local-roundtrip 与 S2S；SG2260E/RV 为 9/9；全部收集 raw，CModel 无 duration |
+| 2026-09-07 | CModel profiling | `50d8c77`：SG2260E/TPU-Kernel matmul | 1/1 | 收集 24 个 raw trace 文件、78 条 raw 命令；CModel trace 没有 duration，`timed=0` |
 | 2026-09-05 | CModel | 两芯片/通用 rsqrt | 6/6 | FP16/BF16/FP32 均通过 |
 | 2026-09-05 | CModel | 历史 FP8 direct `_C` 非法探针 | 0/2 | 两次 exit 139 已定位为参数违反 dtype-size predicate，不是硬件负向结果 |
-| 2026-09-07 | source-only | TPU descriptor contract | 32/32 | local scope、dim4、region ABI、copy/descriptor 所有权、访问掩码和边界；descriptor 等价 alias 允许，非等价 alias fail-closed |
-| 2026-09-07 | source-only | 全部 TPU/PPL 非硬件回归 | 257 passed，4 skipped | skipped 均为需显式 opt-in 的真实 CModel/PCIe profiling worker |
-| 2026-09-07 | compile/link-only | PPL 1.7 私有 CModel/PCIe artifact | 8/8 | 两编程模型完成真实 PPL 编译；PCIe 只链接，不加载板卡 |
-| 2026-09-05 | PCIe | SG2260E/TPU-Kernel | 140/140 | core 53/53、extended 15/15、reductions 72/72；无 timeout、retry 或 device fault |
-| 2026-09-05 | PCIe profiling | SG2260E/TPU-Kernel matmul | 1 次 launch | 数值 dispatch 成功，并采集一个含五个 profile 文件的 raw 目录；既有 trace 后续在隔离 decoder 环境离线得到 36 条有效事件。会话内缺 decoder，故原始矩阵 summary 为 `complete=false` |
-| 2026-09-04 | PCIe | SG2260E/RV | 5/5 | FP32 四则与 FP16 GEMM 数值通过；只证明该核心竖切 |
+| 2026-09-07 | source-only | TPU descriptor + frontend contract | 32/32 + 40/40 | descriptor 边界与 frontend alias/region 约束分别验证，非等价 alias fail-closed |
+| 2026-09-07 | source-only | 全部 TPU/PPL 非硬件回归 | 318 passed，4 skipped | skipped 均为需显式 opt-in 的真实 CModel/PCIe profiling worker；默认测试不访问板卡 |
+| 2026-09-07 | compile/link/header-only | PPL 1.7 私有 CModel/PCIe artifact | 8/8 | 7 项真实 compile/link + 1 项 SDK header/flag 检查；PCIe 只链接，不加载板卡 |
+| 2026-09-05 | 历史 PCIe | SG2260E/TPU-Kernel | 140/140 | core 53/53、extended 15/15、reductions 72/72；仅为旧实现基线的回归范围，不授权当前提交上板 |
+| 2026-09-05 | 历史 PCIe profiling | SG2260E/TPU-Kernel matmul | 1 次 launch | 数值 dispatch 成功，并采集一个含五个 profile 文件的 raw 目录；既有 trace 后续在隔离 decoder 环境离线得到 36 条有效事件。会话内缺 decoder，故原始矩阵 summary 为 `complete=false` |
+| 2026-09-04 | 历史 PCIe | SG2260E/RV | 5/5 | FP32 四则与 FP16 GEMM 数值通过；仅为旧实现核心竖切，不授权当前提交上板 |
+| 2026-09-07 | PCIe preflight | SG2260E | 跳过 | 最近一次有界 `tpu-smi --noloop --json_format` 正常退出但报告 `status=Fault`、`tpu_util=100%`；按 fail-stop 规则未启动任何当前提交板端算子 |
 
 证据摘要：
 
-- `research/artifacts/2026-09-05/tpukernel-cmodel-head-1a7ca50/summary.json`
+- `research/artifacts/2026-09-07/tpukernel-cmodel-596a736/summary.json`
+- `research/artifacts/2026-09-07/core-cmodel-596a736/summary.json`
 - `research/artifacts/2026-09-05/tpukernel-integer-copy-cmodel/summary.json`
 - `research/artifacts/2026-09-05/tpukernel-reduce-w63-w65-cmodel/summary.json`
 - `research/artifacts/2026-09-05/tpukernel-topk-tail-semantics-cmodel/summary.json`
 - `research/artifacts/2026-09-05/tpukernel-topk-stable-ties-cmodel/summary.json`
-- `research/artifacts/2026-09-05/fp8-cmodel-head-1a7ca50/summary.json`
+- `research/artifacts/2026-09-07/fp8-cmodel-596a736/summary.json`
+- `research/artifacts/2026-09-07/tpukernel-cmodel-profile-50d8c77/summary.json`
+- `research/artifacts/2026-09-07/pcie-preflight-region-abi-50d8c77/summary.json`
 - `research/artifacts/2026-09-05/fp8-gemm-nt-accumulate-abi-cmodel/summary.json`
 - `research/artifacts/2026-09-05/fp8-scalar-ppl-probe/summary.json`
 - `research/artifacts/2026-09-05/tpukernel-rsqrt-generic-cmodel/summary.json`
@@ -48,7 +54,7 @@
 
 | 算子族 | 每芯片 case 数 | 选择范围 |
 | --- | ---: | --- |
-| copy/cast | 22 | 三种浮点同 dtype 的 local roundtrip + S2S；四个 FP32 相关本地 cast；六种整数各自 local roundtrip + S2S |
+| copy/cast | 23 | 三种浮点同 dtype 的 local roundtrip + S2S；一个 FP32 rank-3 local roundtrip；四个 FP32 相关本地 cast；六种整数各自 local roundtrip + S2S |
 | fill | 3 | FP16/BF16/FP32，值 1.25 |
 | GEMM | 6 | FP16/BF16 × NN overwrite、NN accumulate、NT overwrite |
 | tensor arithmetic | 16 | add/sub/mul/div × 三种浮点 dense；每个 op 增加 FP32 W broadcast |
@@ -59,13 +65,13 @@
 | rope/gather | 6 | 两个算子 × 三种浮点 |
 | topk | BM 6、SG 0 | FP32/INT32/UINT32 × 升序/降序，输出 extent=K |
 
-共同部分合计 140 个 case；BM1690 加 6 个 topk，因此为 146。
+共同部分合计 141 个 case；BM1690 加 6 个 topk，因此为 147。
 
 ### 3.2 精确数值范围
 
 | 能力 | shape/输入 | oracle 与容差 |
 | --- | --- | --- |
-| copy/cast/fill | `(4,32)` | 浮点与六种整数 copy、cast、fill 均按目标 dtype 精确比较 |
+| copy/cast/fill | 通常为 `(4,32)`；另有 FP32 copy `(2,3,17)` | 浮点与六种整数 copy、cast、fill 均按目标 dtype 精确比较；rank-3 copy 的 102 个元素在两芯片均零误差 |
 | tensor add/sub/mul | `lhs/out=(4,32)`；dense rhs 同形，broadcast rhs=`(4,1)` | FP32 `1e-5`；FP16 `5e-3`；BF16 `3e-2` |
 | tensor div | 同上，分母为严格正值 | FP32 `1e-5`；FP16 `1e-2`；BF16 `6e-2` |
 | scalar add/mul | `(4,32)`；常量 -0.25/0.75 | 对应基础 dtype 容差 |
@@ -78,11 +84,11 @@
 | rope | `(4,32)` | 对应基础 dtype 容差 |
 | BM topk | `src=(257,)`、`dst_data=dst_idx=(11,)`，输入含重复排序键 | 六种 dtype/direction 组合的 K 个 value/index 精确且相同值保持自然索引递增；独立 sentinel 实验证实 `[K,length)` 不写 |
 
-精确基线 summary 的 `complete=true`、`status=passed`，`scheduled_case_count=completed_case_count=passed_case_count=286`，`failed_case_count=0`。其中 SG2260E 140 项、BM1690 146 项。它证明的是所列 selector；不证明动态 shape、未列 broadcast、alias、NaN/Inf、零除或多核扩展。
+精确基线 summary 的 `complete=true`、`status=passed`，`scheduled_case_count=completed_case_count=passed_case_count=288`，`failed_case_count=0`。其中 SG2260E 141 项、BM1690 147 项。它证明的是所列 selector；不证明动态 shape、未列 broadcast、运行时存储重叠、NaN/Inf、零除或多核扩展。
 
 ### 3.3 编译期 descriptor 边界
 
-`testing/python/jit/test_tpu_codegen_descriptor_contract.py` 的 32 项 source-only 正负例全部通过，确认：四种规范 local scope 都进入 copy 与 whole-buffer semantic descriptor 路径，其他 scope fail-closed；`dim4` 单维接受 65535、拒绝 0 和 65536；copy 的两侧 rank 独立归一化后比较；exp/sigmoid 拒绝 `H*W=65536`；reduction 拒绝 EU 对齐后宽度变为 65536 的派生 descriptor；全局描述符按 Var 身份而非可重复的 Buffer 名称关联；region 的 handle dtype、BufferLoad marker、access mask、rank、extent、bounds 与 local C-axis 起点均被检查。`T.view/T.reshape/T.Tensor` 的 descriptor 等价 presentation alias 可作为唯一表示；改变 rank/shape/dtype/scope，或形成第二个 allocation owner 的 alias 会被拒绝。该组测试证明编译门禁，不替代任何 CModel/PCIe 数值证据。
+`testing/python/jit/test_tpu_codegen_descriptor_contract.py` 的 32 项 source-only 正负例全部通过，确认：四种规范 local scope 都进入 copy 与 whole-buffer semantic descriptor 路径，其他 scope fail-closed；`dim4` 单维接受 65535、拒绝 0 和 65536；copy 两侧 rank 独立归一化后比较；exp/sigmoid 与 reduction 的派生 descriptor 边界被检查；全局描述符按 Var 身份而非可重复的 Buffer 名称关联。另有 `test_tpu_frontend_contract.py` 40/40，覆盖 region 的 handle dtype、BufferLoad marker、访问掩码、rank、extent、bounds、local C-axis 起点和 alias 规则。两组共同证明：`T.view/T.reshape/T.Tensor` 的 descriptor 等价 presentation alias 可作为同一表示，改变 rank/shape/dtype/scope、输出重叠或形成第二 allocation owner 的 alias 会 fail-closed。它们是编译门禁，不替代 CModel/PCIe 数值证据。
 
 ### 3.4 当前工作树的非硬件回归
 
@@ -94,7 +100,7 @@ pytest -q -rs testing/python/jit/test_ppl_layout.py \
   testing/python/transform/test_tilelang_transform_address_assign.py
 ```
 
-结果为 `257 passed, 4 skipped`；四个 skipped 均要求显式开启真实 profiling worker，普通单测没有静默访问 CModel 或板卡。另以 PPL 1.7 SDK 运行四条私有编译路径与 SG2260E 两编程模型的 PCIe core compile/link 参数，共 `8 passed`；PCIe 用例只生成并链接私有 artifact，没有加载设备。其中 NT accumulate 测试精确确认同一公开 `T.ppl_gemm(..., transpose_B=True, accumulate=True)` 在 TPU-Kernel target 的 codegen 失败，而在 SG2260E/RV target 生成 `rvt_fmm2a_nt`；direct semantic call 也不能绕过 FP32 C 约束。上述结果只提升 source/lowering/device-compile/link stage；现有 2026-09-05 CModel/PCIe 数字仍绑定 `1a7ca50`，不能据此视为当前工作树已重跑数值矩阵。
+结果为 `318 passed, 4 skipped`；四个 skipped 均要求显式开启真实 profiling worker，普通单测没有静默访问 CModel 或板卡。新增测试以 SIGKILL 外层数值矩阵 runner 的方式确认 parent-death supervisor 会清理 supervisor、worker 和普通后代，并确认 PCIe 默认验收“数值+非空合法 raw”、仅在显式 `--require-decoded-timing` 时强制有限、非负、区间有序且以 ns 为单位的 timing；机器契约的 schema、revision、target/capability 证据亲和性及闭集也有负向测试。定向 SDK 测试共 `8 passed`，其中 7 项真实 compile/link、1 项检查 SG2260E RV header/flags；PCIe 用例只生成并链接私有 artifact，没有加载设备。NT accumulate 测试还确认同一公开 `T.ppl_gemm(..., transpose_B=True, accumulate=True)` 在 TPU-Kernel target 的 codegen 失败，而在 SG2260E/RV target 生成 `rvt_fmm2a_nt`；direct semantic call 不能绕过 FP32 C 约束。实现提交 `596a736` 的正式 runner 又完成 288/288 TPU-Kernel、76/76 FP8 与三组核心 27/27；所有摘要均自记该 revision，且 `implementation_worktree_dirty=false`。PCIe 仍只采用历史证据。
 
 ## 4. FP8 结果
 
@@ -115,7 +121,7 @@ operation   = {
 
 FP8 copy/fill/arithmetic 使用 `(1,64)`；W broadcast 的 rhs 为 `(1,1)`。Gather 使用 `param=(17,32)`、UINT32 `index=(7,1)` 与 `output=(7,32)`，按选中 payload 的 encoded bytes 精确比较。RoPE 使用 `(4,32)`，按交错偶/奇 lane 的量化加法 oracle 比较。GEMM 使用 A=`(16,64)`、B=`(64,16)` 或 stored-B=`(16,64)`、C=`(16,16)` FP32；accumulate 从 C=1 开始。
 
-[canonical summary](../artifacts/2026-09-05/fp8-cmodel-head-1a7ca50/summary.json) 记录实现基线 `1a7ca50` 的 76/76，并为每例保留 CModel raw 命令 trace。较早的 40 项基础矩阵、S2S/broadcast、scalar/public NT、gather 和 RoPE 分组实验是同一公开集合的前置证据，不与最终结果相加；direct canonical `tl.tpu.gemm` NT accumulate 4/4 也仅用于早期 ABI 定位。
+[canonical summary](../artifacts/2026-09-07/fp8-cmodel-596a736/summary.json) 记录实现基线 `596a736` 的 76/76，并为每例保留 CModel raw 命令 trace。较早的 40 项基础矩阵、S2S/broadcast、scalar/public NT、gather 和 RoPE 分组实验是同一公开集合的前置证据，不与最终结果相加；direct canonical `tl.tpu.gemm` NT accumulate 4/4 也仅用于早期 ABI 定位。
 
 NT accumulate 的公开 helper 保留为 target-independent 语义，再由编程模型分流：TPU-Kernel 的 FP8 A/B + FP32 C 生成 `_R_trans(..., result_add=true)` 并匹配 `C + A @ B.T`；TPU-Kernel 的 FP16/BF16 因底层右转置 API 没有 `result_add` 而在 codegen 拒绝；SG2260E/RV 的 FP16/BF16 + FP32 C 已通过 `rvt_fmm2a_nt` 源码选择回归，但尚无 CModel/PCIe 数值结果。公开 helper 还允许基础浮点 overwrite 写入 FP32 C（NN/NT），该 selector 也尚未做精确源码与数值验证。
 
@@ -141,7 +147,7 @@ BM1690 CModel 的 FP32/INT32/UINT32 升序与降序均通过，公开 API 与 fi
 
 生产实现已经把该事实转为芯片能力 guard：SG2260E topk 在 codegen 失败，当前 CModel 与 PCIe 阶段为 `not_applicable`。不得为了“接口一致”在 SG2260E 上运行该原语。
 
-## 6. SG2260E PCIe 核心闭环
+## 6. 历史 SG2260E PCIe 核心闭环
 
 2026-09-05 的 TPU-Kernel final 使用与 CModel 相同的公开 case registry，在 SG2260E device 0 完成 140/140：
 
@@ -151,11 +157,13 @@ BM1690 CModel 的 FP32/INT32/UINT32 升序与降序均通过，公开 API 与 fi
 | extended | 15/15 | 三种基础浮点各自的 exp、sigmoid、rsqrt、gather、rope |
 | reductions | 72/72 | sum/max × 三种基础浮点 × 12 个 width，含 63/64/65 |
 
-三个 summary 均为 `complete=true`、`status=passed`、failed=0；监管器未记录 timeout、retry 或 device fault。这里的 140 项只提升契约中逐项列出的 SG2260E/TPU-Kernel `pcie_numeric_passed`，不提升 FP8、BM1690 或 RV 的相邻 selector。
+三个 summary 均为 `complete=true`、`status=passed`、failed=0；监管器未记录 timeout、retry 或 device fault。由于这些实验早于当前 region ABI 与安全监管修订，契约只把精确 selector 标记为 `historical_passed`：它们可确定上板回归范围，但不能满足当前提交的 PCIe 门禁，也不外推到 FP8、BM1690、RV 或未列 scope。
 
 profiling 与数值矩阵独立。受监管的 matmul profiling 硬件 dispatch 数值执行成功，并生成一个 `cdm_profile_data_dev0-0` raw 目录；其中包含 `cdmlib0_0.profile` 至 `cdmlib0_3.profile` 与 `global.profile` 五份文件。该会话内没有可用的 `bigTpuProfile/PerfAI`，所以 summary 按严格解析准则记录 `parser_status=unavailable`，不能伪装成完整 profiling pass。随后仅在临时隔离环境安装 `bigTpuProfile==0.3.5`，对既有 raw trace 离线解码，未再次下发板卡；规范化结果包含 36 个有效 ns 区间：BDC 16、GDMA 20，opcode 分布为 copy 4、MM2_NN 8、data_convert 4、tensorLd 16、tensorSt 4。生产框架有意不自动安装依赖，因此 recorder/raw 采集已验证，常规逐指令解码仍要求用户显式配置兼容 decoder。
 
 单次 recorder 事件用于审查指令映射和定位瓶颈，不构成无 recorder 开销、warmup/repeat 条件下的性能结论。
+
+2026-09-07 最近一次准备重跑板端时，PCIe 枚举、`/dev/sg-host-drv-0` 与 `sgcard` 驱动均存在。首次无参数 `tpu-smi` 因默认 `--loop` 持续运行，测试器 TERM 其完整进程组并确认无残留；随后带 10 秒硬上限的一次性 `--noloop --json_format` 在约 4 秒内正常退出，但报告 `status=Fault`、`tpu_util=100%`、`mem_usage=0MB`。因此未启动任何算子或 profiling launch。本节 140/140 与 RV 5/5 仍是历史板端证据；当前提交所有 PCIe stage 均没有 `passed`，只可能是 `historical_passed`、`unverified` 或 `not_applicable`。
 
 早期 PCIe GEMM 曾暴露 software-pipeline 数据依赖冒险；改为串行 K 循环后两种编程模型均通过。这也是当前 TPU pass pipeline 禁用 software-pipeline injection 的实验证据。
 
@@ -166,17 +174,19 @@ profiling 与数值矩阵独立。受监管的 matmul profiling 硬件 dispatch 
 1. 精确 selector 的 CModel 已通过；
 2. 板卡空闲且显式指定 device id；
 3. PCIe load/profiling 分别显式授权；
-4. 每个 case 在新的受控进程组内运行；
-5. supervisor 使用统一 deadline，超时执行 TERM→KILL→reap；
-6. 任一加载错误、runtime 错误、超时、数值不符或 trace 解析失败后，终止父进程组并跳过剩余 case；
+4. 每个 case 经 parent-death supervisor 在新的受控进程组内运行；
+5. supervisor 使用统一 deadline，超时执行 TERM→KILL→reap；外层 runner 被 SIGKILL 时也由 `PR_SET_PDEATHSIG` 清理 worker 与普通后代；
+6. 任一加载错误、runtime 错误、超时、数值不符，或缺少内含规范命名且全部非空 profile 文件的 raw trace 后，终止父进程组并跳过剩余 case；只有显式要求 decoded timing 时，解析缺失/失败才属于该次验收失败；
 7. 不在同一 runtime 实例盲目重试。
 
 ## 8. 尚待验证
 
 | 优先级 | 项目 | 原因 |
 | --- | --- | --- |
-| P0 | FP8 SG PCIe | 76/76 CModel 不能替代真实板端 FP8 执行；应按 copy/cast、arithmetic、GEMM、gather/rope 分批首错停止 |
-| P1 | BM1690 PCIe | 当前 BM1690 只有 146/146 CModel；板端 runtime、驱动和稳定性仍无证据 |
+| P0 | 当前 SG 板端重新授权 | 设备恢复健康后先跑 TPU-Kernel matmul canary，再跑 TPU-Kernel/RV 各 9 项核心矩阵；当前 PCIe `passed=0`，历史结果不能跳过这一步 |
+| P0 | 当前 TPU-Kernel 非 FP8 SG PCIe | 核心通过后按 core/extended/reductions 分批重跑现行 141 项适用范围，任一首错即停止 |
+| P1 | FP8 SG PCIe | 只有当前非 FP8 板端基线恢复后才按 copy/cast、arithmetic、GEMM、gather/rope 分批；76/76 CModel 不能替代真实板端 FP8 执行 |
+| P1 | BM1690 PCIe | 当前 BM1690 只有 147/147 CModel；板端 runtime、驱动和稳定性仍无证据 |
 | P1 | RV BF16、NT overwrite/accumulate 与基础浮点 FP32 overwrite | source path 存在或 frontend 已接受，但精确 RV CModel/PCIe 证据不足；其中 FP32 overwrite 连精确 source-emission 结果也未记录 |
 | P2 | 可部署的 profiling decoder | raw 采集已闭环，离线 36-event 解码只在隔离环境验证；若要求常规 timing，需要显式供应并锁定兼容 vendor decoder |
 | P2 | tail、异常值、alias 与更广 shape | 当前矩阵是静态、规则形状和受控输入域；TopK 写入 tail 已单独闭合，其他 op 仍需覆盖 |
