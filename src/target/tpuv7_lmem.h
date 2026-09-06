@@ -32,7 +32,8 @@ namespace tvm {
 namespace tl {
 // BM1690 and SG2260E use this common TPUv7 local-memory layout.  Chip-specific
 // differences (PPL SDK target, ISA capability, and physical core count) live
-// in the Python TPUChipSpec registry, not in this shared allocator geometry.
+// at the canonical Python/native target-capability boundaries, not in this
+// shared allocator geometry.
 namespace tpuv7 {
 
 constexpr int64_t kLaneNum = 64;
@@ -45,6 +46,18 @@ constexpr int64_t kTensorAlignBytes = 64;
 // geometry so address assignment and source emission cannot disagree.
 constexpr int64_t kDescriptorDimMax =
     static_cast<int64_t>(std::numeric_limits<uint16_t>::max());
+
+// PrimFunc attributes are string-keyed, so AddressAssign cannot attach an
+// address directly to a Var object.  Keep generated LMEM metadata in a
+// compiler-owned namespace: using the raw data-variable name could overwrite
+// standard attributes such as ``target`` or ``global_symbol``.
+constexpr const char *kAddressAttrPrefix = "tilelang.tpu.lmem.address.";
+
+inline std::string AddressAttrKey(const std::string &data_var_name) {
+  ICHECK(!data_var_name.empty())
+      << "TPUv7 local allocation data variable must have a non-empty name";
+  return std::string(kAddressAttrPrefix) + data_var_name;
+}
 
 inline bool IsLocalMemoryScope(const std::string &scope) {
   return scope == "shared" || scope == "shared.dyn" || scope == "local" ||
@@ -88,6 +101,20 @@ inline void ValidateDescriptorShape4(const std::vector<Integer> &shape4,
   }
 }
 
+template <typename Integer>
+inline int64_t DescriptorElementCount(const std::vector<Integer> &shape4,
+                                      const char *context) {
+  ValidateDescriptorShape4(shape4, context);
+  int64_t count = 1;
+  for (Integer extent : shape4) {
+    ICHECK_LE(static_cast<int64_t>(extent),
+              std::numeric_limits<int64_t>::max() / count)
+        << context << " element count overflows int64";
+    count *= static_cast<int64_t>(extent);
+  }
+  return count;
+}
+
 inline int64_t DTypeBytes(DataType dtype) {
   const int64_t bits = static_cast<int64_t>(dtype.bits()) * dtype.lanes();
   return std::max<int64_t>(1, DivUp(bits, 8));
@@ -96,7 +123,9 @@ inline int64_t DTypeBytes(DataType dtype) {
 inline std::vector<int64_t> NormalizeLocalShape(const Array<PrimExpr> &shape,
                                                 const char *context) {
   if (shape.empty()) {
-    return {1, 1, 1, 1};
+    LOG(FATAL) << context
+               << " unsupported local tensor rank: 0; TPU descriptors require "
+                  "rank 1 through 4";
   }
   if (shape.size() == 1) {
     return {1, 1, 1, GetIntImmValue(shape[0], context)};

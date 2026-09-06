@@ -91,18 +91,15 @@ void CodeGenTileLangTPU::EmitTPUKernelCopy(
   if (src_dtype != dst_dtype) {
     ICHECK(!src_is_global && !dst_is_global)
         << "TPU copy-and-convert currently requires two local tensors";
-    ICHECK(!((src_dtype == "DT_FP16" && dst_dtype == "DT_BFP16") ||
-             (src_dtype == "DT_BFP16" && dst_dtype == "DT_FP16")))
-        << "TPU-Kernel tpu_bdc_cast does not support direct FP16/BF16 "
-           "conversion";
-    const bool src_is_fp8 =
-        src_dtype == "DT_FP8E4M3" || src_dtype == "DT_FP8E5M2";
-    const bool dst_is_fp8 =
-        dst_dtype == "DT_FP8E4M3" || dst_dtype == "DT_FP8E5M2";
-    ICHECK(!(src_is_fp8 || dst_is_fp8) ||
-           (src_is_fp8 && dst_dtype == "DT_FP32") ||
-           (src_dtype == "DT_FP32" && dst_is_fp8))
-        << "TPU-Kernel FP8 copy-and-convert supports only FP32 <-> FP8";
+    auto is_valid_fp32_peer = [](const std::string &dtype) {
+      return dtype == "DT_FP16" || dtype == "DT_BFP16" ||
+             dtype == "DT_FP8E4M3" || dtype == "DT_FP8E5M2";
+    };
+    ICHECK((src_dtype == "DT_FP32" && is_valid_fp32_peer(dst_dtype)) ||
+           (dst_dtype == "DT_FP32" && is_valid_fp32_peer(src_dtype)))
+        << "TPU-Kernel copy-and-convert is limited to the validated FP32 <-> "
+           "{FP16, BF16, FP8E4M3, FP8E5M2} pairs; got "
+        << src_dtype << " -> " << dst_dtype;
     stream << "tpu_bdc_cast(" << dst << ".addr, " << src << ".addr, &" << dst
            << ".shape, (" << dst << ".default_stride ? NULL : &" << dst
            << ".stride), (" << src << ".default_stride ? NULL : &" << src
@@ -297,25 +294,16 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
                                              const std::string &operation) {
     ICHECK_EQ(op->args.size(), 4U)
         << semantic_name << " expects dst, src, and one floating literal";
-    const auto *dst_access = op->args[1].as<CallNode>();
-    const auto *src_access = op->args[2].as<CallNode>();
-    ICHECK(dst_access && src_access &&
-           dst_access->op.same_as(builtin::tvm_access_ptr()) &&
-           src_access->op.same_as(builtin::tvm_access_ptr()) &&
-           dst_access->args.size() >= 2U && src_access->args.size() >= 2U)
-        << semantic_name << " expects two buffer access_ptr operands";
-    const auto *dst_var = dst_access->args[1].as<VarNode>();
-    const auto *src_var = src_access->args[1].as<VarNode>();
-    ICHECK(dst_var && src_var && buffer_addrs_.count(dst_var) &&
-           buffer_addrs_.count(src_var))
+    auto dst_operand = ParseWholeBufferRegion(
+        op->args[1], semantic_name + " dst", 2);
+    auto src_operand = ParseWholeBufferRegion(
+        op->args[2], semantic_name + " src", 1);
+    ICHECK(dst_operand.is_local && src_operand.is_local)
         << semantic_name << " operands must reside in local memory";
-    const auto dst_it = var_idmap_.find(dst_var);
-    const auto src_it = var_idmap_.find(src_var);
-    ICHECK(dst_it != var_idmap_.end() && src_it != var_idmap_.end());
-    const std::string &dst = dst_it->second;
-    const std::string &src = src_it->second;
-    DataType dst_dtype = dst_access->args[0].as<CallNode>()->dtype;
-    DataType src_dtype = src_access->args[0].as<CallNode>()->dtype;
+    const std::string &dst = dst_operand.descriptor;
+    const std::string &src = src_operand.descriptor;
+    DataType dst_dtype = dst_operand.dtype;
+    DataType src_dtype = src_operand.dtype;
     ICHECK_EQ(dst_dtype, src_dtype)
         << semantic_name << " requires matching dst/src dtypes";
     ICHECK(dst_dtype == DataType::Float(16) ||
@@ -324,8 +312,9 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
            dst_dtype.is_e4m3_float8() || dst_dtype.is_e5m2_float8())
         << semantic_name << " supports only FP8, FP16, BF16, and FP32, got "
         << dst_dtype;
-    ICHECK(buffer_shape.count(dst) && buffer_shape.count(src) &&
-           buffer_shape[dst] == buffer_shape[src])
+    ICHECK_EQ(dst_operand.rank, src_operand.rank)
+        << semantic_name << " requires matching dst/src ranks";
+    ICHECK(dst_operand.shape4 == src_operand.shape4)
         << semantic_name << " requires matching dst/src shapes";
     const auto *value_node = op->args[3].as<FloatImmNode>();
     ICHECK(value_node)
@@ -342,47 +331,39 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
   } else if (op_name == "tl.tpukernel.exp") {
     ICHECK_EQ(op->args.size(), 5U)
         << op_name << " expects out, work0, work1, and coeff";
-    std::array<const CallNode *, 4> accesses{};
-    std::array<const VarNode *, 4> vars{};
+    std::array<SemanticTensorOperand, 4> operands{};
     std::array<std::string, 4> tensors{};
-    for (size_t i = 0; i < accesses.size(); ++i) {
-      accesses[i] = op->args[i + 1].as<CallNode>();
-      ICHECK(accesses[i] &&
-             accesses[i]->op.same_as(builtin::tvm_access_ptr()) &&
-             accesses[i]->args.size() >= 2U)
-          << op_name << " operand " << i << " must be a buffer access_ptr";
-      vars[i] = accesses[i]->args[1].as<VarNode>();
-      ICHECK(vars[i] && buffer_addrs_.count(vars[i]))
+    for (size_t i = 0; i < operands.size(); ++i) {
+      operands[i] = ParseWholeBufferRegion(
+          op->args[i + 1], op_name + " operand " + std::to_string(i), 3);
+      ICHECK(operands[i].is_local)
           << op_name << " operands must all reside in local memory";
-      auto tensor_it = var_idmap_.find(vars[i]);
-      ICHECK(tensor_it != var_idmap_.end());
-      tensors[i] = tensor_it->second;
+      tensors[i] = operands[i].descriptor;
     }
-    DataType dtype = accesses[0]->args[0].as<CallNode>()->dtype;
+    DataType dtype = operands[0].dtype;
     ICHECK(dtype == DataType::Float(16) || dtype == DataType::BFloat(16) ||
            dtype == DataType::Float(32))
         << op_name << " supports only FP16, BF16, and FP32, got " << dtype;
-    for (size_t i = 1; i < accesses.size(); ++i) {
-      ICHECK_EQ(accesses[i]->args[0].as<CallNode>()->dtype, dtype)
+    for (size_t i = 1; i < operands.size(); ++i) {
+      ICHECK_EQ(operands[i].dtype, dtype)
           << op_name << " requires matching operand dtypes";
     }
-    for (size_t i = 0; i < vars.size(); ++i) {
-      for (size_t j = i + 1; j < vars.size(); ++j) {
-        ICHECK(vars[i] != vars[j])
+    for (size_t i = 0; i < operands.size(); ++i) {
+      for (size_t j = i + 1; j < operands.size(); ++j) {
+        ICHECK(operands[i].data_var != operands[j].data_var)
             << op_name << " requires distinct storage for every operand";
       }
     }
-    ICHECK(buffer_shape4.count(tensors[0]) &&
-           buffer_shape4.count(tensors[1]) &&
-           buffer_shape4.count(tensors[2]) &&
-           buffer_shape4.count(tensors[3]) &&
-           buffer_shape4[tensors[0]] == buffer_shape4[tensors[1]] &&
-           buffer_shape4[tensors[0]] == buffer_shape4[tensors[2]])
+    const size_t payload_rank = operands[0].rank;
+    ICHECK_EQ(operands[1].rank, payload_rank);
+    ICHECK_EQ(operands[2].rank, payload_rank);
+    ICHECK_EQ(operands[3].rank, 2U)
+        << op_name << " coefficient buffer must be rank 2";
+    ICHECK(operands[0].shape4 == operands[1].shape4 &&
+           operands[0].shape4 == operands[2].shape4)
         << op_name << " requires out/work0/work1 to have matching shapes";
-    ValidateExpFamilyShape(buffer_shape4.at(tensors[0]), op_name);
-    ICHECK_EQ(buffer_shape[tensors[3]].size(), 2U);
-    ICHECK_EQ(buffer_shape[tensors[3]][0], 64);
-    ICHECK_EQ(buffer_shape[tensors[3]][1], 32)
+    ValidateExpFamilyShape(operands[0].shape4, op_name);
+    ICHECK(operands[3].shape4 == std::vector<int>({1, 64, 1, 32}))
         << op_name << " coefficient buffer must have shape (64, 32)";
     std::string dtype_name = TPUKernelDTypeName(dtype);
     this->PrintIndent();
@@ -396,22 +377,17 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
   } else if (op_name == "tl.tpukernel.sigmoid") {
     ICHECK_EQ(op->args.size(), 6U)
         << op_name << " expects dst, src, work0, work1, and coeff";
-    std::array<const CallNode *, 5> accesses{};
+    std::array<SemanticTensorOperand, 5> operands{};
     std::array<std::string, 5> tensors{};
     DataType dtype;
-    for (size_t i = 0; i < accesses.size(); ++i) {
-      accesses[i] = op->args[i + 1].as<CallNode>();
-      ICHECK(accesses[i] &&
-             accesses[i]->op.same_as(builtin::tvm_access_ptr()) &&
-             accesses[i]->args.size() >= 2U)
-          << op_name << " operand " << i << " must be a buffer access_ptr";
-      const auto *var = accesses[i]->args[1].as<VarNode>();
-      ICHECK(var && buffer_addrs_.count(var))
+    for (size_t i = 0; i < operands.size(); ++i) {
+      operands[i] = ParseWholeBufferRegion(
+          op->args[i + 1], op_name + " operand " + std::to_string(i),
+          i == 1 ? 1 : 3);
+      ICHECK(operands[i].is_local)
           << op_name << " operands must all reside in local memory";
-      auto tensor_it = var_idmap_.find(var);
-      ICHECK(tensor_it != var_idmap_.end());
-      tensors[i] = tensor_it->second;
-      DataType operand_dtype = accesses[i]->args[0].as<CallNode>()->dtype;
+      tensors[i] = operands[i].descriptor;
+      DataType operand_dtype = operands[i].dtype;
       if (i == 0) {
         dtype = operand_dtype;
         ICHECK(dtype == DataType::Float(16) ||
@@ -424,23 +400,25 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
             << op_name << " requires matching operand dtypes";
       }
     }
-    for (size_t i = 0; i < tensors.size(); ++i) {
-      for (size_t j = i + 1; j < tensors.size(); ++j) {
-        ICHECK_NE(tensors[i], tensors[j])
+    for (size_t i = 0; i < operands.size(); ++i) {
+      for (size_t j = i + 1; j < operands.size(); ++j) {
+        ICHECK_NE(operands[i].data_var, operands[j].data_var)
             << op_name << " requires distinct storage for every operand";
       }
     }
-    ICHECK(buffer_shape4.count(tensors[0]) &&
-           buffer_shape4.count(tensors[1]) &&
-           buffer_shape4.count(tensors[2]) &&
-           buffer_shape4.count(tensors[3]) &&
-           buffer_shape4.count(tensors[4]) &&
-           buffer_shape4[tensors[0]] == buffer_shape4[tensors[1]] &&
-           buffer_shape4[tensors[0]] == buffer_shape4[tensors[2]] &&
-           buffer_shape4[tensors[0]] == buffer_shape4[tensors[3]])
+    const size_t payload_rank = operands[0].rank;
+    for (size_t i = 1; i < 4; ++i) {
+      ICHECK_EQ(operands[i].rank, payload_rank)
+          << op_name << " requires matching payload ranks";
+    }
+    ICHECK_EQ(operands[4].rank, 2U)
+        << op_name << " coefficient buffer must be rank 2";
+    ICHECK(operands[0].shape4 == operands[1].shape4 &&
+           operands[0].shape4 == operands[2].shape4 &&
+           operands[0].shape4 == operands[3].shape4)
         << op_name << " requires dst/src/work0/work1 to have matching shapes";
-    ValidateExpFamilyShape(buffer_shape4.at(tensors[0]), op_name);
-    ICHECK(buffer_shape[tensors[4]] == std::vector<int>({64, 32}))
+    ValidateExpFamilyShape(operands[0].shape4, op_name);
+    ICHECK(operands[4].shape4 == std::vector<int>({1, 64, 1, 32}))
         << op_name << " coefficient buffer must have shape (64, 32)";
 
     const std::string &dst = tensors[0];
@@ -490,22 +468,27 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
   } else if (op_name == "tl.tpukernel.reduce_max") {
     ICHECK_EQ(op->args.size(), 7U)
         << op_name << " expects input, output, scratch, eu_num, align_w, and stride";
-    std::array<const CallNode *, 3> accesses{};
-    std::array<const VarNode *, 3> vars{};
-    for (size_t i = 0; i < accesses.size(); ++i) {
-      accesses[i] = op->args[i + 1].as<CallNode>();
-      ICHECK(accesses[i] &&
-             accesses[i]->op.same_as(builtin::tvm_access_ptr()) &&
-             accesses[i]->args.size() >= 2U)
-          << op_name << " operand " << i << " must be a buffer access_ptr";
-      vars[i] = accesses[i]->args[1].as<VarNode>();
-      ICHECK(vars[i] && buffer_addrs_.count(vars[i]))
+    std::array<SemanticTensorOperand, 3> operands{};
+    constexpr std::array<int, 3> kAccessMasks = {3, 2, 3};
+    for (size_t i = 0; i < operands.size(); ++i) {
+      operands[i] = ParseWholeBufferRegion(
+          op->args[i + 1], op_name + " operand " + std::to_string(i),
+          kAccessMasks[i]);
+      ICHECK(operands[i].is_local)
           << op_name << " operands must all reside in local memory";
     }
+    ICHECK(operands[0].data_var != operands[1].data_var &&
+           operands[0].data_var != operands[2].data_var &&
+           operands[1].data_var != operands[2].data_var)
+        << op_name << " requires distinct input, output, and scratch storage";
+    for (const auto &operand : operands) {
+      ICHECK_EQ(operand.rank, 2U)
+          << op_name << " requires rank-2 input, output, and scratch tensors";
+    }
     // Resolve the input, output, and scratch descriptors.
-    auto input_tensor = var_idmap_.at(vars[0]);
-    auto output_tensor = var_idmap_.at(vars[1]);
-    auto tmp_tensor = var_idmap_.at(vars[2]);
+    const auto &input_tensor = operands[0].descriptor;
+    const auto &output_tensor = operands[1].descriptor;
+    const auto &tmp_tensor = operands[2].descriptor;
     const auto *eu_imm = op->args[4].as<IntImmNode>();
     const auto *align_imm = op->args[5].as<IntImmNode>();
     const auto *stride_imm = op->args[6].as<IntImmNode>();
@@ -515,7 +498,7 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     int64_t align_w = align_imm->value;
     int64_t stride_n = stride_imm->value;
     // Select the floating-point format used by the pool sequence.
-    auto dtype_ = accesses[0]->args[0].as<CallNode>()->dtype;
+    auto dtype_ = operands[0].dtype;
     std::string dtype;
     if (dtype_ == DataType::Float(16)) {
       dtype = "DT_FP16";
@@ -527,16 +510,16 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
       LOG(FATAL) << op_name << " supports only FP16, BF16, and FP32, got "
                  << dtype_;
     }
-    for (size_t i = 1; i < accesses.size(); ++i) {
-      ICHECK_EQ(accesses[i]->args[0].as<CallNode>()->dtype, dtype_)
+    for (size_t i = 1; i < operands.size(); ++i) {
+      ICHECK_EQ(operands[i].dtype, dtype_)
           << op_name << " requires matching input/output/scratch dtypes";
     }
-    const auto &input_shape = buffer_shape.at(input_tensor);
-    const auto &output_shape = buffer_shape.at(output_tensor);
-    const auto &tmp_shape = buffer_shape.at(tmp_tensor);
-    ICHECK_EQ(input_shape.size(), 2U);
-    ICHECK_EQ(output_shape.size(), 2U);
-    ICHECK_EQ(tmp_shape.size(), 2U);
+    const std::vector<int> input_shape = {operands[0].shape4[1],
+                                          operands[0].shape4[3]};
+    const std::vector<int> output_shape = {operands[1].shape4[1],
+                                           operands[1].shape4[3]};
+    const std::vector<int> tmp_shape = {operands[2].shape4[1],
+                                        operands[2].shape4[3]};
     ICHECK_GT(input_shape[0], 0);
     ICHECK_GT(input_shape[1], 0);
     int64_t expected_eu =
@@ -743,22 +726,27 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
   } else if (op_name == "tl.tpukernel.reduce_sum") {
     ICHECK_EQ(op->args.size(), 7U)
         << op_name << " expects input, output, scratch, eu_num, align_w, and stride";
-    std::array<const CallNode *, 3> accesses{};
-    std::array<const VarNode *, 3> vars{};
-    for (size_t i = 0; i < accesses.size(); ++i) {
-      accesses[i] = op->args[i + 1].as<CallNode>();
-      ICHECK(accesses[i] &&
-             accesses[i]->op.same_as(builtin::tvm_access_ptr()) &&
-             accesses[i]->args.size() >= 2U)
-          << op_name << " operand " << i << " must be a buffer access_ptr";
-      vars[i] = accesses[i]->args[1].as<VarNode>();
-      ICHECK(vars[i] && buffer_addrs_.count(vars[i]))
+    std::array<SemanticTensorOperand, 3> operands{};
+    constexpr std::array<int, 3> kAccessMasks = {3, 2, 3};
+    for (size_t i = 0; i < operands.size(); ++i) {
+      operands[i] = ParseWholeBufferRegion(
+          op->args[i + 1], op_name + " operand " + std::to_string(i),
+          kAccessMasks[i]);
+      ICHECK(operands[i].is_local)
           << op_name << " operands must all reside in local memory";
     }
+    ICHECK(operands[0].data_var != operands[1].data_var &&
+           operands[0].data_var != operands[2].data_var &&
+           operands[1].data_var != operands[2].data_var)
+        << op_name << " requires distinct input, output, and scratch storage";
+    for (const auto &operand : operands) {
+      ICHECK_EQ(operand.rank, 2U)
+          << op_name << " requires rank-2 input, output, and scratch tensors";
+    }
     // Resolve the input, output, and scratch descriptors.
-    auto input_tensor = var_idmap_.at(vars[0]);
-    auto output_tensor = var_idmap_.at(vars[1]);
-    auto tmp_tensor = var_idmap_.at(vars[2]);
+    const auto &input_tensor = operands[0].descriptor;
+    const auto &output_tensor = operands[1].descriptor;
+    const auto &tmp_tensor = operands[2].descriptor;
     const auto *eu_imm = op->args[4].as<IntImmNode>();
     const auto *align_imm = op->args[5].as<IntImmNode>();
     const auto *stride_imm = op->args[6].as<IntImmNode>();
@@ -772,7 +760,7 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     int sid = this->BeginScope();
     this->stream << "{\n";
 
-    auto dtype_ = accesses[0]->args[0].as<CallNode>()->dtype;
+    auto dtype_ = operands[0].dtype;
     std::string dtype, dtype_2;
     if (dtype_ == DataType::Float(16)) {
       dtype = "DT_FP16";
@@ -787,16 +775,16 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
       LOG(FATAL) << op_name << " supports only FP16, BF16, and FP32, got "
                  << dtype_;
     }
-    for (size_t i = 1; i < accesses.size(); ++i) {
-      ICHECK_EQ(accesses[i]->args[0].as<CallNode>()->dtype, dtype_)
+    for (size_t i = 1; i < operands.size(); ++i) {
+      ICHECK_EQ(operands[i].dtype, dtype_)
           << op_name << " requires matching input/output/scratch dtypes";
     }
-    const auto &input_shape = buffer_shape.at(input_tensor);
-    const auto &output_shape = buffer_shape.at(output_tensor);
-    const auto &tmp_shape = buffer_shape.at(tmp_tensor);
-    ICHECK_EQ(input_shape.size(), 2U);
-    ICHECK_EQ(output_shape.size(), 2U);
-    ICHECK_EQ(tmp_shape.size(), 2U);
+    const std::vector<int> input_shape = {operands[0].shape4[1],
+                                          operands[0].shape4[3]};
+    const std::vector<int> output_shape = {operands[1].shape4[1],
+                                           operands[1].shape4[3]};
+    const std::vector<int> tmp_shape = {operands[2].shape4[1],
+                                        operands[2].shape4[3]};
     ICHECK_GT(input_shape[0], 0);
     ICHECK_GT(input_shape[1], 0);
     int64_t expected_eu =
@@ -999,20 +987,14 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
   } else if (op_name == "tl.tpukernel.rsqrt") {
     ICHECK_EQ(op->args.size(), 3U)
         << op_name << " expects dst and src";
-    const auto *dst_access = op->args[1].as<CallNode>();
-    const auto *src_access = op->args[2].as<CallNode>();
-    ICHECK(dst_access && src_access &&
-           dst_access->op.same_as(builtin::tvm_access_ptr()) &&
-           src_access->op.same_as(builtin::tvm_access_ptr()) &&
-           dst_access->args.size() >= 2U && src_access->args.size() >= 2U)
-        << op_name << " expects two buffer access_ptr operands";
-    const auto *dst_var = dst_access->args[1].as<VarNode>();
-    const auto *src_var = src_access->args[1].as<VarNode>();
-    ICHECK(dst_var && src_var && buffer_addrs_.count(dst_var) &&
-           buffer_addrs_.count(src_var))
+    auto dst_operand =
+        ParseWholeBufferRegion(op->args[1], op_name + " dst", 2);
+    auto src_operand =
+        ParseWholeBufferRegion(op->args[2], op_name + " src", 1);
+    ICHECK(dst_operand.is_local && src_operand.is_local)
         << op_name << " operands must reside in local memory";
-    auto dst_dtype = dst_access->args[0].as<CallNode>()->dtype;
-    auto src_dtype = src_access->args[0].as<CallNode>()->dtype;
+    auto dst_dtype = dst_operand.dtype;
+    auto src_dtype = src_operand.dtype;
     ICHECK_EQ(dst_dtype, src_dtype)
         << op_name << " requires matching dst/src dtypes";
     ICHECK(dst_dtype == DataType::Float(16) ||
@@ -1020,10 +1002,11 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
            dst_dtype == DataType::Float(32))
         << op_name << " supports only FP16, BF16, and FP32, got "
         << dst_dtype;
-    auto dst = var_idmap_.at(dst_var);
-    auto src0 = var_idmap_.at(src_var);
-    ICHECK(buffer_shape.count(dst) && buffer_shape.count(src0) &&
-           buffer_shape[dst] == buffer_shape[src0])
+    const auto &dst = dst_operand.descriptor;
+    const auto &src0 = src_operand.descriptor;
+    ICHECK_EQ(dst_operand.rank, src_operand.rank)
+        << op_name << " requires matching dst/src ranks";
+    ICHECK(dst_operand.shape4 == src_operand.shape4)
         << op_name << " requires matching dst/src shapes";
     this->PrintIndent();
     this->stream << "tpu_bdc_fp_rsqrt(" << dst << ".addr, " << src0
@@ -1033,30 +1016,27 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
   } else if (op_name == "tl.tpukernel.rope_add") {
     ICHECK_EQ(op->args.size(), 6U)
         << op_name << " expects dst and four input tiles";
-    std::array<const CallNode *, 5> accesses{};
+    std::array<SemanticTensorOperand, 5> operands{};
     std::array<std::string, 5> tensors{};
-    for (size_t i = 0; i < accesses.size(); ++i) {
-      accesses[i] = op->args[i + 1].as<CallNode>();
-      ICHECK(accesses[i] &&
-             accesses[i]->op.same_as(builtin::tvm_access_ptr()) &&
-             accesses[i]->args.size() >= 2U)
-          << op_name << " operand " << i << " must be a buffer access_ptr";
-      const auto *var = accesses[i]->args[1].as<VarNode>();
-      ICHECK(var && buffer_addrs_.count(var))
+    for (size_t i = 0; i < operands.size(); ++i) {
+      operands[i] = ParseWholeBufferRegion(
+          op->args[i + 1], op_name + " operand " + std::to_string(i),
+          i == 0 ? 2 : 1);
+      ICHECK(operands[i].is_local)
           << op_name << " operands must all reside in local memory";
-      tensors[i] = var_idmap_.at(var);
+      tensors[i] = operands[i].descriptor;
+      ICHECK_EQ(operands[i].rank, 2U)
+          << op_name << " requires rank-2 operands";
     }
-    auto dtype_ = accesses[0]->args[0].as<CallNode>()->dtype;
-    for (size_t i = 1; i < accesses.size(); ++i) {
-      ICHECK_EQ(accesses[i]->args[0].as<CallNode>()->dtype, dtype_)
+    auto dtype_ = operands[0].dtype;
+    for (size_t i = 1; i < operands.size(); ++i) {
+      ICHECK_EQ(operands[i].dtype, dtype_)
           << op_name << " requires matching operand dtypes";
-      ICHECK(buffer_shape.count(tensors[i]) &&
-             buffer_shape.count(tensors[0]) &&
-             buffer_shape[tensors[i]] == buffer_shape[tensors[0]])
+      ICHECK(operands[i].shape4 == operands[0].shape4)
           << op_name << " requires matching operand shapes";
     }
-    for (size_t i = 1; i < tensors.size(); ++i) {
-      ICHECK_NE(tensors[0], tensors[i])
+    for (size_t i = 1; i < operands.size(); ++i) {
+      ICHECK_NE(operands[0].data_var, operands[i].data_var)
           << op_name << " output storage must not alias an input";
     }
     auto dst = tensors[0];
@@ -1064,7 +1044,7 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     auto even_src1 = tensors[2];
     auto odd_src0 = tensors[3];
     auto odd_src1 = tensors[4];
-    ICHECK_EQ(buffer_shape.at(dst).at(1) % 2, 0)
+    ICHECK_EQ(operands[0].shape4[3] % 2, 0)
         << op_name << " requires an even W dimension";
     std::string dtype;
     int bytes_size = 0;
@@ -1117,37 +1097,34 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
   } else if (op_name == "tl.tpukernel.gather") {
     ICHECK_EQ(op->args.size(), 5U)
         << op_name << " expects output, param, index, and param_h";
-    std::array<const CallNode *, 3> accesses{};
-    std::array<const VarNode *, 3> vars{};
-    std::array<std::string, 3> buffer_names{};
+    std::array<SemanticTensorOperand, 3> operands{};
+    constexpr std::array<int, 3> kAccessMasks = {2, 1, 1};
     std::array<std::string, 3> tensors{};
-    for (size_t i = 0; i < accesses.size(); ++i) {
-      accesses[i] = op->args[i + 1].as<CallNode>();
-      ICHECK(accesses[i] &&
-             accesses[i]->op.same_as(builtin::tvm_access_ptr()) &&
-             accesses[i]->args.size() >= 2U)
-          << op_name << " operand " << i << " must be a buffer access_ptr";
-      vars[i] = accesses[i]->args[1].as<VarNode>();
-      ICHECK(vars[i] && !buffer_addrs_.count(vars[i]))
+    for (size_t i = 0; i < operands.size(); ++i) {
+      operands[i] = ParseWholeBufferRegion(
+          op->args[i + 1], op_name + " operand " + std::to_string(i),
+          kAccessMasks[i]);
+      ICHECK(!operands[i].is_local)
           << op_name << " uses the S2S API and requires global-memory operands";
-      auto name_it = global_buffer_name_.find(vars[i]);
-      ICHECK(name_it != global_buffer_name_.end())
-          << op_name << " operand " << i
-          << " is not a global kernel buffer";
-      buffer_names[i] = name_it->second;
-      tensors[i] = parameter_map.at(buffer_names[i]);
+      tensors[i] = operands[i].descriptor;
+      ICHECK_EQ(operands[i].rank, 2U)
+          << op_name << " requires rank-2 output, param, and index buffers";
     }
-    const auto &dst_shape = buffer_shape.at(buffer_names[0]);
-    const auto &param_shape = buffer_shape.at(buffer_names[1]);
-    const auto &index_shape = buffer_shape.at(buffer_names[2]);
+    ICHECK(operands[0].data_var != operands[1].data_var &&
+           operands[0].data_var != operands[2].data_var &&
+           operands[1].data_var != operands[2].data_var)
+        << op_name << " requires distinct output, param, and index storage";
+    const auto &dst_shape = operands[0].shape4;
+    const auto &param_shape = operands[1].shape4;
+    const auto &index_shape = operands[2].shape4;
     const auto *param_h_imm = op->args[4].as<IntImmNode>();
     ICHECK(param_h_imm && param_h_imm->value > 0)
         << op_name << " param_h must be a positive compile-time integer";
     auto param_h = param_h_imm->value;
-    auto dtype_ = accesses[0]->args[0].as<CallNode>()->dtype;
-    ICHECK_EQ(accesses[1]->args[0].as<CallNode>()->dtype, dtype_)
+    auto dtype_ = operands[0].dtype;
+    ICHECK_EQ(operands[1].dtype, dtype_)
         << op_name << " output and param dtypes must match";
-    ICHECK_EQ(accesses[2]->args[0].as<CallNode>()->dtype, DataType::UInt(32))
+    ICHECK_EQ(operands[2].dtype, DataType::UInt(32))
         << op_name << " index dtype must be uint32";
     ICHECK(dtype_ == DataType::Float(16) || dtype_ == DataType::Float(32) ||
            dtype_ == DataType::BFloat(16) || dtype_.is_e4m3_float8() ||
@@ -1191,26 +1168,23 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
            "tpub_7_1_e runtime rejects tpu_hau_sort_natural_index";
     ICHECK_EQ(op->args.size(), 7U)
         << op_name << " expects dst_data, dst_idx, src, K, descended, and length";
-    std::array<const CallNode *, 3> accesses{};
-    std::array<const VarNode *, 3> vars{};
-    std::array<std::string, 3> buffer_names{};
+    std::array<SemanticTensorOperand, 3> operands{};
+    constexpr std::array<int, 3> kAccessMasks = {2, 2, 1};
     std::array<std::string, 3> tensors{};
-    for (size_t i = 0; i < accesses.size(); ++i) {
-      accesses[i] = op->args[i + 1].as<CallNode>();
-      ICHECK(accesses[i] &&
-             accesses[i]->op.same_as(builtin::tvm_access_ptr()) &&
-             accesses[i]->args.size() >= 2U)
-          << op_name << " operand " << i << " must be a buffer access_ptr";
-      vars[i] = accesses[i]->args[1].as<VarNode>();
-      ICHECK(vars[i] && !buffer_addrs_.count(vars[i]))
+    for (size_t i = 0; i < operands.size(); ++i) {
+      operands[i] = ParseWholeBufferRegion(
+          op->args[i + 1], op_name + " operand " + std::to_string(i),
+          kAccessMasks[i]);
+      ICHECK(!operands[i].is_local)
           << op_name << " uses the HAU system-memory API and requires global operands";
-      auto name_it = global_buffer_name_.find(vars[i]);
-      ICHECK(name_it != global_buffer_name_.end())
-          << op_name << " operand " << i
-          << " is not a global kernel buffer";
-      buffer_names[i] = name_it->second;
-      tensors[i] = parameter_map.at(buffer_names[i]);
+      tensors[i] = operands[i].descriptor;
+      ICHECK_EQ(operands[i].rank, 1U)
+          << op_name << " requires rank-1 dst_data, dst_idx, and src buffers";
     }
+    ICHECK(operands[0].data_var != operands[1].data_var &&
+           operands[0].data_var != operands[2].data_var &&
+           operands[1].data_var != operands[2].data_var)
+        << op_name << " requires distinct dst_data, dst_idx, and src storage";
     const auto *k_imm = op->args[4].as<IntImmNode>();
     const auto *descended_imm = op->args[5].as<IntImmNode>();
     const auto *length_imm = op->args[6].as<IntImmNode>();
@@ -1223,10 +1197,10 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     auto descended_val = descended_imm->value != 0;
     auto length_val = length_imm->value;
 
-    auto dtype_ = accesses[0]->args[0].as<CallNode>()->dtype;
-    ICHECK_EQ(accesses[2]->args[0].as<CallNode>()->dtype, dtype_)
+    auto dtype_ = operands[0].dtype;
+    ICHECK_EQ(operands[2].dtype, dtype_)
         << op_name << " dst_data and src dtypes must match";
-    ICHECK_EQ(accesses[1]->args[0].as<CallNode>()->dtype, DataType::Int(32))
+    ICHECK_EQ(operands[1].dtype, DataType::Int(32))
         << op_name << " dst_idx dtype must be int32";
     std::string dtype;
     // tpu_hau_sort_natural_index supports FP32, INT32, and UINT32 only.
@@ -1241,9 +1215,9 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
                     << "; HAU sort only supports fp32/int32/uint32";
     }
 
-    const auto &dst_data_shape = buffer_shape.at(buffer_names[0]);
-    const auto &dst_idx_shape = buffer_shape.at(buffer_names[1]);
-    const auto &src_shape = buffer_shape.at(buffer_names[2]);
+    const auto &dst_data_shape = operands[0].shape4;
+    const auto &dst_idx_shape = operands[1].shape4;
+    const auto &src_shape = operands[2].shape4;
     auto require_vector_shape = [&](const std::vector<int> &shape,
                                     int64_t expected, const char *operand) {
       ICHECK_EQ(shape.size(), 4U);

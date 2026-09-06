@@ -52,22 +52,22 @@ TileLang TPU lowering + AddressAssign
 `target.build.tilelang_tpu` 是唯一 FFI 入口。TPU codegen 限制一个模块只含一个
 `PrimFunc`，并拒绝将保留的 host 入口名当作 device kernel，避免 ABI 歧义。
 
-共同层负责解析 TIR 参数、region、dtype、LMEM 地址和读写 effect；专属层只做指令选择。此分层使同一 `tl.tpu.*` 语义能有两种指令实现，并避免把 RV descriptor 细节泄漏到前端。原始 `ppl.*`/`tpu_*` extern 被视为 TPU-Kernel 专属，原始 `rvt_*` extern 被视为专家级 ABI escape hatch；二者与中立 RV lowering 的混用会在 codegen 阶段失败，而不是生成含义不明的命令流。
+共同层负责解析 TIR 参数、region、dtype、LMEM 地址和读写 effect；专属层只做指令选择。此分层使同一 `tl.tpu.*` 语义能有两种指令实现，并避免把 RV descriptor 细节泄漏到前端。历史 `ppl.*` 和 raw `tpu_*` TIR extern 已从支持 ABI 中移除，任何 TPU target 都会拒绝；原始 `rvt_*` extern 只作为专家级 ABI escape hatch。raw RVT 与 `tl.tpu.*`、`tl.tpukernel.*` 或 TPU-Kernel 生命周期的混用会在 lowering/codegen 边界失败，而不是生成含义不明的命令流。
 
 ### 3.1 已实现的算子契约
 
 | 前端 | 统一 TIR | TPU-Kernel | RVT | 当前约束 |
 | --- | --- | --- | --- | --- |
-| `ppl_copy` | `tl.tpu.copy` | S2L/L2S/S2S/L2L GDMA/BDC；本地 cast | `rvt_dma_ld/st/cp`，本地浮点转换用 `rvt_cvt_f2f` | 两端静态 region 的规范化 N/C/H/W extent 必须相同。跨 dtype 仅本地；TPU-Kernel 拒绝其 API 不支持的 FP16↔BF16，RV 转换只开放 FP16/BF16/FP32。 |
+| `ppl_copy` | `tl.tpu.copy` | S2L/L2S/S2S/L2L GDMA/BDC；本地 cast | `rvt_dma_ld/st/cp`，本地浮点转换用 `rvt_cvt_f2f` | 两端静态 region 的规范化 N/C/H/W extent 必须相同。跨 dtype 仅本地；TPU-Kernel 拒绝 FP16↔BF16。RV emitter 的类型闭集包含 FP16/BF16/FP32，但当前只有 FP16→BF16 精确 codegen 证据，两向均无数值证据。 |
 | `ppl_fill` | `tl.tpu.fill` | `tpu_bdc_set_C` | typed CR + `rvt_cp` | RV 当前只开放零填充，用于累加器初始化。 |
-| `ppl_gemm` | `tl.tpu.gemm` | `tpu_bdc_fp_mm` / right-transpose 变体 | `rvt_fmm2[a]_{nn,nt}` | A/B 为 FP16 或 BF16；local N=H=1；无 `transpose_A`；M/N/K 在 `[1,65535]`。`accumulate` 显式表达读写 C。 |
-| `ppl_add/subtract/mul/div` | `tl.tpu.{add,sub,mul,div}` | `tpu_bdc_fp_*` | `rvt_fadd/fsub/fmul/fdiv` | 同 dtype FP16/BF16/FP32，local N=H=1；右操作数可作 W 维广播。`div` 配置 RV rsqrt 迭代并以容差验证。 |
+| `ppl_gemm` | `tl.tpu.gemm` | `tpu_bdc_fp_mm` / right-transpose 变体；另有已验证的同格式 FP8 A/B + FP32 C 路径 | `rvt_fmm2[a]_{nn,nt}` | RV 当前只映射 FP16/BF16；local N=H=1；无 `transpose_A`；M/N/K 在 `[1,65535]`。`accumulate` 显式表达读写 C；NT accumulate 的 `rvt_fmm2a_nt` 已有精确源码选择回归但尚无数值证据。TPU-Kernel 的 FP8 NT accumulate 是独立 selector，不能外推给 RV。 |
+| `ppl_add/subtract/mul/div` | `tl.tpu.{add,sub,mul,div}` | `tpu_bdc_fp_*`；add/sub/mul 另有已验证 FP8 路径 | `rvt_fadd/fsub/fmul/fdiv` | RV 当前限同 dtype FP16/BF16/FP32；local N=H=1；右操作数可作 W 维广播。`div` 配置 RV rsqrt 迭代并以容差验证。TPU-Kernel FP8 div 与全部 RV FP8 映射仍未开放。 |
 
 算子不支持的 dtype、形状、布局、尾块和别名组合必须在编译期报错；不以静默 fallback 或错误指令换取“可编译”。AddressAssign 以写/读写 effect 区分 GEMM 的覆盖与累加，保证 C 的 bank/生存期分析与指令语义一致。
 
 ### 3.2 RV Tensor 指令映射
 
-RVT codegen 直接遵循 SG2260E PPL 1.7 的 `rvt_api.h`：CR 为 R0–R7、TR 为 R8–R31、GR 为 R32–R39；descriptor 一律由 `PRECISION(DT_*)` 与 `FP8TYPE(DT_*)` 构造，不硬编码内部编码。global/local DMA subview 使用显式 FREE layout/stride；矩阵与逐元素本地 tile 使用其要求的 HW-aligned descriptor。
+RVT codegen 直接遵循 SG2260E PPL 1.7 的 `rvt_api.h`：CR 为 R0–R7、TR 为 R8–R31、GR 为 R32–R39；descriptor 的精度字段统一由 `PRECISION(DT_*)` 构造，浮点 subtype 使用 `FP8TYPE(DT_*)`，整数符号字段使用 `SIGN(DT_*)`，不硬编码内部编码。global/local DMA subview 使用显式 FREE layout/stride；矩阵与逐元素本地 tile 使用其要求的 HW-aligned descriptor。
 
 RV kernel 生命周期为 `rvt_kernel_start()`，先配置 GDMA lane mask，执行 descriptor/DMA/计算，最后 `rvt_sync_i(0xdeadbeef, 0)`。它不混入 TPU-Kernel 的初始化或轮询协议。GEMM 的累加位直接选 `rvt_fmm2a_nn`/`rvt_fmm2a_nt`，覆盖语义选 `rvt_fmm2_nn`/`rvt_fmm2_nt`；除法在发射 `rvt_fdiv` 前设置 rsqrt 迭代次数。
 

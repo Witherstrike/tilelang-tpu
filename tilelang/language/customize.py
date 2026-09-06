@@ -22,6 +22,11 @@ def _require_buffer(name, value):
         raise TypeError(f"{name} must be a TIR Buffer, got {type(value).__name__}")
 
 
+def _tpu_tensor_region(buffer, access_type):
+    """Preserve logical Buffer metadata at the native TPU semantic boundary."""
+    return buffer_to_tile_region(buffer, access_type)
+
+
 def _static_positive_dim(operation, value):
     static_value = value if isinstance(value, int) else getattr(value, "value", None)
     if isinstance(static_value, bool) or not isinstance(static_value, int):
@@ -199,7 +204,7 @@ def reshape(src: Buffer, shape: List[PrimExpr]) -> Buffer:
     Returns:
         Buffer: A new buffer view with the specified shape
     """
-    return T.Buffer(shape, src.dtype, src.data)
+    return T.Tensor(shape, src.dtype, src.data)
 
 
 def view(src: Buffer,
@@ -219,7 +224,7 @@ def view(src: Buffer,
         shape = src.shape
     if dtype is None:
         dtype = src.dtype
-    return T.Buffer(shape, dtype, src.data)
+    return T.Tensor(shape, dtype, src.data)
 
 
 def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, *, accumulate):
@@ -244,10 +249,13 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, *, accumulate):
 
     Notes:
         `K` is inferred from `A` and `B`, and must match.
-        The backend contract carries accumulation explicitly. TPU-Kernel does
-        not provide an accumulating FP16/BF16 right-transpose instruction.
-        FP8 uses the separately validated ``tpu_bdc_fp8_mm_R_trans`` form,
-        whose explicit ``result_add`` flag supports accumulation.
+        The backend contract carries accumulation explicitly. Programming
+        model-specific instruction availability is validated after target
+        selection; for example, RV Tensor supports an accumulating
+        FP16/BF16 right-transpose form while TPU-Kernel does not.
+        TPU-Kernel FP8 uses the separately validated
+        ``tpu_bdc_fp8_mm_R_trans`` form, whose explicit ``result_add`` flag
+        supports accumulation.
         `transpose_A` is not recommended in the current TPU path; prefer using
         `transpose_B=True` when a transpose form is needed.
     """
@@ -255,6 +263,8 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, *, accumulate):
         _require_local_buffer(name, buffer)
         _require_rank(name, buffer, 2)
     _require_same_dtype("ppl_gemm inputs", A, B)
+    _require_storage_disjoint("ppl_gemm", "C", C, "A", A)
+    _require_storage_disjoint("ppl_gemm", "C", C, "B", B)
     input_dtype = str(A.dtype)
     if input_dtype not in {"float16", "bfloat16"} | _TPU_FP8_DTYPES:
         raise ValueError(
@@ -275,13 +285,9 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, *, accumulate):
         raise ValueError(
             "ppl_gemm requires a float32 C tile when accumulate=True; "
             "overwrite mode also permits C to match the input dtype")
-    if transpose_B and accumulate and input_dtype not in _TPU_FP8_DTYPES:
-        raise ValueError(
-            "ppl_gemm transpose_B=True with accumulate=True is supported "
-            "only for FP8 inputs on the TPU-Kernel backend")
-    Aptr = A.access_ptr("r")
-    Bptr = B.access_ptr("r")
-    Cptr = C.access_ptr("rw" if accumulate else "w")
+    Aptr = _tpu_tensor_region(A, "r")
+    Bptr = _tpu_tensor_region(B, "r")
+    Cptr = _tpu_tensor_region(C, "rw" if accumulate else "w")
     M = C.shape[0]
     N = C.shape[1]
     K = A.shape[0] if transpose_A else A.shape[1]
@@ -401,7 +407,7 @@ def ppl_fill(buffer, value):
     """
     _require_local_buffer("buffer", buffer)
     _require_dtype("buffer", buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
-    buffer = buffer.access_ptr("w")
+    buffer = _tpu_tensor_region(buffer, "w")
     return T.call_extern("handle", "tl.tpu.fill", buffer, value)
 
 
@@ -430,9 +436,9 @@ def ppl_subtract(out, inp1, inp2):
         _require_dtype(name, buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
     _require_same_dtype("ppl_subtract", out, inp1, inp2)
     _require_elementwise_shapes("ppl_subtract", out, inp1, inp2)
-    outptr = out.access_ptr("w")
-    inpptr1 = inp1.access_ptr("r")
-    inpptr2 = inp2.access_ptr("r")
+    outptr = _tpu_tensor_region(out, "w")
+    inpptr1 = _tpu_tensor_region(inp1, "r")
+    inpptr2 = _tpu_tensor_region(inp2, "r")
     return T.call_extern("handle", "tl.tpu.sub", outptr, inpptr1, inpptr2)
 
 
@@ -460,8 +466,8 @@ def ppl_mul_C(out, inp1, value):
         _require_dtype(name, buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
     _require_same_dtype("ppl_mul_C", out, inp1)
     _require_same_shape("ppl_mul_C", out, inp1)
-    outptr = out.access_ptr("w")
-    inpptr1 = inp1.access_ptr("r")
+    outptr = _tpu_tensor_region(out, "w")
+    inpptr1 = _tpu_tensor_region(inp1, "r")
     return T.call_extern("handle", "tl.tpukernel.mul_scalar", outptr, inpptr1, value)
 
 
@@ -491,19 +497,20 @@ def ppl_mul(out, inp1, inp2):
         _require_dtype(name, buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
     _require_same_dtype("ppl_mul", out, inp1, inp2)
     _require_elementwise_shapes("ppl_mul", out, inp1, inp2)
-    outptr = out.access_ptr("w")
-    inpptr1 = inp1.access_ptr("r")
-    inpptr2 = inp2.access_ptr("r")
+    outptr = _tpu_tensor_region(out, "w")
+    inpptr1 = _tpu_tensor_region(inp1, "r")
+    inpptr2 = _tpu_tensor_region(inp2, "r")
     return T.call_extern("handle", "tl.tpu.mul", outptr, inpptr1, inpptr2)
 
 
 @T.macro
 def _ppl_exp_safe(out, work0, work1, coeff):
-    buffer = out.access_ptr("rw")
-    work0ptr = work0.access_ptr("rw")
-    work1ptr = work1.access_ptr("rw")
-    coeffptr = coeff.access_ptr("rw")
-    T.call_extern("handle", "tl.tpukernel.exp", buffer, work0ptr, work1ptr, coeffptr)
+    T.call_extern(
+        "handle", "tl.tpukernel.exp",
+        _tpu_tensor_region(out, "rw"),
+        _tpu_tensor_region(work0, "rw"),
+        _tpu_tensor_region(work1, "rw"),
+        _tpu_tensor_region(coeff, "rw"))
 
 
 def ppl_exp(out, work0, work1, coeff):
@@ -545,14 +552,13 @@ def ppl_exp(out, work0, work1, coeff):
 
 @T.macro
 def _ppl_sigmoid_safe(out, inp, work0, work1, coeff):
-    outptr = out.access_ptr("rw")
-    inpptr = inp.access_ptr("r")
-    work0ptr = work0.access_ptr("rw")
-    work1ptr = work1.access_ptr("rw")
-    coeffptr = coeff.access_ptr("rw")
     T.call_extern(
-        "handle", "tl.tpukernel.sigmoid", outptr, inpptr, work0ptr,
-        work1ptr, coeffptr)
+        "handle", "tl.tpukernel.sigmoid",
+        _tpu_tensor_region(out, "rw"),
+        _tpu_tensor_region(inp, "r"),
+        _tpu_tensor_region(work0, "rw"),
+        _tpu_tensor_region(work1, "rw"),
+        _tpu_tensor_region(coeff, "rw"))
 
 
 def ppl_sigmoid(out, inp, work0, work1, coeff):
@@ -625,9 +631,9 @@ def ppl_gather(output, param, index, param_h):
         raise ValueError(
             "ppl_gather expects param=(param_h, width), output=(count, width), "
             "and index=(count, 1)") from error
-    outptr = output.access_ptr("w")
-    paramptr = param.access_ptr("r")
-    indexptr = index.access_ptr("r")
+    outptr = _tpu_tensor_region(output, "w")
+    paramptr = _tpu_tensor_region(param, "r")
+    indexptr = _tpu_tensor_region(index, "r")
     return T.call_extern("handle", "tl.tpukernel.gather", outptr, paramptr, indexptr, param_h)
 
 
@@ -648,7 +654,7 @@ def ppl_topk(dst_data, dst_idx, src, K, descended, length):
         raise ValueError(f"ppl_topk dst_idx dtype must be int32, got {dst_idx.dtype}")
     if not isinstance(K, int) or not isinstance(length, int) or K <= 0 or length <= 0:
         raise ValueError("ppl_topk K and length must be positive Python integers")
-    if K > length:
+    if length < K:
         raise ValueError(f"ppl_topk requires K <= length, got K={K}, length={length}")
     if not isinstance(descended, bool):
         raise TypeError("ppl_topk descended must be a Python bool")
@@ -664,9 +670,9 @@ def ppl_topk(dst_data, dst_idx, src, K, descended, length):
     except ValueError as error:
         raise ValueError(
             "ppl_topk expects src=(length,), dst_data=(K,), and dst_idx=(K,)") from error
-    dst_data_ptr = dst_data.access_ptr("w")
-    dst_idx_ptr = dst_idx.access_ptr("w")
-    srcptr = src.access_ptr("r")
+    dst_data_ptr = _tpu_tensor_region(dst_data, "w")
+    dst_idx_ptr = _tpu_tensor_region(dst_idx, "w")
+    srcptr = _tpu_tensor_region(src, "r")
     return T.call_extern(
         "handle", "tl.tpukernel.topk", dst_data_ptr, dst_idx_ptr, srcptr,
         K, descended, length)
@@ -694,8 +700,8 @@ def ppl_rsqrt(out, inp):
         _require_dtype(name, buffer, _TPU_BASE_FLOAT_DTYPES)
     _require_same_dtype("ppl_rsqrt", out, inp)
     _require_same_shape("ppl_rsqrt", out, inp)
-    inpptr = inp.access_ptr("r")
-    outptr = out.access_ptr("w")
+    inpptr = _tpu_tensor_region(inp, "r")
+    outptr = _tpu_tensor_region(out, "w")
     return T.call_extern("handle", "tl.tpukernel.rsqrt", outptr, inpptr)
 
 
@@ -722,8 +728,8 @@ def ppl_add_C(out, inp1, value):
         _require_dtype(name, buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
     _require_same_dtype("ppl_add_C", out, inp1)
     _require_same_shape("ppl_add_C", out, inp1)
-    outptr = out.access_ptr("w")
-    inpptr1 = inp1.access_ptr("r")
+    outptr = _tpu_tensor_region(out, "w")
+    inpptr1 = _tpu_tensor_region(inp1, "r")
     return T.call_extern("handle", "tl.tpukernel.add_scalar", outptr, inpptr1, value)
 
 
@@ -753,9 +759,9 @@ def ppl_add(out, inp1, inp2):
         _require_dtype(name, buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
     _require_same_dtype("ppl_add", out, inp1, inp2)
     _require_elementwise_shapes("ppl_add", out, inp1, inp2)
-    outptr = out.access_ptr("w")
-    inpptr1 = inp1.access_ptr("r")
-    inpptr2 = inp2.access_ptr("r")
+    outptr = _tpu_tensor_region(out, "w")
+    inpptr1 = _tpu_tensor_region(inp1, "r")
+    inpptr2 = _tpu_tensor_region(inp2, "r")
     return T.call_extern("handle", "tl.tpu.add", outptr, inpptr1, inpptr2)
 
 
@@ -785,9 +791,9 @@ def ppl_div(out, inp1, inp2):
         _require_dtype(name, buffer, _TPU_BASE_FLOAT_DTYPES)
     _require_same_dtype("ppl_div", out, inp1, inp2)
     _require_elementwise_shapes("ppl_div", out, inp1, inp2)
-    outptr = out.access_ptr("w")
-    inpptr1 = inp1.access_ptr("r")
-    inpptr2 = inp2.access_ptr("r")
+    outptr = _tpu_tensor_region(out, "w")
+    inpptr1 = _tpu_tensor_region(inp1, "r")
+    inpptr2 = _tpu_tensor_region(inp2, "r")
     return T.call_extern("handle", "tl.tpu.div", outptr, inpptr1, inpptr2)
 
 
@@ -797,18 +803,20 @@ def _tpu_reduce_sum_lowering(inp, out, dim, eu_elements):
 
     Prefer calling `ppl_reduce_sum(...)` directly in user kernels.
     """
-    inpptr = inp.access_ptr("rw")
-    outptr = out.access_ptr("w")
     with T.block("reduce_sum"):
         tmp_shape = [inp.shape[0], eu_elements]
         tmp_buffer_sum = T.alloc_shared(tmp_shape, inp.dtype)
-        tmp_ptr = tmp_buffer_sum.access_ptr("rw")
         eu_num = T.int32(eu_elements)
         channel = T.int32(64)
         align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num
         stride = T.ceildiv(inp.shape[0], channel) * align_w
         # Delegate the hardware-specific sequence to TPU-Kernel codegen.
-        T.call_extern("handle", "tl.tpukernel.reduce_sum", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
+        T.call_extern(
+            "handle", "tl.tpukernel.reduce_sum",
+            _tpu_tensor_region(inp, "rw"),
+            _tpu_tensor_region(out, "w"),
+            _tpu_tensor_region(tmp_buffer_sum, "rw"),
+            eu_num, align_w, stride)
 
 
 def ppl_reduce_sum(inp, out, dim):
@@ -836,6 +844,7 @@ def ppl_reduce_sum(inp, out, dim):
         _require_rank(name, buffer, 2)
         _require_dtype(name, buffer, _TPU_BASE_FLOAT_DTYPES)
     _require_same_dtype("ppl_reduce_sum", inp, out)
+    _require_storage_disjoint("ppl_reduce_sum", "inp", inp, "out", out)
     if dim != 1:
         raise ValueError(f"ppl_reduce_sum only supports dim=1, got {dim}")
     try:
@@ -853,18 +862,20 @@ def _tpu_reduce_max_lowering(inp, out, dim, eu_elements):
 
     Prefer calling `ppl_reduce_max(...)` directly in user kernels.
     """
-    inpptr = inp.access_ptr("rw")
-    outptr = out.access_ptr("w")
     with T.block("reduce_max"):
         tmp_shape = [inp.shape[0], eu_elements]
         tmp_buffer_max = T.alloc_shared(tmp_shape, inp.dtype)
-        tmp_ptr = tmp_buffer_max.access_ptr("rw")
         eu_num = T.int32(eu_elements)
         channel = T.int32(64)
         align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num
         stride = T.ceildiv(inp.shape[0], channel) * align_w
         # Delegate the hardware-specific sequence to TPU-Kernel codegen.
-        T.call_extern("handle", "tl.tpukernel.reduce_max", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
+        T.call_extern(
+            "handle", "tl.tpukernel.reduce_max",
+            _tpu_tensor_region(inp, "rw"),
+            _tpu_tensor_region(out, "w"),
+            _tpu_tensor_region(tmp_buffer_max, "rw"),
+            eu_num, align_w, stride)
 
 
 def ppl_reduce_max(inp, out, dim):
@@ -894,6 +905,7 @@ def ppl_reduce_max(inp, out, dim):
         _require_rank(name, buffer, 2)
         _require_dtype(name, buffer, _TPU_BASE_FLOAT_DTYPES)
     _require_same_dtype("ppl_reduce_max", inp, out)
+    _require_storage_disjoint("ppl_reduce_max", "inp", inp, "out", out)
     if dim != 1:
         raise ValueError(f"ppl_reduce_max only supports dim=1, got {dim}")
     try:
@@ -940,11 +952,11 @@ def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
     for name, buffer in zip(
             ("even_inp1", "even_inp2", "odd_inp1", "odd_inp2"), buffers[1:]):
         _require_storage_disjoint("ppl_rope_add", "out", out, name, buffer)
-    outptr = out.access_ptr("w")
-    even_inpptr1 = even_inp1.access_ptr("r")
-    even_inpptr2 = even_inp2.access_ptr("r")
-    odd_inpptr1 = odd_inp1.access_ptr("r")
-    odd_inpptr2 = odd_inp2.access_ptr("r")
+    outptr = _tpu_tensor_region(out, "w")
+    even_inpptr1 = _tpu_tensor_region(even_inp1, "r")
+    even_inpptr2 = _tpu_tensor_region(even_inp2, "r")
+    odd_inpptr1 = _tpu_tensor_region(odd_inp1, "r")
+    odd_inpptr2 = _tpu_tensor_region(odd_inp2, "r")
     return T.call_extern(
         "handle", "tl.tpukernel.rope_add", outptr, even_inpptr1,
         even_inpptr2, odd_inpptr1, odd_inpptr2)

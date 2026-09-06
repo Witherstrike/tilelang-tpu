@@ -143,6 +143,48 @@ def test_tpu_chip_capabilities_are_explicit_and_fail_closed():
         TPUTargetSpec("sg2260erv", "rv")
 
 
+@pytest.mark.parametrize("chip,programming_model,supported", [
+    ("bm1690", "tpukernel", True),
+    ("bm1690", "rv", False),
+    ("sg2260e", "tpukernel", True),
+    ("sg2260e", "rv", True),
+])
+def test_python_and_native_tpu_capability_boundaries_share_one_matrix(
+        chip, programming_model, supported):
+    target = tvm.target.Target(_tpu_target(chip, programming_model))
+    prim_func = tvm.tir.PrimFunc(
+        [], tvm.tir.Evaluate(0),
+    ).with_attr("global_symbol", "capability_matrix")
+    native_codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
+
+    if supported:
+        assert resolve_tpu_target(target=target) == TPUTargetSpec(
+            chip, programming_model)
+        source = native_codegen(
+            tvm.IRModule({"capability_matrix": prim_func}), target)
+        assert f"target: {chip}, programming model: {programming_model}" in source
+    else:
+        with pytest.raises(ValueError, match="does not support programming model"):
+            resolve_tpu_target(target=target)
+        with pytest.raises(tvm.error.TVMError, match="does not support"):
+            native_codegen(
+                tvm.IRModule({"capability_matrix": prim_func}), target)
+
+
+def test_address_assignment_rejects_a_different_bound_tpu_identity():
+    function_target = tvm.target.Target(_tpu_target("bm1690", "tpukernel"))
+    requested_target = tvm.target.Target(_tpu_target("sg2260e", "tpukernel"))
+    prim_func = tvm.tir.PrimFunc(
+        [], tvm.tir.Evaluate(0),
+    ).with_attr("global_symbol", "address_target_mismatch").with_attr(
+        "target", function_target)
+
+    with pytest.raises(ValueError, match="target identity mismatch"):
+        phase_module.AssignTPUAddresses(
+            tvm.IRModule({"address_target_mismatch": prim_func}),
+            requested_target)
+
+
 def test_target_and_runtime_are_resolved_as_independent_identities():
     target = tvm.target.Target(_tpu_target("sg2260e", "rv"))
     assert resolve_tpu_target(target=target) == TPUTargetSpec("sg2260e", "rv")
@@ -285,6 +327,67 @@ def test_native_tpu_codegen_let_type_does_not_depend_on_name():
     assert "__tilelang_tpu_tensor_info shared_scalar" not in source
 
 
+def test_native_tpu_codegen_rejects_direct_scalar_tensor_access():
+    source = tvm.tir.decl_buffer((8,), "float32", name="source")
+    load = tvm.tir.BufferLoad(source, [tvm.tir.IntImm("int32", 0)])
+    prim_func = tvm.tir.PrimFunc(
+        [source.data], tvm.tir.Evaluate(load),
+        buffer_map={source.data: source},
+    ).with_attr("global_symbol", "native_scalar_tensor_access")
+    codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
+
+    with pytest.raises(
+            tvm.error.TVMError,
+            match="Direct scalar BufferLoad/BufferStore.*unsupported"):
+        codegen(
+            tvm.IRModule({"native_scalar_tensor_access": prim_func}),
+            tvm.target.Target(_tpu_target()),
+        )
+
+
+def test_native_tpu_codegen_rejects_nonserial_loops_and_attributes():
+    loop_var = tvm.tir.Var("i", "int32")
+    parallel = tvm.tir.For(
+        loop_var, 0, 4, tvm.tir.ForKind.PARALLEL, tvm.tir.Evaluate(0))
+    parallel_func = tvm.tir.PrimFunc(
+        [], parallel,
+    ).with_attr("global_symbol", "native_parallel_loop")
+    codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
+    target = tvm.target.Target(_tpu_target())
+
+    with pytest.raises(
+            tvm.error.TVMError, match="supports only serial and unrolled loops"):
+        codegen(tvm.IRModule({"native_parallel_loop": parallel_func}), target)
+
+    attribute_func = tvm.tir.PrimFunc(
+        [], tvm.tir.AttrStmt(
+            tvm.tir.StringImm("payload"), "pragma_import_c",
+            tvm.tir.StringImm("side_effecting_source"), tvm.tir.Evaluate(0)),
+    ).with_attr("global_symbol", "native_residual_attribute")
+    with pytest.raises(
+            tvm.error.TVMError, match="Residual AttrStmt pragma_import_c"):
+        codegen(
+            tvm.IRModule({"native_residual_attribute": attribute_func}),
+            target,
+        )
+
+
+@pytest.mark.parametrize("chip", ["bm1690", "sg2260e"])
+def test_native_tpukernel_codegen_rejects_pure_rv_extern_bypass(chip):
+    function = tvm.tir.PrimFunc(
+        [], tvm.tir.Evaluate(tvm.tir.call_pure_extern("int32", "rvt_fadd")),
+    ).with_attr("global_symbol", "pure_rv_bypass")
+    codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
+
+    with pytest.raises(
+            tvm.error.TVMError,
+            match="call_pure_extern has no TPU semantic ABI"):
+        codegen(
+            tvm.IRModule({"pure_rv_bypass": function}),
+            tvm.target.Target(_tpu_target(chip, "tpukernel")),
+        )
+
+
 def test_native_tpu_codegen_rejects_descriptor_let_aliases():
     pointer_type = tvm.ir.PointerType(tvm.ir.PrimType("float32"), "shared")
     tile = tvm.tir.Var("tile", pointer_type)
@@ -299,7 +402,7 @@ def test_native_tpu_codegen_rejects_descriptor_let_aliases():
     prim_func = tvm.tir.PrimFunc(
         [], body,
     ).with_attr("global_symbol", "native_descriptor_let").with_attr(
-        "tile", tvm.tir.IntImm("int64", 0))
+        "tilelang.tpu.lmem.address.tile", tvm.tir.IntImm("int64", 0))
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
     with pytest.raises(tvm.error.TVMError, match="descriptor cannot be bound"):

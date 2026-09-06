@@ -82,6 +82,18 @@ def build_case_specs() -> tuple[CaseSpec, ...]:
             dst_dtype=dtype,
             direct_global=True,
         )
+    # One exact FP32 probe covers the full rank-3 [N,C,W] DMA descriptor path
+    # without multiplying every dtype combination.  Non-unit N/C and a
+    # non-EU-aligned W make N-stride and lane-distributed C mistakes visible.
+    add(
+        "copy",
+        "float32",
+        "rank3-local-roundtrip",
+        src_dtype="float32",
+        dst_dtype="float32",
+        direct_global=False,
+        shape=(2, 3, 17),
+    )
     for src_dtype, dst_dtype in (
             ("float16", "float32"),
             ("bfloat16", "float32"),
@@ -394,7 +406,7 @@ def _compile_and_launch(tilelang: Any, prim_func: Any, arguments: tuple[Any, ...
 def _run_copy(spec: CaseSpec, chip: str, runtime_mode: str,
               tilelang: Any, T: Any, torch: Any,
               generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
-    shape = (4, 32)
+    shape = tuple(int(extent) for extent in spec.parameters.get("shape", (4, 32)))
     src_dtype = str(spec.parameters["src_dtype"])
     dst_dtype = str(spec.parameters["dst_dtype"])
     direct_global = bool(spec.parameters["direct_global"])

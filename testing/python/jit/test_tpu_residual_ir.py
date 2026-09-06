@@ -56,6 +56,117 @@ def test_tpu_residual_ir_rejects_ramp_and_vector_buffer_dtype():
     _assert_contract_error(function, "vector-buffer-dtype", "float32x4")
 
 
+def test_tpu_residual_ir_rejects_direct_scalar_buffer_access():
+    source = tir.decl_buffer((8,), "float32", name="source")
+    destination = tir.decl_buffer((8,), "float32", name="destination")
+    load = tir.BufferLoad(source, [tir.IntImm("int32", 0)])
+    function = tir.PrimFunc(
+        [source.data], tir.Evaluate(load),
+        buffer_map={source.data: source},
+    ).with_attr("global_symbol", "scalar_load")
+    _assert_contract_error(
+        function, "BufferLoad", "has no TPU descriptor lowering")
+
+    store = tir.BufferStore(
+        destination, tir.FloatImm("float32", 1.0),
+        [tir.IntImm("int32", 0)])
+    function = tir.PrimFunc(
+        [destination.data], store,
+        buffer_map={destination.data: destination},
+    ).with_attr("global_symbol", "scalar_store")
+    _assert_contract_error(
+        function, "BufferStore", "has no TPU descriptor lowering")
+
+
+def test_tpu_copy_region_markers_are_not_treated_as_executable_loads():
+    source = tir.decl_buffer((8,), "float32", name="source")
+    destination = tir.decl_buffer((8,), "float32", name="destination")
+    ramp = tir.Ramp(tir.IntImm("int32", 0), tir.IntImm("int32", 1), 4)
+
+    def region(buffer, index, access_mask):
+        marker = tir.BufferLoad(buffer, [index])
+        return tir.call_intrin(
+            "handle", tir.op.Op.get("tl.region"), marker, access_mask, 4)
+
+    copy = tir.call_extern(
+        "handle", "tl.tpu.copy",
+        region(source, ramp, 1),
+        region(destination, ramp, 2),
+    )
+    function = tir.PrimFunc(
+        [source.data, destination.data], tir.Evaluate(copy),
+        buffer_map={source.data: source, destination.data: destination},
+    ).with_attr("global_symbol", "copy_region_markers")
+
+    lower_module.validate_target_module_contract(
+        tvm.IRModule({"copy_region_markers": function}), _target())
+
+    # The same structural marker has no meaning outside the canonical
+    # two-region tl.tpu.copy ABI and must not become a scalar-load escape hatch.
+    standalone_region = region(source, tir.IntImm("int32", 0), 1)
+    standalone = tir.PrimFunc(
+        [source.data], tir.Evaluate(standalone_region),
+        buffer_map={source.data: source},
+    ).with_attr("global_symbol", "standalone_region")
+    _assert_contract_error(
+        standalone, "BufferLoad", "has no TPU descriptor lowering")
+
+
+def test_tpu_copy_marker_object_cannot_be_reused_as_an_executable_load():
+    source = tir.decl_buffer((8,), "float32", name="source")
+    destination = tir.decl_buffer((8,), "float32", name="destination")
+    shared_marker = tir.BufferLoad(source, [tir.IntImm("int32", 0)])
+
+    def region(marker, access_mask):
+        return tir.call_intrin(
+            "handle", tir.op.Op.get("tl.region"), marker, access_mask, 8)
+
+    copy = tir.call_extern(
+        "handle", "tl.tpu.copy",
+        region(shared_marker, 1),
+        region(tir.BufferLoad(destination, [0]), 2),
+    )
+    body = tir.SeqStmt([
+        tir.Evaluate(copy),
+        tir.Evaluate(shared_marker),
+    ])
+    function = tir.PrimFunc(
+        [source.data, destination.data], body,
+        buffer_map={source.data: source, destination.data: destination},
+    ).with_attr("global_symbol", "reused_copy_marker")
+
+    _assert_contract_error(
+        function, "semantic-region-marker-alias", "outside its canonical")
+
+
+def test_typed_semantic_regions_are_markers_but_bare_access_ptr_is_removed():
+    source = tir.decl_buffer((8,), "float32", name="source")
+    destination = tir.decl_buffer((8,), "float32", name="destination")
+
+    def region(buffer, access_mask):
+        return tir.call_intrin(
+            "handle", tir.op.Op.get("tl.region"),
+            tir.BufferLoad(buffer, [0]), access_mask, 8)
+
+    rsqrt = tir.call_extern(
+        "handle", "tl.tpukernel.rsqrt",
+        region(destination, 2), region(source, 1))
+    function = tir.PrimFunc(
+        [source.data, destination.data], tir.Evaluate(rsqrt),
+        buffer_map={source.data: source, destination.data: destination},
+    ).with_attr("global_symbol", "typed_regions")
+    lower_module.validate_target_module_contract(
+        tvm.IRModule({"typed_regions": function}), _target())
+
+    access_ptr = source.access_ptr("r")
+    removed = tir.PrimFunc(
+        [source.data], tir.Evaluate(access_ptr),
+        buffer_map={source.data: source},
+    ).with_attr("global_symbol", "removed_access_ptr")
+    _assert_contract_error(
+        removed, "tensor-operand-ABI", "whole-buffer tl.region")
+
+
 def test_tpu_residual_ir_rejects_vector_signature_and_allocation_dtypes():
     vector_parameter = tir.Var("vector_parameter", "float32x4")
     function = tir.PrimFunc(
@@ -146,6 +257,35 @@ def test_tpu_shared_allocation_is_not_confused_with_gpu_synchronization():
     function = _prim_func(allocation, "shared_allocation")
     lower_module.validate_target_module_contract(
         tvm.IRModule({"shared_allocation": function}), _target())
+
+
+@pytest.mark.parametrize("kind", [
+    tir.ForKind.PARALLEL,
+    tir.ForKind.VECTORIZED,
+    tir.ForKind.THREAD_BINDING,
+])
+def test_tpu_residual_ir_rejects_loops_without_an_execution_mapping(kind):
+    loop_var = tir.Var("i", "int32")
+    thread_binding = None
+    if kind == tir.ForKind.THREAD_BINDING:
+        thread_binding = tir.IterVar(
+            tvm.ir.Range(0, 4), loop_var,
+            tir.IterVar.ThreadIndex, "threadIdx.x")
+    loop = tir.For(
+        loop_var, 0, 4, kind, tir.Evaluate(0),
+        thread_binding=thread_binding)
+    function = _prim_func(loop, "unsupported_loop_kind")
+    _assert_contract_error(function, "For", "no TPU execution mapping")
+
+
+def test_tpu_residual_ir_rejects_unconsumed_attributes():
+    function = _prim_func(
+        tir.AttrStmt(
+            tir.StringImm("payload"), "pragma_import_c",
+            tir.StringImm("side_effecting_source"), tir.Evaluate(0)),
+        "unconsumed_attribute")
+    _assert_contract_error(
+        function, "AttrStmt", "has no residual TPU meaning")
 
 
 def test_tpu_contract_rejects_a_primfunc_bound_to_another_backend():

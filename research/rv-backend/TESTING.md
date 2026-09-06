@@ -1,8 +1,10 @@
 # TileLang-TPU 双后端测试报告
 
+> 本文是 2026-09-04 核心五算子 profiling 竖切的历史记录。当前全量数值结论、FP8 边界和结构化 decoder 契约以 [TPU 算子验证报告](../tpu-backend-design/test-report.md) 和 [profiling 设计](../ppl-profiling/README.md) 为准。本文的历史 timing 不作为当前 decoder conformance 证据。
+
 ## 1. 范围与判定
 
-本报告的数值测试以 PyTorch 结果为 oracle。每个 case 在独立进程中 fresh-compile、加载、发射一次并回传比较；同时要求成功产生 profiling raw trace。CModel 不伪造指令时间，故 `timed_instruction_count=0` 是预期结果；PCIe 成功解码后才记录真实设备命令 duration。
+本报告的数值测试以 PyTorch 结果为 oracle。每个 case 在独立进程中 fresh-compile、加载、发射一次并回传比较；同时要求成功产生 profiling raw trace。CModel 不伪造指令时间，故 `timed_instruction_count=0` 是预期结果；本轮 PCIe 工件保存了当时 decoder 产生的设备命令 duration。
 
 测试矩阵由 `testing/python/jit/tpu_core_ops_matrix.py` 驱动，涵盖 `elementwise-{add,sub,mul,div}` 与 `matmul`：
 

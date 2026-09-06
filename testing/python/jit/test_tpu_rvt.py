@@ -44,7 +44,7 @@ def _rvt_codegen_primfunc(A: T.Tensor((1,), "float32")):
 @T.prim_func
 def _plain_multifunc_primfunc(A: T.Tensor((1,), "float32")):
     T.func_attr({"global_symbol": "plain_multifunc", "tir.noalias": T.bool(True)})
-    A[0] = A[0]
+    T.evaluate(0)
 
 
 @T.prim_func
@@ -96,6 +96,76 @@ def test_rvt_lowering_keeps_explicit_vendor_calls():
             _rvt_codegen_primfunc,
             target=_tpu_target("sg2260e", "tpukernel"),
             runtime_mode="cmodel",
+        )
+
+
+def test_raw_rvt_cannot_consume_tilelang_buffer_descriptors():
+
+    @T.prim_func
+    def raw_descriptor_argument(A: T.Tensor((32,), "float32")):
+        T.func_attr({"global_symbol": "raw_descriptor_argument"})
+        T.evaluate(T.rvt_dma_ld(T.uint64(8), A.data))
+
+    with pytest.raises(
+            ValueError,
+            match=r"raw-rvt-descriptor-argument.*rvt_dma_ld.*descriptor Var"):
+        tilelang.lower(
+            raw_descriptor_argument,
+            target=_tpu_target("sg2260e", "rv"),
+            runtime_mode="cmodel",
+        )
+
+    # Direct native callers must not be able to bypass the same ownership
+    # boundary by skipping the Python residual-IR verifier.
+    native_function = raw_descriptor_argument.with_attr(
+        "global_symbol", "raw_descriptor_argument")
+    codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
+    with pytest.raises(
+            tvm.error.TVMError,
+            match=r"rvt_dma_ld.*cannot consume TileLang tensor descriptor Var"):
+        codegen(
+            tvm.IRModule({"raw_descriptor_argument": native_function}),
+            tvm.target.Target(_tpu_target("sg2260e", "rv")),
+        )
+
+    parameter = raw_descriptor_argument.params[0]
+    parameter_call = tvm.tir.call_extern(
+        "handle", "rvt_dma_ld", tvm.tir.const(8, "uint64"), parameter)
+    parameter_function = tvm.tir.PrimFunc(
+        raw_descriptor_argument.params,
+        tvm.tir.Evaluate(parameter_call),
+        buffer_map=raw_descriptor_argument.buffer_map,
+    ).with_attr("global_symbol", "raw_parameter_handle")
+    with pytest.raises(
+            tvm.error.TVMError,
+            match=r"rvt_dma_ld.*cannot consume TileLang tensor descriptor Var"):
+        codegen(
+            tvm.IRModule({"raw_parameter_handle": parameter_function}),
+            tvm.target.Target(_tpu_target("sg2260e", "rv")),
+        )
+
+
+def test_raw_rvt_symbol_must_be_a_c_identifier_at_both_boundaries():
+    invalid_call = tvm.tir.call_extern("handle", "rvt_bad-name")
+    function = tvm.tir.PrimFunc(
+        [], tvm.tir.Evaluate(invalid_call),
+    ).with_attr("global_symbol", "invalid_raw_rvt_symbol")
+    module = tvm.IRModule({"invalid_raw_rvt_symbol": function})
+
+    with pytest.raises(ValueError, match=r"raw-rvt-symbol.*rvt_bad-name"):
+        tilelang.lower(
+            module,
+            target=_tpu_target("sg2260e", "rv"),
+            runtime_mode="cmodel",
+        )
+
+    codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
+    with pytest.raises(
+            tvm.error.TVMError,
+            match=r"C identifier beginning with rvt_.*rvt_bad-name"):
+        codegen(
+            module,
+            tvm.target.Target(_tpu_target("sg2260e", "rv")),
         )
 
 

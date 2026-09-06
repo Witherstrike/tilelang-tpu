@@ -121,5 +121,23 @@ def AssignTPUAddresses(mod: IRModule, target: Target) -> IRModule:
     """
     if target.kind.name != "tpu":
         raise ValueError("AssignTPUAddresses requires a TPU target")
-    _validate_tpu_phase_target(target)
+    selected_target = resolve_tpu_target(target=target)
+    for global_var, function in mod.functions.items():
+        if not isinstance(function, tir.PrimFunc):
+            continue
+        function_target = function.attrs.get("target") if function.attrs else None
+        if function_target is None:
+            raise ValueError(
+                "AssignTPUAddresses requires every PrimFunc to be bound to "
+                f"the selected TPU target; {global_var.name_hint!r} is unbound")
+        if function_target.kind.name != "tpu":
+            raise ValueError(
+                "AssignTPUAddresses cannot process a PrimFunc bound to "
+                f"{function_target.kind.name!r}: {global_var.name_hint!r}")
+        function_selection = resolve_tpu_target(target=function_target)
+        if function_selection != selected_target:
+            raise ValueError(
+                "AssignTPUAddresses target identity mismatch for PrimFunc "
+                f"{global_var.name_hint!r}: function={function_selection}, "
+                f"requested={selected_target}")
     return tilelang.transform.AddressAssign()(mod)

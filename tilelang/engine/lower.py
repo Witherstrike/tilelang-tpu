@@ -4,6 +4,7 @@
 
 import os
 import os.path as osp
+import re
 from typing import Union, Optional, Callable, List
 import tilelang.transform
 from tilelang import tvm as tvm
@@ -66,6 +67,10 @@ _RVT_EXTERN_PREFIX = "rvt_"
 _REMOVED_RAW_TPUKERNEL_EXTERN_PREFIX = "tpu_"
 _REMOVED_PPL_EXTERN_PREFIX = "ppl."
 
+
+def _is_valid_raw_rvt_symbol(name: str) -> bool:
+    return re.fullmatch(r"rvt_[A-Za-z0-9_]+", name) is not None
+
 # Keep this list deliberately closed.  Adding a semantic operation requires a
 # frontend definition, address/effect analysis, target-specific codegen, and a
 # contract test; accepting an arbitrary name from either namespace would let a
@@ -91,6 +96,30 @@ _TPUKERNEL_EXTERNS = frozenset({
     "tl.tpukernel.sigmoid",
     "tl.tpukernel.topk",
 })
+
+# Exact tensor-region argument positions in the compiler-owned semantic ABI.
+# Scalar/attribute arguments are intentionally absent.  Keeping this table
+# closed prevents an arbitrary nested ``tl.region`` from becoming a residual
+# BufferLoad escape hatch merely because it appears under a known extern.
+_TPU_SEMANTIC_REGION_ARGS = {
+    "tl.tpu.copy": (1, 2),
+    "tl.tpu.fill": (1,),
+    "tl.tpu.gemm": (1, 2, 3),
+    "tl.tpu.add": (1, 2, 3),
+    "tl.tpu.sub": (1, 2, 3),
+    "tl.tpu.mul": (1, 2, 3),
+    "tl.tpu.div": (1, 2, 3),
+    "tl.tpukernel.add_scalar": (1, 2),
+    "tl.tpukernel.mul_scalar": (1, 2),
+    "tl.tpukernel.exp": (1, 2, 3, 4),
+    "tl.tpukernel.sigmoid": (1, 2, 3, 4, 5),
+    "tl.tpukernel.gather": (1, 2, 3),
+    "tl.tpukernel.topk": (1, 2, 3),
+    "tl.tpukernel.rsqrt": (1, 2),
+    "tl.tpukernel.reduce_sum": (1, 2, 3),
+    "tl.tpukernel.reduce_max": (1, 2, 3),
+    "tl.tpukernel.rope_add": (1, 2, 3, 4, 5),
+}
 
 # CUDA/HIP synchronization has no implicit TPU meaning.  Some operations have
 # ``barrier`` in their registered name while the async-copy queue primitives do
@@ -178,13 +207,13 @@ def _collect_tpu_externs(mod: tvm.IRModule):
         if not isinstance(function, tir.PrimFunc):
             continue
 
-        def visit(node):
+        def visit(node, function_name=global_var.name_hint):
             if not isinstance(node, tir.Call):
                 return
             model = _tpu_extern_programming_model(node)
             if model is not None:
                 name = getattr(node.args[0], "value", "<unknown>")
-                externs.append((global_var.name_hint, str(name), model))
+                externs.append((function_name, str(name), model))
 
         tir.stmt_functor.post_order_visit(function.body, visit)
     return externs
@@ -243,7 +272,7 @@ def _validate_tpu_residual_ir(
 
         externs_by_model = {}
 
-        def collect_extern_model(node):
+        def collect_extern_model(node, externs_by_model=externs_by_model):
             if not isinstance(node, tir.Call):
                 return
             model = _tpu_extern_programming_model(node)
@@ -280,8 +309,185 @@ def _validate_tpu_residual_ir(
                     target, function_name, "vector-buffer-dtype",
                     f"buffer {buffer.name!r} has unsupported dtype {buffer.dtype}")
 
-        def visit(node):
+        # Raw RVT APIs consume user-managed CR/TR/GR register encodings, not
+        # TileLang Buffer data pointers.  Keep the two ownership domains
+        # separate even when a caller tries to hide a descriptor Var inside a
+        # scalar expression.
+        descriptor_data_vars = {
+            buffer.data for buffer in function.buffer_map.values()
+        }
+        # Buffer data Vars and their handle parameters are distinct identities
+        # in legal TIR.  Record both.  Scalar parameters have already been
+        # rejected by the host ABI check above and must not be classified as
+        # descriptors.
+        descriptor_data_vars.update(
+            parameter for parameter in function.params
+            if parameter.dtype == "handle")
+
+        def collect_descriptor_data_vars(
+                node, descriptor_data_vars=descriptor_data_vars):
+            if isinstance(node, tir.Allocate):
+                descriptor_data_vars.add(node.buffer_var)
+            elif isinstance(node, (tir.DeclBuffer, tir.BufferRealize)):
+                descriptor_data_vars.add(node.buffer.data)
+
+        tir.stmt_functor.post_order_visit(
+            function.body, collect_descriptor_data_vars)
+
+        # Every compiler-owned TPU semantic extern carries tensor operands as
+        # direct ``tl.region`` children.  Their BufferLoad/Ramp nodes are
+        # descriptor markers, not executable scalar/vector accesses.  Record
+        # only structurally closed region children here; malformed or
+        # standalone regions still reach the residual-IR rejection below.
+        semantic_region_markers = set()
+        canonical_semantic_calls = set()
+
+        def collect_semantic_region_markers(
+                node, function_name=function_name,
+                semantic_region_markers=semantic_region_markers,
+                canonical_semantic_calls=canonical_semantic_calls):
+            if (not isinstance(node, tir.Call) or
+                    getattr(node.op, "name", None) != "tir.call_extern" or
+                    not node.args):
+                return
+            extern_name = getattr(node.args[0], "value", None)
+            positions = _TPU_SEMANTIC_REGION_ARGS.get(extern_name)
+            if positions is None or len(node.args) <= positions[-1]:
+                return
+            regions = [node.args[position] for position in positions]
+            if any(
+                    not isinstance(region, tir.Call) or
+                    getattr(region.op, "name", None) != "tl.region"
+                    for region in regions):
+                return
+            for position, region in zip(positions, regions):
+                rank = len(region.args) - 2
+                if not 1 <= rank <= 4:
+                    raise _tpu_contract_error(
+                        target, function_name, "semantic-region-ABI",
+                        f"{extern_name} tensor argument {position} has rank "
+                        f"{rank}; tl.region descriptors require rank 1 "
+                        "through 4")
+                if (not isinstance(region.args[0], tir.BufferLoad) or
+                        len(region.args[0].indices) != rank):
+                    raise _tpu_contract_error(
+                        target, function_name, "semantic-region-ABI",
+                        f"{extern_name} tensor argument {position} must start "
+                        "with a BufferLoad whose index rank matches its "
+                        "logical extents")
+
+            canonical_semantic_calls.add(node)
+            for region in regions:
+                marker = region.args[0]
+                semantic_region_markers.add(marker)
+                # A Ramp used directly as a region minimum describes the
+                # vector-width extent; it is consumed structurally by the TPU
+                # region lowering and is not emitted as vector code.  Copy is
+                # the only typed semantic that permits subregions/Ramps; its
+                # contiguous-region rule is checked early for a clear error.
+                for axis, index in enumerate(marker.indices):
+                    if isinstance(index, tir.Ramp):
+                        if extern_name != "tl.tpu.copy":
+                            continue
+                        stride = getattr(index.stride, "value", None)
+                        lanes = getattr(index.lanes, "value", None)
+                        extent = getattr(region.args[axis + 2], "value", None)
+                        if stride != 1:
+                            raise _tpu_contract_error(
+                                target, function_name, "copy-region-ramp",
+                                "tl.tpu.copy represents contiguous regions; "
+                                f"axis {axis} Ramp must have unit stride, got "
+                                f"{index.stride}")
+                        if lanes is None or extent is None or lanes != extent:
+                            raise _tpu_contract_error(
+                                target, function_name, "copy-region-ramp",
+                                "tl.tpu.copy Ramp lane count must equal its "
+                                f"explicit region extent on axis {axis}; got "
+                                f"lanes={index.lanes}, extent="
+                                f"{region.args[axis + 2]}")
+                        semantic_region_markers.add(index)
+
+        tir.stmt_functor.post_order_visit(
+            function.body, collect_semantic_region_markers)
+
+        # TIR is a DAG, so the same BufferLoad/Ramp ObjectRef can have more
+        # than one parent.  A marker is exempt only while reached through its
+        # canonical semantic call; reusing that exact node as an executable
+        # load or vector expression elsewhere must still fail closed.
+        def reject_reused_semantic_marker(
+                node, function_name=function_name,
+                canonical_semantic_calls=canonical_semantic_calls,
+                semantic_region_markers=semantic_region_markers):
+            if node in canonical_semantic_calls:
+                return False
+            if node in semantic_region_markers:
+                raise _tpu_contract_error(
+                    target, function_name, "semantic-region-marker-alias",
+                    "a BufferLoad/Ramp descriptor marker is also referenced "
+                    "outside its canonical TPU semantic region")
+            return True
+
+        tir.stmt_functor.pre_order_visit(
+            function.body, reject_reused_semantic_marker)
+
+        def visit(
+                node, function_name=function_name,
+                externs_by_model=externs_by_model,
+                descriptor_data_vars=descriptor_data_vars,
+                semantic_region_markers=semantic_region_markers):
+            if isinstance(node, tir.Allocate):
+                condition = node.condition
+                if (not isinstance(condition, tir.IntImm) or
+                        int(condition.value) != 1):
+                    raise _tpu_contract_error(
+                        target, function_name, "Allocate-condition",
+                        f"allocation {node.buffer_var.name!r} has condition "
+                        f"{condition}; TPU descriptor allocation is "
+                        "unconditional and requires compile-time true")
+
+            if isinstance(node, tir.AllocateConst):
+                raise _tpu_contract_error(
+                    target, function_name, "AllocateConst",
+                    "constant arrays have no TPU descriptor/load contract; "
+                    "introduce a typed constant-table operation before "
+                    "enabling this node")
+
+            if isinstance(node, tir.CustomizedCode):
+                raise _tpu_contract_error(
+                    target, function_name, "CustomizedCode",
+                    "verbatim source injection bypasses TPU programming-model, "
+                    "descriptor, and command-lifecycle validation")
+
+            if isinstance(node, (
+                    tir.BufferRealize, tir.ProducerStore,
+                    tir.ProducerRealize, tir.Prefetch)):
+                raise _tpu_contract_error(
+                    target, function_name, type(node).__name__,
+                    "node has no residual TPU source-emission contract; "
+                    "consume it in a target pass before codegen")
+
+            if isinstance(node, tir.ProducerLoad):
+                raise _tpu_contract_error(
+                    target, function_name, "ProducerLoad",
+                    "producer loads have no TPU descriptor lowering")
+
+            if (isinstance(node, tir.For) and
+                    node.kind not in (tir.ForKind.SERIAL,
+                                      tir.ForKind.UNROLLED)):
+                raise _tpu_contract_error(
+                    target, function_name, "For",
+                    f"loop kind {node.kind} has no TPU execution mapping; "
+                    "only serial and unrolled loops may reach source codegen")
+
+            if isinstance(node, tir.AttrStmt):
+                raise _tpu_contract_error(
+                    target, function_name, "AttrStmt",
+                    f"attribute {node.attr_key!r} has no residual TPU meaning; "
+                    "consume it in a target pass before source codegen")
+
             if isinstance(node, tir.Ramp):
+                if node in semantic_region_markers:
+                    return
                 raise _tpu_contract_error(
                     target, function_name, "Ramp",
                     f"vector index {node} has no TPU residual-IR lowering")
@@ -300,20 +506,23 @@ def _validate_tpu_residual_ir(
                     f"buffer {node.buffer.name!r} has unsupported dtype "
                     f"{node.buffer.dtype}")
 
-            if isinstance(node, tir.BufferLoad) and (
-                    _has_vector_lanes(node.dtype) or
-                    _has_vector_lanes(node.buffer.dtype)):
+            if isinstance(node, tir.BufferLoad):
+                if node in semantic_region_markers:
+                    return
                 raise _tpu_contract_error(
-                    target, function_name, "vector-load",
-                    f"load from buffer {node.buffer.name!r} has dtype {node.dtype}")
+                    target, function_name, "BufferLoad",
+                    f"direct scalar/vector load from buffer "
+                    f"{node.buffer.name!r} has no TPU descriptor lowering; "
+                    "move data with tl.tpu.copy and compute through a typed "
+                    "TPU semantic operation")
 
-            if isinstance(node, tir.BufferStore) and (
-                    _has_vector_lanes(node.value.dtype) or
-                    _has_vector_lanes(node.buffer.dtype)):
+            if isinstance(node, tir.BufferStore):
                 raise _tpu_contract_error(
-                    target, function_name, "vector-store",
-                    f"store to buffer {node.buffer.name!r} has value dtype "
-                    f"{node.value.dtype}")
+                    target, function_name, "BufferStore",
+                    f"direct scalar/vector store to buffer "
+                    f"{node.buffer.name!r} has no TPU descriptor lowering; "
+                    "move data with tl.tpu.copy and compute through a typed "
+                    "TPU semantic operation")
 
             if not isinstance(node, tir.Call):
                 if isinstance(node, tir.PrimExpr) and _has_vector_lanes(node.dtype):
@@ -344,6 +553,13 @@ def _validate_tpu_residual_ir(
                     target, function_name, "call_pure_extern",
                     f"pure external call {extern_name!r} is not part of the "
                     "side-effecting TPU semantic ABI")
+            if op_name == "tir.tvm_access_ptr":
+                raise _tpu_contract_error(
+                    target, function_name, "tensor-operand-ABI",
+                    "bare tir.tvm_access_ptr is not a TPU tensor operand; "
+                    "compiler-owned semantic calls require a whole-buffer "
+                    "tl.region so logical shape and access direction remain "
+                    "available to native codegen")
             if op_name != "tir.call_extern":
                 return
 
@@ -367,6 +583,31 @@ def _validate_tpu_residual_ir(
                     f"{', '.join(externs_by_model.get('tpukernel', []))}")
             if model == "rv":
                 if tpu_config.programming_model == "rv":
+                    if not _is_valid_raw_rvt_symbol(extern_name):
+                        raise _tpu_contract_error(
+                            target, function_name, "raw-rvt-symbol",
+                            "raw RVT extern name must be a C identifier "
+                            f"beginning with 'rvt_'; got {extern_name!r}")
+                    referenced_descriptors = set()
+
+                    def find_descriptor_var(
+                            candidate,
+                            descriptor_data_vars=descriptor_data_vars):
+                        if (isinstance(candidate, tir.Var) and
+                                candidate in descriptor_data_vars):
+                            referenced_descriptors.add(candidate.name)
+
+                    for argument in node.args[1:]:
+                        tir.stmt_functor.post_order_visit(
+                            argument, find_descriptor_var)
+                    if referenced_descriptors:
+                        raise _tpu_contract_error(
+                            target, function_name, "raw-rvt-descriptor-argument",
+                            f"raw RVT extern {extern_name!r} references TileLang "
+                            "tensor descriptor Var(s) "
+                            f"{', '.join(sorted(referenced_descriptors))}; pass "
+                            "user-managed RVT register encodings, or use a "
+                            "compiler-owned tl.tpu.* operation")
                     return
                 raise _tpu_contract_error(
                     target, function_name, "call_extern",

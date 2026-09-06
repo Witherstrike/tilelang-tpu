@@ -1,7 +1,7 @@
 # TileLang-TPU 的 PPL 指令 Profiling 设计与实现
 
 本文说明为什么需要独立 profiling 模块、PPL 1.7 的真实工作机制、TileLang-TPU 的
-CModel/PCIe 实现、使用方式、安全边界与 2026-09-04 的实测结论。
+CModel/PCIe 实现、使用方式、安全边界，以及 2026-09-04 至 2026-09-05 的分层证据。
 
 这里严格区分三类时间：host wall time、原始命令记录、解码后的设备指令时间。只有最后一类
 可以回答“某条 TIU/GDMA 指令用了多久”。
@@ -10,19 +10,17 @@ CModel/PCIe 实现、使用方式、安全边界与 2026-09-04 的实测结论�
 
 | 路径 | 已实现 | 本机证据 | 仍有限制 |
 | --- | --- | --- | --- |
-| SG2260E + TPU-Kernel + CModel | `FILE_DUMP_CMD`、四核拓扑设置、raw/.txt 解析、可选 PerfAI | add/sub/mul/div 与 matmul 全部数值通过；逐元素 58、matmul 78 条文本命令 | 本机 SDK 未附 CModel PerfAI，因此没有 CModel 真实逐指令时间 |
+| SG2260E + TPU-Kernel + CModel | `FILE_DUMP_CMD`、四核拓扑设置、raw/.txt 解析、可选 PerfAI | 2026-09-04 核心五项数值通过；逐元素 58、matmul 78 条文本命令 | 本机 SDK 未附 CModel PerfAI，因此没有 CModel 真实逐指令时间 |
 | SG2260E + RV + CModel | 同一隔离收集框架 | 同一五项数值全部通过，覆盖 RV descriptor、DMA、算术、GEMM 与回写 | CModel raw 只有命令文本，不提供真实 duration |
-| SG2260E + TPU-Kernel + PCIe | TPUDNN recorder、单次 dispatch、raw 收集、`bigTpuProfile` JSON 投影 | device 0 五项数值通过；逐元素各 16、matmul 36 条真实 timing | profiling 开销下的 host 时间不能作 kernel 性能值 |
-| SG2260E + RV + PCIe | 与 TPU-Kernel 共用 TPUDNN host 路径 | device 0 五项数值通过；逐元素各 16、matmul 36 条真实 timing | 当前只覆盖固定 shape/dtype 的单核工作负载 |
+| SG2260E + TPU-Kernel + PCIe | TPUDNN recorder、单次 dispatch、raw 收集、结构化 `bigTpuProfile` JSON 投影 | 非 FP8 数值矩阵 140/140；2026-09-05 matmul 收集一个 raw 目录并离线解码 36 条 ns 事件 | 受监管运行时未安装 decoder；离线解码需显式外部依赖，host 时间不是 kernel 性能值 |
+| SG2260E + RV + PCIe | 与 TPU-Kernel 共用 TPUDNN host 路径 | 固定 shape/dtype 的核心五项数值通过；2026-09-04 历史工件保留了当时的解码行 | 当前结构化 decoder 契约尚未对 RV trace 重跑，不将历史 `parser_status=ready` 提升为当前 decoder 证据 |
 
-因此，profiling 已经在 CModel 和 PCIe 两端实际发挥作用；RV 不再只是控制路径，真实
-tensor add/sub/mul/div 和 `MM2_NN` 已取得数值与逐指令证据。单次 recorder 结果仍只用于
-诊断，不用于宣称统计性能。
+因此，CModel 的 raw 命令收集与 PCIe 的 recorder 路径均已发挥作用。当前结构化逐指令解码的
+canonical 证据是 SG2260E/TPU-Kernel matmul 的 36 条事件；RV 板端已有数值与 raw 收集证据，但解码器契约需单独重跑。单次 recorder 结果只用于诊断，不用于宣称统计性能。
 
 ## 2. 为什么不能直接给 JIT 加 `--profiling`
 
-PPL 1.7 的 `ppl_compile.py --profiling` 已是 `--autotune` 的兼容别名。它做的不只是“编译时
-打开一个宏”，而是完整的 PPL 前端流程：生成 autotune host glue、编译、运行、收集和后处理。
+PPL 1.7 自身的 `ppl_compile.py --profiling` 是其已标记 deprecated 的 CLI 别名，实际进入与 `--autotune` 相同的分支。这是对外部 PPL 脚本的事实说明，TileLang 不保留该别名。该分支做的不只是“编译时打开一个宏”，而是完整的 PPL 前端流程：生成 autotune host glue、编译、运行、收集和后处理。
 
 TileLang 已直接生成 PPL `kernel.c`、host wrapper 与 `main.so`，输入不是 PPL `.pl`。照搬该
 开关会重复或错配 codegen，也无法自动把 TPUDNN profile session 接到 TileLang 自己的
@@ -136,13 +134,16 @@ PPL 1.7 `deps/runtime/tpuv7-runtime/lib/libtpuv7_rt.so` 依赖
 ### 3.5 PCIe 离线解码契约
 
 PPL 1.7 的 `autotune.py` 会调用 `to_txt()`，并在缺包时自动执行 pip；这两种行为都不进入
-TileLang 的生产路径。TileLang 只接受 `parse()` 返回结构化 `ProfileResult` 的显式外部
-decoder，读取 `bd_events/gdma_events/sdma_events/cdma_events` 后写
-`tilelang_pcie_profile.json`。本轮以隔离安装的 `bigTpuProfile 0.3.5` 验证了该契约。
+TileLang 的生产路径。TileLang 自带的 PCIe decoder 只接受 `parse()` 返回的结构化
+`ProfileResult`，读取 `bd_events/gdma_events/sdma_events/cdma_events` 后写
+`tilelang_pcie_profile.json`。本轮以隔离安装的 `bigTpuProfile 0.3.5` 验证了这条 canonical
+路径。
 
-框架不会自动安装或升级包，也不保留依赖 PerfAI Web 文件布局的兼容分支。稳定 JSON 保存
-engine、begin/end、`ns` 单位、core、command id、opcode，以及 vendor 的原始
-info/detail/metadata；不满足结构化契约的 decoder 会显式报错，raw trace 保持不变。
+框架不会自动安装或升级包。PCIe 路径只接受内置 decoder 生成的 canonical JSON，不再扫描
+PerfAI Web UI 的 `profile_data.js`；decoder 成功退出却没有生成 JSON 时会明确返回
+`missing-report`，避免把未受控的 UI 格式误当成稳定接口。稳定 JSON 保存 engine、begin/end、
+`ns` 单位、core、command id、opcode，以及 vendor 的原始 info/detail/metadata；内置 decoder
+不满足结构化契约时会显式报错，raw trace 保持不变。
 
 ## 4. 使用方法
 
@@ -215,7 +216,7 @@ kernel = tilelang.compile(
 | `raw_trace_files` | CModel raw 文件，或 PCIe 的 `cdm_profile_data_dev*` 文件/目录 |
 | `raw_instructions` | CModel 文本 sidecar 中可识别的命令；没有时间值 |
 | `decoded_report_paths` | PCIe `bigTpuProfile` 的稳定 JSON 投影 |
-| `perfai_report_paths` | CModel/旧 PCIe 链的 `profile_data.js` |
+| `perfai_report_paths` | CModel PerfAI 的 `profile_data.js`；PCIe 路径恒为空 |
 | `timeline_events` | 可用时间线的完整事件；PCIe 稳定 JSON 当前只含设备命令 |
 | `instruction_timings` | 设备命令的 engine/core/id/opcode/begin/end/duration/unit |
 
@@ -252,19 +253,21 @@ Unix socket 串行化自身会话；socket 随进程退出自动释放，不产�
 raw/decoded 报告不受影响。验证构建、pytest 基目录和临时安装的 decoder 依赖不纳入 Git，
 完成报告后清理；仓库只保留实现、测试和本 README。
 
-## 7. 2026-09-04 验证记录
+## 7. 历史验证与当前证据的边界
 
-### 7.1 CModel
+7.1–7.3 保留 2026-09-04 核心 profiling 竖切的原始计数，用于说明实现是如何被验证的。它们不替代 [当前完整数值报告](../tpu-backend-design/test-report.md)，也不替代 2026-09-05 对结构化 `ProfileResult` 解码契约的离线验证。
+
+### 7.1 2026-09-04 CModel
 
 - SG2260E TPU-Kernel 与 RV：add/sub/mul/div、64×64 FP16 matmul 共 10 项全部
   `allclose` 通过；每个逐元素解析 58 条 raw 命令，matmul 78 条。
 - BM1690 TPU-Kernel：同样五项全部通过；逐元素 94、matmul 122 条 raw 命令。
 - 三种组合合计 15/15；24/48 个 trace 文件反映 4/8 核模拟器拓扑，不代表工作负载多核执行。
 
-### 7.2 PCIe device 0
+### 7.2 2026-09-04 PCIe device 0
 
 - TPU-Kernel 与 RV 的 add/sub/mul/div、matmul 均完成加载、单次发射、回传、数值比对、
-  recorder 和结构化解码，合计 10/10。
+  recorder 和当时的 JSON 投影，合计 10/10。
 - 每个逐元素 case 为 16 条：`tensorLd` 8、对应算术 4、`tensorSt` 4。单条
   TPU-Kernel/RV add/sub/mul 分别为 14/12 ns，div 为 74/72 ns。
 - 每个 matmul 为 36 条：`tensorLd` 16、`MM2_NN` 8、copy 4、`data_convert` 4、
@@ -272,13 +275,12 @@ raw/decoded 报告不受影响。验证构建、pytest 基目录和临时安装�
 - 初次 TPU-Kernel matmul 因 `T.Pipelined(num_stages=1)` 将 load 与直接消费者 GEMM 放入
   并行区而数值失败；矩阵按首错停止。改为依赖有序的 `T.serial` 后，CModel 三组合和
   PCIe 均通过。这证明 CModel 无法替代真实并行时序验证。
-- 端到端 `run_pcie → TPUDNN → raw directory → bigTpuProfile → stable JSON → report` 在
-  两种编程模型的真实 tensor 指令上通过。
+- 这些历史工件中的 timing 可用于回顾当时的指令选择，但当时 decoder 路径不是当前内置 decoder 的结构化 `ProfileResult` → canonical JSON 契约；因此机器能力契约只将这些 summary 用作 RV/TPU-Kernel 核心数值证据，不用作当前 decoder 的 conformance 证据。
 
 host 打印的单次时间约 8 ms，包含 runtime 调用和 profiling 开销，不能与上述设备命令 ns
 直接求和或当成无扰动性能。性能结论需要关闭 profiling 后的重复测量与统计设计。
 
-### 7.3 工程回归
+### 7.3 2026-09-04 工程回归
 
 - TPU 相关静态/单元测试：`101 passed, 4 skipped`；覆盖双 target、工具链、codegen、
   AddressAssign、运行时门禁、超时进程组与 bounded kill/drain。
@@ -290,8 +292,7 @@ host 打印的单次时间约 8 ms，包含 runtime 调用和 profiling 开销�
 
 1. 获得与本机 SG2260E raw schema 匹配的 CModel PerfAI，验证真实 CModel
    `profile_data.js`，而不只依赖 fixture。
-2. 扩充 PCIe 数值矩阵（dtype、tail、copy/fill/elementwise/reduce），每项必须先有 CModel
-   基线，再单次板端验证。
+2. 已完成 SG2260E/TPU-Kernel 非 FP8 的 copy/fill/elementwise/reduce 矩阵；下一步是按 copy/cast、arithmetic、GEMM、gather/RoPE 分批完成 FP8 PCIe，并为更宽 RV selector 分别建立 CModel 前置证据。
 3. 为 profile artifact 增加正式 manifest（resolved target、SDK、board runtime、kernel、输入
    shape/dtype）；在此之前不要用不同构建之间的 timing 做自动回归判定。
 4. 将 profiling duration 与普通 benchmark 分层：profiling 用于定位指令，benchmark 用于低

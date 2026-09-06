@@ -73,7 +73,7 @@ def _portable_and_raw_rv(
 @T.prim_func
 def _reserved_entry_probe(A: T.Tensor((1,), "float32")):
     T.func_attr({"global_symbol": "reserved_entry_probe", "tir.noalias": T.bool(True)})
-    A[0] = A[0]
+    T.evaluate(0)
 
 
 @T.prim_func
@@ -307,9 +307,20 @@ def test_global_to_global_copy_uses_system_memory_instruction():
 
 
 def test_copy_conversion_capabilities_fail_closed():
-    with pytest.raises(tvm.error.TVMError, match="does not support direct FP16/BF16"):
+    with pytest.raises(
+            tvm.error.TVMError,
+            match=r"limited to the validated FP32 <-> .* pairs"):
         tilelang.lower(
             _local_fp16_to_bf16_copy,
+            target=_tpu_target("sg2260e", "tpukernel"),
+            runtime_mode="cmodel",
+        )
+
+    with pytest.raises(
+            tvm.error.TVMError,
+            match=r"limited to the validated FP32 <-> .* pairs"):
+        tilelang.lower(
+            _local_integer_convert,
             target=_tpu_target("sg2260e", "tpukernel"),
             runtime_mode="cmodel",
         )

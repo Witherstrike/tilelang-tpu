@@ -7,6 +7,7 @@ import pytest
 import tilelang
 from tilelang import tvm
 import tilelang.language as T
+from tilelang.language.copy import buffer_to_tile_region
 
 
 def _target(chip="sg2260e"):
@@ -58,7 +59,7 @@ def test_fp8_scalar_uses_generic_scalar_instruction(operation, dtype, dtype_toke
     source = tilelang.lower(
         kernel, target=_target(), runtime_mode="cmodel").kernel_source
     assert f"tpu_bdc_fp_{operation}_C(" in source
-    assert f"tpu_cast(" in source and f", {dtype_token}, DT_FP32," in source
+    assert "tpu_cast(" in source and f", {dtype_token}, DT_FP32," in source
     assert f"tpu_bdc_fp8_{operation}_C(" not in source
 
 
@@ -114,17 +115,53 @@ def test_validated_fp8_backend_owned_ops_reach_codegen(
     assert dtype_token in source
 
 
-def test_non_fp8_transposed_gemm_accumulation_fails_at_frontend():
-    with pytest.raises(tvm.error.DiagnosticError):
+def test_transposed_gemm_accumulation_is_selected_by_programming_model():
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, is_cpu=True) as _:
+            lhs = T.alloc_shared((16, 64), "float16")
+            rhs = T.alloc_shared((16, 64), "float16")
+            out = T.alloc_shared((16, 16), "float32")
+            T.ppl_gemm(
+                lhs, rhs, out, transpose_B=True, accumulate=True)
 
-        @T.prim_func
-        def kernel():
-            with T.Kernel(1, is_cpu=True) as _:
-                lhs = T.alloc_shared((16, 64), "float16")
-                rhs = T.alloc_shared((16, 64), "float16")
-                out = T.alloc_shared((16, 16), "float32")
-                T.ppl_gemm(
-                    lhs, rhs, out, transpose_B=True, accumulate=True)
+    with pytest.raises(
+            tvm.error.TVMError,
+            match="no accumulating right-transpose GEMM instruction"):
+        tilelang.lower(
+            kernel, target=_target(), runtime_mode="cmodel")
+
+    rv_source = tilelang.lower(
+        kernel,
+        target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
+        runtime_mode="cmodel",
+    ).kernel_source
+    assert "rvt_fmm2a_nt(10, 8, 9, 0, 0, 0);" in rv_source
+
+
+def test_rv_native_gemm_cannot_bypass_fp32_accumulator_contract():
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, is_cpu=True) as _:
+            lhs = T.alloc_shared((16, 16), "float16")
+            rhs = T.alloc_shared((16, 16), "float16")
+            out = T.alloc_shared((16, 16), "float16")
+            T.evaluate(T.call_extern(
+                "handle", "tl.tpu.gemm",
+                buffer_to_tile_region(lhs, "r"),
+                buffer_to_tile_region(rhs, "r"),
+                buffer_to_tile_region(out, "rw"), T.bool(False), T.bool(False),
+                16, 16, 16, T.bool(True)))
+
+    with pytest.raises(
+            tvm.error.TVMError,
+            match="accumulating fmm2 requires an FP32 C tile"):
+        tilelang.lower(
+            kernel,
+            target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
+            runtime_mode="cmodel",
+        )
 
 
 def test_invalid_elementwise_broadcast_fails_at_frontend():
@@ -137,6 +174,134 @@ def test_invalid_elementwise_broadcast_fails_at_frontend():
                 rhs = T.alloc_shared((1, 32), "float32")
                 out = T.alloc_shared((4, 32), "float32")
                 T.ppl_add(out, lhs, rhs)
+
+
+def test_gemm_output_alias_fails_at_frontend():
+    with pytest.raises(tvm.error.DiagnosticError):
+
+        @T.prim_func
+        def kernel():
+            with T.Kernel(1, is_cpu=True) as _:
+                lhs_and_out = T.alloc_shared((16, 16), "float16")
+                rhs = T.alloc_shared((16, 16), "float16")
+                T.ppl_gemm(
+                    lhs_and_out,
+                    rhs,
+                    lhs_and_out,
+                    accumulate=False,
+                )
+
+
+def test_shape_changing_local_view_fails_at_compiler_descriptor_boundary():
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, is_cpu=True) as _:
+            storage = T.alloc_shared((2, 6), "float32")
+            reshaped = T.view(storage, (3, 4))
+            T.ppl_fill(storage, T.float32(0))
+            T.ppl_fill(reshaped, T.float32(0))
+
+    with pytest.raises(
+            tvm.error.TVMError,
+            match=(r"multiple Allocate nodes for data Var|"
+                   r"shape disagrees with (its descriptor owner|its Allocate)")):
+        tilelang.lower(kernel, target=_target(), runtime_mode="cmodel")
+
+
+def test_rank_changing_local_view_fails_at_compiler_descriptor_boundary():
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, is_cpu=True) as _:
+            storage = T.alloc_shared((12,), "float32")
+            reshaped = T.reshape(storage, (3, 4))
+            T.ppl_fill(storage, T.float32(0))
+            T.ppl_fill(reshaped, T.float32(0))
+
+    with pytest.raises(
+            tvm.error.TVMError,
+            match=(r"multiple Allocate nodes for data Var|"
+                   r"rank disagrees with (its descriptor owner|its Allocate)")):
+        tilelang.lower(kernel, target=_target(), runtime_mode="cmodel")
+
+
+def test_rope_cannot_lose_a_reshaped_view_contract():
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, is_cpu=True) as _:
+            out = T.alloc_shared((2, 6), "float32")
+            even0 = T.alloc_shared((2, 6), "float32")
+            even1 = T.alloc_shared((2, 6), "float32")
+            odd0 = T.alloc_shared((2, 6), "float32")
+            odd1 = T.alloc_shared((2, 6), "float32")
+            T.ppl_fill(out, T.float32(0))
+            T.ppl_fill(even0, T.float32(0))
+            T.ppl_fill(even1, T.float32(0))
+            T.ppl_fill(odd0, T.float32(0))
+            T.ppl_fill(odd1, T.float32(0))
+            T.ppl_rope_add(
+                T.view(out, (3, 4)),
+                T.view(even0, (3, 4)),
+                T.view(even1, (3, 4)),
+                T.view(odd0, (3, 4)),
+                T.view(odd1, (3, 4)))
+
+    with pytest.raises(
+            tvm.error.TVMError,
+            match=(r"multiple Allocate nodes for data Var|"
+                   r"shape disagrees with (its descriptor owner|its Allocate)")):
+        tilelang.lower(kernel, target=_target(), runtime_mode="cmodel")
+
+
+def test_direct_tensor_alias_cannot_bypass_logical_shape_validation():
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, is_cpu=True) as _:
+            storage = T.alloc_shared((2, 6), "float32")
+            alias = T.Tensor((3, 4), "float32", storage.data)
+            T.ppl_fill(storage, T.float32(0))
+            T.ppl_fill(alias, T.float32(0))
+
+    with pytest.raises(
+            tvm.error.TVMError,
+            match=(r"multiple Allocate nodes for data Var|"
+                   r"shape disagrees with (its descriptor owner|its Allocate)")):
+        tilelang.lower(kernel, target=_target(), runtime_mode="cmodel")
+
+
+@pytest.mark.parametrize("alias_kind", ("view", "reshape", "tensor"))
+def test_descriptor_equivalent_local_alias_is_allowed(alias_kind):
+    def make_alias(storage):
+        if alias_kind == "view":
+            return T.view(storage, (2, 6))
+        if alias_kind == "reshape":
+            return T.reshape(storage, (2, 6))
+        return T.Tensor((2, 6), "float32", storage.data)
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, is_cpu=True) as _:
+            storage = T.alloc_shared((2, 6), "float32")
+            alias = make_alias(storage)
+            T.ppl_fill(alias, T.float32(0))
+
+    source = tilelang.lower(
+        kernel, target=_target(), runtime_mode="cmodel").kernel_source
+    assert source.count("tpu_bdc_set_C(") == 1
+
+
+@pytest.mark.parametrize("reduce", (T.ppl_reduce_sum, T.ppl_reduce_max))
+def test_reduction_input_output_alias_fails_at_frontend(reduce):
+    with pytest.raises(tvm.error.DiagnosticError):
+
+        @T.prim_func
+        def kernel():
+            with T.Kernel(1, is_cpu=True) as _:
+                tile = T.alloc_shared((4, 32), "float32")
+                reduce(tile, tile, dim=1)
 
 
 @pytest.mark.parametrize("operation", ("exp", "sigmoid", "rope"))

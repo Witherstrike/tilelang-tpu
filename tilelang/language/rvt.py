@@ -21,7 +21,10 @@ def rvt_call(intrinsic: str, *args):
     ``intrinsic`` must be the literal name of an RVT API beginning with
     ``rvt_`` (for example ``\"rvt_fconv\"`` or ``\"rvt_dma_hscatter\"``).
     This generic entry point covers the direct subset of PPL 1.7 RVT whose C
-    ABI arguments can be represented by TIR scalar/pointer expressions. It
+    ABI arguments can be represented by TIR scalar expressions. TileLang
+    Buffer data pointers are compiler-owned tensor descriptors and cannot be
+    passed through this raw escape hatch; use ``tl.tpu.*`` operations when
+    buffers need descriptor construction. It
     intentionally does not claim support for header APIs that take C structs
     by value (for example ``array4_t``); those require dedicated descriptor
     builder helpers before they can be called correctly from TileLang.

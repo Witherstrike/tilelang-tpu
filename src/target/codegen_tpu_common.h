@@ -25,11 +25,13 @@
 #define TVM_TL_TARGET_CODEGEN_TPU_COMMON_H_
 
 #include <tvm/target/codegen.h>
+#include <tvm/tir/buffer.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -64,9 +66,13 @@ public:
                          DataType target) final;
   void VisitExpr_(const RampNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
+  void VisitExpr_(const VarNode *op, std::ostream &os) final;
   void VisitExpr_(const CallNode *op, std::ostream &os) final;
   void VisitExpr_(const CastNode *op, std::ostream &os) final;
   void VisitStmt_(const AllocateNode *op) final;
+  void VisitStmt_(const AllocateConstNode *op) final;
+  void VisitStmt_(const CustomizedCodeNode *op) final;
+  void VisitStmt_(const DeclBufferNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
   void VisitStmt_(const LetStmtNode *op) final;
   void VisitExpr_(const FloorDivNode *op, std::ostream &os) final;
@@ -83,6 +89,15 @@ protected:
                        std::ostream &os) final; // NOLINT(*)
 
 private:
+  struct SemanticTensorOperand {
+    const VarNode *data_var{nullptr};
+    std::string descriptor;
+    DataType dtype;
+    std::vector<int> shape4;
+    size_t rank{0};
+    bool is_local{false};
+  };
+
   // Backend-specific emission.  Parsing TIR operands and maintaining the
   // stable kernel ABI stay in this class; instruction selection lives in the
   // two sibling translation units named after their programming model.
@@ -139,12 +154,20 @@ private:
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangTPU *p);
   std::string AllocLocalVarID(const tir::VarNode *v);
-  std::unordered_map<std::string, std::string> parameter_map;
-  // Global access_ptr operands carry Buffer::data variables, while generated
-  // function arguments are handle variables.  Keep the semantic Buffer name
-  // as the explicit bridge instead of relying on name_hint equality or
-  // overloading CodeGenC's var_idmap_ with tensor-info identifiers.
-  std::unordered_map<const VarNode *, std::string> global_buffer_name_;
+  SemanticTensorOperand ParseWholeBufferRegion(
+      const PrimExpr &expr, const std::string &context,
+      int expected_access_mask) const;
+  const std::vector<int> &DescriptorShape4(
+      const VarNode *data_var, const std::string &context) const;
+  size_t DescriptorRank(const VarNode *data_var,
+                        const std::string &context) const;
+  // Global semantic operands carry Buffer::data variables, while generated
+  // function arguments are positional handles.  Bridge them by Var identity;
+  // Buffer names are presentation metadata and need not be unique in TIR.
+  std::unordered_map<const VarNode *, std::string> global_buffer_descriptor_;
+  // Every handle/Var that the compiler maps to a tensor-info descriptor.
+  // Raw RVT externs accept register encodings, never these C struct values.
+  std::unordered_set<const VarNode *> compiler_descriptor_vars_;
   std::unordered_map<std::string, std::vector<int>> buffer_shape;
   // Full normalized N/C/H/W shape for local tensors.  buffer_shape is the
   // projected C/W matrix view required by the current instruction ABI;
@@ -153,6 +176,13 @@ private:
   std::unordered_map<std::string, std::vector<int>> buffer_shape4;
   std::unordered_map<std::string, std::vector<int>> buffer_stride;
   std::unordered_map<const VarNode *, int> buffer_addrs_;
+  std::unordered_map<const VarNode *, DataType> descriptor_dtype_;
+  std::unordered_map<const VarNode *, int64_t> descriptor_element_count_;
+  std::unordered_map<const VarNode *, std::vector<int>> descriptor_shape4_;
+  // Preserve source rank as well as normalized dim4.  Rank-changing Buffer
+  // aliases may normalize to the same dim4 but are outside the closed tensor
+  // descriptor/view contract.
+  std::unordered_map<const VarNode *, size_t> descriptor_rank_;
 
   // Module-level include/ABI requirements plus per-function ownership fences.
   bool uses_rvt_api_{false};

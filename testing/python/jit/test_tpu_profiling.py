@@ -631,6 +631,33 @@ def test_pcie_profile_decodes_with_preinstalled_vendor_packages(tmp_path):
             ]
 
 
+def test_pcie_decoder_requires_canonical_tilelang_json(tmp_path, monkeypatch):
+    decoder = tmp_path / "legacy_only_decoder.py"
+    decoder.write_text(
+        "from pathlib import Path\n"
+        "Path('profile_data.js').write_text('let time_data = [];\\n')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        tpu_profiling_module, "_PCIE_PROFILE_DECODER_PATH", decoder)
+    config = TPUProfilingConfig(
+        chip="sg2260e",
+        programming_model="rv",
+        runtime_mode="pcie",
+        output_dir=tmp_path / "profile",
+    )
+
+    report = TPUInstructionProfiler(config).run_pcie(
+        _fake_pcie_trace_worker("rv"),
+        environment=_pcie_profile_environment(),
+    )
+
+    assert report.parser_status == "missing-report"
+    assert report.decoded_report_paths == ()
+    assert report.perfai_report_paths == ()
+    assert report.instruction_timings == ()
+
+
 def test_pcie_canonical_decoder_report_rejects_an_unknown_schema(tmp_path):
     report_path = tmp_path / "tilelang_pcie_profile.json"
     report_path.write_text('{"schema_version": 2, "events": []}', encoding="utf-8")

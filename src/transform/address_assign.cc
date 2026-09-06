@@ -30,6 +30,7 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/function.h>
+#include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
@@ -59,6 +60,14 @@ int64_t AlignUp(int64_t value, int64_t align) {
   return tpuv7::AlignUp(value, align);
 }
 
+std::string GetPointerStorageScope(const Var &var) {
+  const auto *pointer_type = var->type_annotation.as<PointerTypeNode>();
+  ICHECK(pointer_type)
+      << "AddressAssign requires a pointer-typed allocation Var, got "
+      << var << " with type " << var->type_annotation;
+  return pointer_type->storage_scope;
+}
+
 } // namespace
 
 class AddressAllocator : public StmtExprVisitor {
@@ -67,16 +76,75 @@ public:
 
   std::vector<const BufferNode *> collectAllocOp(tir::Stmt body) {
     this->VisitStmt(body);
+    ICHECK_EQ(allocation_data_vars_.size(), declared_data_vars_.size())
+        << "AddressAssign requires every TPU local Allocate to own exactly one "
+           "canonical DeclBuffer";
     return alloc_ops_;
   }
 
-  void VisitStmt_(const DeclBufferNode *op) {
+  void VisitStmt_(const AllocateNode *op) final {
+    const VarNode *data_var = op->buffer_var.get();
+    const std::string scope = GetPointerStorageScope(op->buffer_var);
+    ICHECK(tpuv7::IsLocalMemoryScope(scope))
+        << "AddressAssign only supports TPU descriptor allocations; buffer "
+        << data_var->name_hint << " has scope " << scope;
+    ICHECK(is_one(op->condition))
+        << "AddressAssign requires an unconditional local allocation for "
+        << data_var->name_hint;
+    ICHECK(allocation_data_vars_.insert(data_var).second)
+        << "AddressAssign found multiple Allocate nodes for data Var "
+        << data_var->name_hint;
+    ICHECK(active_allocations_.emplace(data_var, op).second)
+        << "AddressAssign found a recursively shadowed allocation Var "
+        << data_var->name_hint;
+    this->VisitStmt(op->body);
+    active_allocations_.erase(data_var);
+  }
+
+  void VisitStmt_(const DeclBufferNode *op) final {
+    const VarNode *data_var = op->buffer->data.get();
+    auto allocation = active_allocations_.find(data_var);
+    ICHECK(allocation != active_allocations_.end())
+        << "AddressAssign local DeclBuffer " << op->buffer->name
+        << " is not lexically owned by a matching Allocate";
+    ICHECK(declared_data_vars_.insert(data_var).second)
+        << "AddressAssign found multiple local DeclBuffers for allocation "
+        << data_var->name_hint;
+    const AllocateNode *allocate = allocation->second;
+    ICHECK_EQ(op->buffer->dtype, allocate->dtype)
+        << "AddressAssign DeclBuffer " << op->buffer->name
+        << " dtype disagrees with its Allocate";
+    const std::string buffer_scope = op->buffer.scope();
+    const std::string allocation_scope =
+        GetPointerStorageScope(allocate->buffer_var);
+    ICHECK_EQ(buffer_scope, allocation_scope)
+        << "AddressAssign DeclBuffer " << op->buffer->name << " scope "
+        << buffer_scope << " disagrees with its Allocate scope "
+        << allocation_scope;
+    ICHECK(is_zero(op->buffer->elem_offset) && op->buffer->strides.empty() &&
+           op->buffer->axis_separators.empty() &&
+           op->buffer->buffer_type == BufferType::kDefault)
+        << "AddressAssign DeclBuffer " << op->buffer->name
+        << " must be a canonical zero-offset contiguous TPU tensor";
+    ICHECK_EQ(op->buffer->shape.size(), allocate->extents.size())
+        << "AddressAssign DeclBuffer " << op->buffer->name
+        << " rank disagrees with its Allocate";
+    const auto buffer_shape = tpuv7::NormalizeLocalShape(
+        op->buffer->shape, "AddressAssign DeclBuffer");
+    const auto allocation_shape = tpuv7::NormalizeLocalShape(
+        allocate->extents, "AddressAssign Allocate");
+    ICHECK(buffer_shape == allocation_shape)
+        << "AddressAssign DeclBuffer " << op->buffer->name
+        << " shape disagrees with its Allocate";
     alloc_ops_.emplace_back(op->buffer.get());
     this->VisitStmt(op->body);
   }
 
 private:
   std::vector<const BufferNode *> alloc_ops_;
+  std::unordered_map<const VarNode *, const AllocateNode *> active_allocations_;
+  std::unordered_set<const VarNode *> allocation_data_vars_;
+  std::unordered_set<const VarNode *> declared_data_vars_;
 };
 
 struct TensorLive {
@@ -402,60 +470,6 @@ private:
     operand_access_kind_ = previous_access;
   }
 
-  bool IsAccessPtrCall(const CallNode *op) const {
-    return op->op.same_as(builtin::tvm_access_ptr());
-  }
-
-  const BufferNode *BufferFromAccessPtr(const CallNode *op) const {
-    if (!IsAccessPtrCall(op) || op->args.size() < 2) {
-      return nullptr;
-    }
-    auto *var = op->args[1].as<VarNode>();
-    if (!var) {
-      return nullptr;
-    }
-    auto it = buffer_var_to_buffer_.find(var);
-    if (it == buffer_var_to_buffer_.end()) {
-      return nullptr;
-    }
-    return it->second;
-  }
-
-  BufferAccessKind AccessKindFromAccessPtr(const CallNode *op) const {
-    if (op->args.size() < 5) {
-      return BufferAccessKind::kConservative;
-    }
-    auto *mask = op->args[4].as<IntImmNode>();
-    if (!mask) {
-      return BufferAccessKind::kConservative;
-    }
-    bool read = (mask->value & 1) != 0;
-    bool write = (mask->value & 2) != 0;
-    if (read && write) {
-      return BufferAccessKind::kReadWrite;
-    }
-    if (read) {
-      return BufferAccessKind::kRead;
-    }
-    if (write) {
-      return BufferAccessKind::kWrite;
-    }
-    return BufferAccessKind::kConservative;
-  }
-
-  void VisitAccessPtrCall(const CallNode *op, BufferAccessKind access_kind) {
-    const BufferNode *buffer = BufferFromAccessPtr(op);
-    if (buffer) {
-      MarkUse(buffer, access_kind);
-    }
-    for (size_t i = 0; i < op->args.size(); ++i) {
-      if (i == 1 || i == 4) {
-        continue;
-      }
-      VisitExpr(op->args[i]);
-    }
-  }
-
   bool VisitExternEffects(const CallNode *op) {
     if (!op->op.same_as(builtin::call_extern()) || op->args.empty()) {
       return false;
@@ -556,18 +570,10 @@ private:
 
   void VisitExpr_(const CallNode *op) {
     if (collecting_operand_) {
-      if (IsAccessPtrCall(op)) {
-        VisitAccessPtrCall(op, operand_access_kind_);
-        return;
-      }
       StmtExprVisitor::VisitExpr_(op);
       return;
     }
     if (VisitExternEffects(op)) {
-      return;
-    }
-    if (IsAccessPtrCall(op)) {
-      VisitAccessPtrCall(op, AccessKindFromAccessPtr(op));
       return;
     }
     OpScope scope(this);
@@ -576,13 +582,21 @@ private:
 
   void VisitExpr_(const BufferLoadNode *op) {
     OpScope scope(this);
-    MarkUse(op->buffer.get(), BufferAccessKind::kRead);
+    auto canonical = buffer_var_to_buffer_.find(op->buffer->data.get());
+    if (canonical != buffer_var_to_buffer_.end()) {
+      MarkUse(canonical->second, collecting_operand_ ? operand_access_kind_
+                                                     : BufferAccessKind::kRead);
+    }
     StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const BufferStoreNode *op) {
     OpScope scope(this);
-    MarkUse(op->buffer.get(), BufferAccessKind::kWrite);
+    auto canonical = buffer_var_to_buffer_.find(op->buffer->data.get());
+    if (canonical != buffer_var_to_buffer_.end()) {
+      MarkUse(canonical->second, collecting_operand_ ? operand_access_kind_
+                                                     : BufferAccessKind::kWrite);
+    }
     StmtExprVisitor::VisitStmt_(op);
   }
 
@@ -610,7 +624,28 @@ PrimFunc InferAddress(PrimFunc f) {
   std::vector<const BufferNode *> alloc_ops =
       AddressAllocator().collectAllocOp(f->body);
 
+  // LMEM addresses are carried through namespaced PrimFunc attributes until
+  // codegen.  String keys cannot distinguish two Vars with the same name, and
+  // two DeclBuffers over one data Var would make allocation size/ownership
+  // ambiguous.  Reject both cases instead of silently overwriting metadata.
+  std::unordered_map<std::string, const VarNode *> allocation_names;
+  std::unordered_set<const VarNode *> allocation_data_vars;
   for (auto &op : alloc_ops) {
+    const VarNode *data_var = op->data.get();
+    const std::string storage_scope = GetRef<Buffer>(op).scope();
+    ICHECK(tpuv7::IsLocalMemoryScope(storage_scope))
+        << "AddressAssign only supports TPU local-memory DeclBuffers; buffer "
+        << op->name << " has scope " << storage_scope;
+    ICHECK(allocation_data_vars.insert(data_var).second)
+        << "AddressAssign found multiple local DeclBuffers for allocation "
+        << data_var->name_hint
+        << "; descriptor aliases do not have a unique size/address contract";
+    bool inserted =
+        allocation_names.emplace(data_var->name_hint, data_var).second;
+    ICHECK(inserted)
+        << "AddressAssign requires unique local allocation data-variable names; "
+        << "duplicate name " << data_var->name_hint
+        << " would alias string-keyed LMEM metadata";
     TensorLive live;
     live.tensor_size =
         tpuv7::TpuAlignSizeBytes(op->shape, op->dtype, "AddressAssign");
@@ -631,7 +666,8 @@ PrimFunc InferAddress(PrimFunc f) {
   auto fn_attr = fn->attrs.CopyOnWrite();
   for (auto op : alloc_ops) {
     int64_t address = addrMapWithBC[op];
-    fn_attr->dict.Set(op->name, IntImm(DataType::Int(64), address));
+    fn_attr->dict.Set(tpuv7::AddressAttrKey(op->data->name_hint),
+                      IntImm(DataType::Int(64), address));
   }
 
   return f;

@@ -11,6 +11,7 @@
     "contract_id",
     "reviewed_at",
     "scope",
+    "invariants",
     "vocabulary",
     "source_roots",
     "targets",
@@ -23,7 +24,7 @@
       "const": "./schema.json"
     },
     "schema_version": {
-      "const": "1.0.0"
+      "const": "1.1.0"
     },
     "contract_id": {
       "$ref": "#/$defs/id"
@@ -55,6 +56,13 @@
             "minLength": 1
           }
         }
+      }
+    },
+    "invariants": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/invariant"
       }
     },
     "vocabulary": {
@@ -381,6 +389,53 @@
         }
       }
     },
+    "invariant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "applies_to_operations",
+        "category",
+        "expression",
+        "status",
+        "enforced_at",
+        "description",
+        "evidence_ids"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "applies_to_operations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "category": {
+          "enum": ["dtype", "shape", "layout", "memory", "value", "aliasing", "target", "scheduling"]
+        },
+        "expression": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": ["enforced", "documented", "unverified", "known_gap"]
+        },
+        "enforced_at": {
+          "enum": ["frontend", "lowering", "codegen", "compile", "runtime", "not_enforced"]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_ids": {
+          "$ref": "#/$defs/evidenceIds"
+        }
+      }
+    },
     "failurePolicy": {
       "type": "object",
       "additionalProperties": false,
@@ -611,19 +666,24 @@
       ],
       "properties": {
         "declared": {
-          "$ref": "#/$defs/stageResult"
+          "$ref": "#/$defs/stageResult",
+          "description": "Target-independent reachability through the current public TileLang frontend. The status must be identical across target_results for one capability."
         },
         "codegen_passed": {
-          "$ref": "#/$defs/stageResult"
+          "$ref": "#/$defs/stageResult",
+          "description": "Evidence that the exact selector passed target-specific lowering/source emission. Device compilation, load, and execution require explicit evidence in this stage or a later numerical stage."
         },
         "cmodel_numeric_passed": {
-          "$ref": "#/$defs/stageResult"
+          "$ref": "#/$defs/stageResult",
+          "description": "Numerical evidence from the exact chip CModel and stated oracle scope."
         },
         "pcie_numeric_passed": {
-          "$ref": "#/$defs/stageResult"
+          "$ref": "#/$defs/stageResult",
+          "description": "Numerical evidence from a real PCIe-attached chip; never inferred from CModel."
         },
         "sdk_declared": {
-          "$ref": "#/$defs/stageResult"
+          "$ref": "#/$defs/stageResult",
+          "description": "Declaration-only SDK/manual evidence that cannot promote any TileLang stage."
         }
       }
     },

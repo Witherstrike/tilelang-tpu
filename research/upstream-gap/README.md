@@ -11,17 +11,31 @@
 - target pass、残余 IR verifier、AddressAssign、codegen 与 PPL 1.7 toolchain 均按同一完整 target 工作；
 - 未建模的 vector、同步、dtype、shape、ABI 或芯片能力在编译期失败。
 
-数值证据已经从“核心示例可运行”扩展到完整的非 FP8 TPU-Kernel 基线和独立 FP8 矩阵：
+数值证据已经从“核心示例可运行”扩展到完整的非 FP8 TPU-Kernel 基线和独立 FP8 矩阵。当前 canonical CModel 证据绑定实现提交 `1a7ca50`：[TPU-Kernel 286/286](../artifacts/2026-09-05/tpukernel-cmodel-head-1a7ca50/summary.json) 和 [FP8 76/76](../artifacts/2026-09-05/fp8-cmodel-head-1a7ca50/summary.json)。
 
 | 组合 | CModel | PCIe |
 | --- | --- | --- |
-| BM1690 / TPU-Kernel | final 基础矩阵 146/146；FP8 38/38 | 未验证 |
-| SG2260E / TPU-Kernel | final 基础矩阵 140/140；FP8 38/38 | final 基础矩阵 140/140；FP8 未验证 |
-| SG2260E / RV | FP32 四则与 FP16 GEMM 已验证 | 同一核心五项已验证 |
+| BM1690 / TPU-Kernel | `1a7ca50` 基础矩阵 146/146；FP8 38/38 | 未验证 |
+| SG2260E / TPU-Kernel | `1a7ca50` 基础矩阵 140/140；FP8 38/38 | final 基础矩阵 140/140；FP8 未验证 |
+| SG2260E / RV | FP32 四则与 FP16 A/B、FP32 累加的 NN GEMM 已验证 | 同一核心五项已验证 |
 
-SG2260E/TPU-Kernel 板端 final 按 core 53、extended 15、reductions 72 三批执行，均首错停止且没有 timeout、retry 或 device fault。profiling 的 recorder/raw 采集已验证；既有 trace 可在隔离的 `bigTpuProfile==0.3.5` 环境解码为 36 条有效事件，但生产环境不会自动安装 decoder。
+SG2260E/TPU-Kernel 板端 final 按 core 53、extended 15、reductions 72 三批执行，均首错停止且没有 timeout、retry 或 device fault。profiling 的单次 dispatch 与 recorder/raw 采集子阶段已验证；会话内因缺 decoder 以 `complete=false` 结束，随后仅对既有 trace 在隔离的 `bigTpuProfile==0.3.5` 环境解码出 36 条有效事件。生产环境不会自动安装 decoder。
 
 这些结果仍不等于“TileLang 二层算子已完整支持 TPU”。当前主要差距已经从基础 TPU-Kernel 指令连通和 SG 板端数值验证，转向统一 op spec、标准二层 API、tail/dynamic shape、FP8 板端验证、RV 能力扩展、多核与依赖安全流水，以及可持续的上游后端边界。
+
+### 1.1 上游观测基线
+
+本轮于 2026-09-07 直接核对官方仓库；这里的 commit 只用于说明调研时点，不参与本地 PPL/手册一致性校验：
+
+| 项目 | 调研快照 | 与本后端直接相关的事实 |
+| --- | --- | --- |
+| [TileLang](https://github.com/tile-ai/tilelang) | `main@11ec2397` | v0.1.13 已引入 multi-backend language dialect、backend CodeGen registry、source-aware diagnostics 与 TIRX 演进；TPU 继续把分支堆进通用 `engine` 会扩大后续 rebase 成本 |
+| [TileLang v0.1.13 说明](https://github.com/tile-ai/tilelang/discussions/2848) | discussion #2848 | 上游同时修复 buffer offset、effect/liveness、跨 target call 等问题，说明 descriptor/effect/pass 顺序必须作为可验证契约，而非 emitter 局部约定 |
+| [TileLang-Ascend](https://github.com/tile-ai/tilelang-ascend) | default `ascendc_pto@9da16d6` | 已有 GEMM/Batch GEMM、elementwise、softmax/norm/activation/reduce/sort/conv/attention/dispatch-combine，并把 auto vectorization、Cube/Vector scope、同步、pipeline、buffer reuse、跨核通信分别建模 |
+| [TileOPs](https://github.com/tile-ai/TileOPs) | `main@001ef39` | 明确区分 L2 调用契约与 L1 kernel，并以 manifest 驱动 reference、signature、workload、source、test、benchmark 和 validator，适合作为 TPU op contract 的上游化方向 |
+| [SOPHGO PPL](https://github.com/sophgo/PPL/releases/tag/v1.7.122) | latest release `v1.7.122` | 本机使用同版本号的 PPL 1.7 发布布局；公开 README 尚未把 SG2260E 列为支持芯片，因此 SG 能力仍以本机 `tpub_7_1_e` 头文件、真实编译和分层实测为准 |
+
+由此得到的工程判断是：短期保持当前 fail-closed 竖切，避免在功能尚未闭合时追随上游大迁移；中期把 target resolver、pass hook、semantic op spec 和 artifact manifest 接入上游 registry/dialect 边界；算子层按 TileOPs 的 L2/L1 契约组织，而不是把 Ascend 的 Cube/Vector 名称或 GPU 的 warp/barrier 语义直接复制到 TPU。
 
 ## 2. 现有能力边界
 
@@ -50,13 +64,15 @@ TPU pipeline 当前采用保守语义：不运行 vectorization、software-pipel
 
 AddressAssign 为封闭 semantic op 集建模 read/write/read-write effect。GEMM 的 `accumulate` 是显式 ABI 位，同时决定 C 是 write 还是 read-write。contract verifier 在 target pass 前后执行，防止前端或 pass 引入另一编程模型、未知 extern、GPU barrier 或 vector residual IR。
 
-### 2.3 TPU-Kernel op 现状
+每个 typed semantic buffer 参数都以 `tl.region(BufferLoad, access_mask, logical_extents)` 进入 native codegen。非 copy op 要求 whole-buffer region；copy 才允许显式子区间。裸 `tir.tvm_access_ptr` 兼容入口已删除，因为它不足以保留 view/reshape 的 logical descriptor。descriptor 等价的 presentation alias 可作为唯一表示；rank/shape/dtype/scope 改变、重复 allocation owner、越界 region 或错误 mask 均 fail-closed。
 
-| 族 | 两芯片 CModel 已验证范围 | 主要未覆盖 |
+### 2.3 当前 op 现状
+
+| 族 | 已验证范围 | 主要未覆盖 |
 | --- | --- | --- |
 | copy/cast | FP16/BF16/FP32 与六种整数同 dtype local roundtrip/S2S；FP32 相关本地 cast；FP8 local roundtrip/S2S | FP16↔BF16、更多混合 dtype |
 | fill | FP16/BF16/FP32 非零常量；FP32 零值；FP8 零值 | FP16/BF16 独立零 case、FP8 非零 |
-| GEMM | FP16/BF16 NN overwrite/accumulate、NT overwrite；FP8 NN/NT overwrite 与 accumulate | batch、transpose-A、FP16/BF16 NT accumulate、FP8 C、tail |
+| GEMM | TPU-Kernel：FP16/BF16 NN overwrite/accumulate、NT overwrite；FP8 NN/NT overwrite 与 accumulate。RV：FP16 NN accumulate 已有数值证据，基础浮点 NT accumulate 仅有源码选择证据 | batch、transpose-A、基础浮点 FP32 overwrite（NN/NT）数值验证、RV BF16/NT 数值验证、TPU-Kernel 基础浮点 NT accumulate、FP8 C、tail |
 | add/sub/mul/div | 三种浮点等形；FP32 W broadcast；FP8 等形及 W-broadcast add/sub/mul | FP16/BF16 broadcast、FP8 div、一般 broadcast |
 | scalar | FP16/BF16/FP32/E4M3/E5M2 add/mul；FP8 默认非饱和 | sub/div、动态 scalar、可选 saturation |
 | exp/sigmoid | 三种浮点 | RV、更多函数、误差域扩展 |
@@ -66,6 +82,8 @@ AddressAssign 为封闭 semantic op 集建模 read/write/read-write effect。GEM
 | topk | BM 的 FP32/INT32/UINT32 双向、K-sized 输出及稳定重复键；SG 编译期不适用 | K=1/K=length、长度上限、BM PCIe；RV |
 
 FP8 的“手册/头文件声明、公开 frontend、TileLang codegen、CModel、PCIe”分别记录。最终矩阵 76/76，即两芯片 × 两格式 × 19 个公开 case；它只提升所列 selector。早先 scalar 两芯片 exit 139 已定位为 direct mixed-precision API 的非法 dtype tuple；合法 PPL/TileLang 路径均使用 cast 后的通用 add_C/mul_C，因此该崩溃不构成硬件负向证据。
+
+RV 的 cross-dtype copy 也必须按方向管理：当前 FP16→BF16 只有 `rvt_cvt_f2f` 生成源码证据，数值层仍为 `unverified`；BF16→FP16 尚无精确 codegen 证据。两者不能因共用一个 emitter 类型分支而合并提升。
 
 SG2260E/TPU-Kernel 的非 FP8 列表已在真实芯片按同一 case registry 通过 140/140，其中包括基础浮点 scalar、exp/sigmoid/rsqrt、gather/rope、FP32 W broadcast 及十二个 reduction 边界 width。该结果只关闭这些精确 selector 的 SG 板端数值缺口；BM 板端、FP8 板端和更宽 RV selector 仍未验证。
 
@@ -93,7 +111,7 @@ SG2260E/TPU-Kernel 的非 FP8 列表已在真实芯片按同一 case registry �
 1. 定义 `TpuOpSpec`：semantic name、frontend alias、operand role/scope、effect、dtype/layout constraint、workspace、applicable programming model 与 emitter key；
 2. 由该表生成/驱动 frontend guard、verifier allowlist、AddressAssign effect 和 codegen dispatch；
 3. chip-specific capability 作为 spec 的 predicate，不在 emitter 内散落字符串判断；
-4. 合法性按完整 `chip × programming model × dtype × layout × attributes` selector 表达，保留 FP8 NT accumulation 与 base-float NT rejection 这样的精确分支；
+4. 合法性按完整 `chip × programming model × dtype × layout × attributes` selector 表达，保留 TPU-Kernel FP8 NT accumulation、TPU-Kernel 基础浮点 NT rejection 与 RV 基础浮点 NT source-only support 这样的精确分支；
 5. 为每个 spec 自动生成 positive/negative source test 与 contract selector 骨架。
 
 **验收**：删除任一 op 的 emitter 注册后，编译在统一诊断处失败；effect 与 emitter operand 数自动一致；机器契约可从 spec 检查引用闭包。
@@ -110,7 +128,7 @@ SG2260E/TPU-Kernel 的非 FP8 列表已在真实芯片按同一 case registry �
 
 ### 4.3 tail、动态 shape 与 alias
 
-**现状**：已验证 case 均为静态、规则 tile；copy/gemm/reduction 在有限静态范围 fail-closed。当前所有 TPUv7/PPL `dim4` 单维必须是编译期整数且位于 `[1,65535]`，exp/sigmoid 另有 `H*W<=65535`，reduction 还校验 EU 对齐后的派生宽度。
+**现状**：已验证 case 均为静态、规则 tile；copy/gemm/reduction 在有限静态范围 fail-closed。当前所有 TPUv7/PPL `dim4` 单维必须是编译期整数且位于 `[1,65535]`，exp/sigmoid 另有 `H*W<=65535`，reduction 还校验 EU 对齐后的派生宽度。typed semantic ABI 已保留 logical region，并区分 descriptor 等价 presentation alias 与真正的 shape/layout/ownership 变化；运行时跨参数重叠仍只按各 op 的显式 alias 契约判断。
 
 **Why**：隐式越界 DMA 或错误 stride 在 PCIe 上可能卡住设备；没有统一 tail 语义就无法安全扩大 shape。
 

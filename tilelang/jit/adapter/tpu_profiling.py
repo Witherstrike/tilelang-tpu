@@ -950,7 +950,6 @@ class TPUInstructionProfiler:
                     else:
                         decoded_report_paths = tuple(sorted(
                             output_dir.rglob(_PCIE_DECODED_REPORT_NAME)))
-                        report_paths = tuple(sorted(output_dir.rglob("profile_data.js")))
                         if decoded_report_paths:
                             try:
                                 timings = tuple(
@@ -969,33 +968,12 @@ class TPUInstructionProfiler:
                                     parser_message = (
                                         "bigTpuProfile decoded the PCIe recorder "
                                         "output but returned no device-command events.")
-                        elif not report_paths:
+                        else:
                             parser_status = "missing-report"
                             parser_message = (
                                 "The offline PCIe decoder completed without a "
-                                "canonical JSON or profile_data.js artifact. Logs: "
+                                "canonical TileLang JSON artifact. Logs: "
                                 f"{parser_stdout}, {parser_stderr}")
-                        else:
-                            try:
-                                timeline_events = tuple(
-                                    event
-                                    for path in report_paths
-                                    for event in parse_perfai_timeline_events(path))
-                                timings = tuple(
-                                    event for event in timeline_events
-                                    if event.engine.strip().lower()
-                                    in _DEVICE_COMMAND_ENGINES)
-                            except ValueError as exc:
-                                parser_status = "invalid-report"
-                                parser_message = str(exc)
-                            else:
-                                parser_status = (
-                                    "ready" if timings else
-                                    "no-device-command-events")
-                                if not timings:
-                                    parser_message = (
-                                        "PerfAI produced a PCIe timeline but no "
-                                        "recognized TPU command-engine rows.")
 
         return TPUProfileReport(
             config=self.config,

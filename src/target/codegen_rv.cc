@@ -57,9 +57,13 @@ void CodeGenTileLangTPU::EmitRVDescriptor(const std::string &tensor,
                                            int register_id, bool is_global,
                                            const std::string &dtype,
                                            bool hw_aligned) {
+  const bool is_float =
+      dtype == "DT_FP32" || dtype == "DT_FP16" || dtype == "DT_BFP16" ||
+      dtype == "DT_FP8E5M2" || dtype == "DT_FP8E4M3";
   PrintIndent();
   stream << (is_global ? "rvt_gr(" : "rvt_tr(") << register_id
-         << ", PRECISION(" << dtype << "), FP8TYPE(" << dtype << "), "
+         << ", PRECISION(" << dtype << "), "
+         << (is_float ? "FP8TYPE(" : "SIGN(") << dtype << "), "
          << tensor << ".addr, "
          << (hw_aligned ? "HW_ALIGN_LAYOUT" : "FREE_LAYOUT")
          << ", (array4_t){.n=" << tensor << ".shape.n, .c=" << tensor
@@ -149,8 +153,11 @@ void CodeGenTileLangTPU::EmitRVGemm(
   ICHECK(a_dtype == DataType::Float(16) || a_dtype == DataType::BFloat(16))
       << "RV Tensor fmm2 currently accepts FP16 or BF16 TileLang inputs, got "
       << a_dtype;
-  ICHECK(c_dtype == DataType::Float(32) || c_dtype == a_dtype)
-      << "RV Tensor fmm2 accumulator must be FP32 or match its input dtype, got "
+  ICHECK((accumulate && c_dtype == DataType::Float(32)) ||
+         (!accumulate &&
+          (c_dtype == DataType::Float(32) || c_dtype == a_dtype)))
+      << "RV Tensor accumulating fmm2 requires an FP32 C tile; overwrite mode "
+         "permits FP32 or a C tile matching A/B, got "
       << c_dtype;
   ICHECK_GT(m, 0);
   ICHECK_GT(n, 0);

@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 """Keep TPU compiler registries and the machine contract closed and aligned."""
 
+import ast
 import json
 import re
 import subprocess
@@ -46,6 +47,17 @@ def _machine_contract():
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _literal_assignment(relative_path, name):
+    path = _REPOSITORY_ROOT / relative_path
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and
+                any(isinstance(target, ast.Name) and target.id == name
+                    for target in node.targets)):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"missing literal assignment {name} in {relative_path}")
+
+
 def test_semantic_extern_registry_is_isomorphic_across_compiler_layers():
     """An extern is valid only when every compiler boundary owns it."""
     expected = _PORTABLE_EXTERNS | _TPUKERNEL_EXTERNS
@@ -64,6 +76,16 @@ def test_semantic_extern_registry_is_isomorphic_across_compiler_layers():
         for symbol in operation["internal_symbols"]
     }
     assert contract_externs == expected
+
+
+def test_every_semantic_extern_has_exact_region_operand_positions():
+    expected = _PORTABLE_EXTERNS | _TPUKERNEL_EXTERNS
+    positions = _literal_assignment(
+        "tilelang/engine/lower.py", "_TPU_SEMANTIC_REGION_ARGS")
+
+    assert set(positions) == expected
+    assert all(tuple(indices) == tuple(range(1, len(indices) + 1))
+               for indices in positions.values())
 
 
 def test_machine_contract_standard_library_validator():
