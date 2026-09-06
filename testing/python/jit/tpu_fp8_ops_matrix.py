@@ -15,6 +15,11 @@ from typing import Any
 
 from tilelang.jit import TPUInstructionProfiler, TPUProfilingConfig
 
+if __package__:
+    from .tpu_matrix_common import git_source_identity
+else:
+    from tpu_matrix_common import git_source_identity
+
 
 _CHIPS = ("sg2260e", "bm1690")
 _DTYPES = ("e4m3", "e5m2")
@@ -78,6 +83,7 @@ def main() -> int:
         "complete": False,
         "cases": {},
     }
+    summary.update(git_source_identity(repo_root))
     summary_path = output_dir / "summary.json"
     try:
         for chip in args.chips or _CHIPS:

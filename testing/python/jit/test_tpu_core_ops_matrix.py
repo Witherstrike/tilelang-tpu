@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from testing.python.jit import tpu_core_ops_matrix as matrix_module
+from testing.python.jit import tpu_matrix_common
 from testing.python.jit.tpu_core_ops_matrix import (
     _report_summary,
     _validate_profile_report,
@@ -57,9 +58,9 @@ def test_git_source_identity_records_revision_and_tracked_dirty_state(monkeypatc
         calls.append((command, kwargs))
         return next(responses)
 
-    monkeypatch.setattr(matrix_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(tpu_matrix_common.subprocess, "run", fake_run)
 
-    identity = matrix_module._git_source_identity(matrix_module.Path("/repo"))
+    identity = tpu_matrix_common.git_source_identity(matrix_module.Path("/repo"))
 
     assert identity == {
         "git_commit": "55c1c6d",

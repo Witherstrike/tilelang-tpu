@@ -20,7 +20,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import tempfile
 from typing import Any
@@ -28,46 +27,17 @@ from typing import Any
 from tilelang.jit import TPUInstructionProfiler, TPUProfilingConfig
 from tilelang.jit.adapter.tpu_profiling import _pcie_instruction_timings_error
 
+if __package__:
+    from .tpu_matrix_common import git_source_identity
+else:
+    from tpu_matrix_common import git_source_identity
+
 
 _CASES = ("elementwise-add", "elementwise-sub", "elementwise-mul",
           "elementwise-div", "matmul")
 _CMODEL_CONFIGS = (("sg2260e", "tpukernel"), ("sg2260e", "rv"),
                    ("bm1690", "tpukernel"))
 _PCIE_CONFIGS = (("sg2260e", "tpukernel"), ("sg2260e", "rv"))
-
-
-def _git_source_identity(repo_root: Path) -> dict[str, Any]:
-    """Capture the exact tracked source state used to launch a matrix."""
-
-    try:
-        revision = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo_root,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.strip()
-        if not revision:
-            raise RuntimeError("git returned an empty HEAD revision")
-        tracked_status = subprocess.run(
-            ["git", "status", "--porcelain=v1", "--untracked-files=no"],
-            cwd=repo_root,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout
-    except (OSError, subprocess.SubprocessError, RuntimeError) as error:
-        return {
-            "git_commit": None,
-            "tracked_worktree_dirty": None,
-            "git_identity_error": f"{type(error).__name__}: {error}",
-        }
-    return {
-        "git_commit": revision,
-        "tracked_worktree_dirty": bool(tracked_status.strip()),
-    }
 
 
 def _worker_environment(repo_root: Path, runtime_mode: str,
@@ -185,7 +155,7 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
         "complete": False,
         "cases": {},
     }
-    summary.update(_git_source_identity(repo_root))
+    summary.update(git_source_identity(repo_root))
     summary_path = output_dir / "summary.json"
     worker = Path(__file__).with_name("tpu_profile_worker.py")
 

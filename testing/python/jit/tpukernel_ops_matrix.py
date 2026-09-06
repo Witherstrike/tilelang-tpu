@@ -50,6 +50,11 @@ from tpukernel_ops_worker import (
     build_case_specs,
 )
 
+if __package__:
+    from .tpu_matrix_common import git_source_identity
+else:
+    from tpu_matrix_common import git_source_identity
+
 
 _INTEGER_DTYPES = ("int8", "uint8", "int16", "uint16", "int32", "uint32")
 _ALL_DTYPES = _FLOAT_DTYPES + _INTEGER_DTYPES
@@ -594,6 +599,7 @@ def _run_matrix(args: argparse.Namespace, chips: tuple[str, ...],
         "scheduled": scheduled,
         "results": [],
     }
+    summary.update(git_source_identity(repo_root))
     _write_json(summary_path, summary)
 
     for chip in chips:
