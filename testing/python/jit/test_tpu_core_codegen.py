@@ -85,6 +85,33 @@ def _global_to_global_copy(
         T.ppl_copy(A, B)
 
 
+def _portable_copy_program(dtype, transfer):
+    shape = (4, 32)
+
+    if transfer == "global":
+        @T.prim_func
+        def copy_kernel(
+                source: T.Tensor(shape, dtype),
+                destination: T.Tensor(shape, dtype)):
+            with T.Kernel(1, is_cpu=True):
+                T.ppl_copy(source, destination)
+
+        return copy_kernel
+
+    @T.prim_func
+    def copy_kernel(
+            source: T.Tensor(shape, dtype),
+            destination: T.Tensor(shape, dtype)):
+        with T.Kernel(1, is_cpu=True):
+            source_local = T.alloc_shared(shape, dtype)
+            destination_local = T.alloc_shared(shape, dtype)
+            T.ppl_copy(source, source_local)
+            T.ppl_copy(source_local, destination_local)
+            T.ppl_copy(destination_local, destination)
+
+    return copy_kernel
+
+
 @T.prim_func
 def _local_fp16_to_bf16_copy():
     T.func_attr({"global_symbol": "local_fp16_to_bf16_copy"})
@@ -304,6 +331,81 @@ def test_global_to_global_copy_uses_system_memory_instruction():
     assert "tpu_bdc_cpy(" not in tpukernel
     assert "rvt_gr(32" in rv and "rvt_gr(33" in rv
     assert "rvt_dma_cp(33, 32)" in rv
+
+
+@pytest.mark.parametrize("dtype", ("float16", "float32"))
+@pytest.mark.parametrize("transfer", ("local", "global"))
+@pytest.mark.parametrize(
+    "chip,programming_model",
+    (("sg2260e", "tpukernel"), ("sg2260e", "rv"),
+     ("bm1690", "tpukernel")),
+)
+def test_portable_copy_cases_select_the_expected_instruction_path(
+        dtype, transfer, chip, programming_model):
+    source = tilelang.lower(
+        _portable_copy_program(dtype, transfer),
+        target=_tpu_target(chip, programming_model),
+        runtime_mode="cmodel",
+    ).kernel_source
+    dtype_token = {"float16": "DT_FP16", "float32": "DT_FP32"}[dtype]
+
+    if programming_model == "tpukernel":
+        if transfer == "global":
+            assert source.count("tpu_gdma_cpy_S2S(") == 1
+            copy_lines = [
+                line for line in source.splitlines()
+                if "tpu_gdma_cpy_S2S(" in line
+            ]
+            assert copy_lines[0].rstrip().endswith(f", {dtype_token});")
+            for instruction in (
+                    "tpu_gdma_cpy_S2L(", "tpu_bdc_cpy(",
+                    "tpu_gdma_cpy_L2S(", "tpu_bdc_cast("):
+                assert instruction not in source
+        else:
+            assert source.count("tpu_gdma_cpy_S2L(") == 1
+            assert source.count("tpu_bdc_cpy(") == 1
+            assert source.count("tpu_gdma_cpy_L2S(") == 1
+            copy_lines = [
+                line for line in source.splitlines()
+                if any(instruction in line for instruction in (
+                    "tpu_gdma_cpy_S2L(", "tpu_bdc_cpy(",
+                    "tpu_gdma_cpy_L2S("))
+            ]
+            assert len(copy_lines) == 3
+            assert all(
+                line.rstrip().endswith(f", {dtype_token});")
+                for line in copy_lines)
+            assert "tpu_gdma_cpy_S2S(" not in source
+            assert "tpu_bdc_cast(" not in source
+        assert "rvt_dma_" not in source
+    elif transfer == "global":
+        descriptors = [line for line in source.splitlines() if "rvt_gr(" in line]
+        assert len(descriptors) == 2
+        assert all(
+            f"PRECISION({dtype_token})" in line and
+            f"FP8TYPE({dtype_token})" in line and "FREE_LAYOUT" in line
+            for line in descriptors)
+        assert source.count("rvt_dma_cp(33, 32)") == 1
+        assert "rvt_dma_ld(" not in source
+        assert "rvt_dma_st(" not in source
+        assert "rvt_tr(" not in source
+        assert "rvt_cvt_" not in source
+        assert "tpu_gdma_cpy_" not in source
+    else:
+        descriptors = [
+            line for line in source.splitlines()
+            if "rvt_gr(" in line or "rvt_tr(" in line
+        ]
+        assert descriptors
+        assert all(
+            f"PRECISION({dtype_token})" in line and
+            f"FP8TYPE({dtype_token})" in line and "FREE_LAYOUT" in line
+            for line in descriptors)
+        assert source.count("rvt_dma_ld(9, 32)") == 1
+        assert source.count("rvt_dma_cp(9, 8)") == 1
+        assert source.count("rvt_dma_st(32, 8)") == 1
+        assert "rvt_cvt_" not in source
+        assert "tpu_gdma_cpy_" not in source
 
 
 def test_copy_conversion_capabilities_fail_closed():

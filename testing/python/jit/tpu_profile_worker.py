@@ -19,6 +19,14 @@ import tilelang
 import tilelang.language as T
 
 
+_COPY_CASES = {
+    "copy-fp32-local-roundtrip": ("float32", "local"),
+    "copy-fp32-global-to-global": ("float32", "global"),
+    "copy-fp16-local-roundtrip": ("float16", "local"),
+    "copy-fp16-global-to-global": ("float16", "global"),
+}
+
+
 def _profile_selection():
     """Read the profiler's explicit chip/programming-model/runtime contract."""
 
@@ -50,6 +58,58 @@ def _profile_selection():
         if not device_id.isdecimal():
             raise RuntimeError("PCIe profile worker requires a numeric device ID.")
     return chip, programming_model, runtime_mode
+
+
+@T.prim_func
+def _copy_fp32_global_program(
+        source: T.Tensor((4, 32), "float32"),
+        destination: T.Tensor((4, 32), "float32"),
+):
+    with T.Kernel(1, is_cpu=True):
+        T.ppl_copy(source, destination)
+
+
+@T.prim_func
+def _copy_fp32_local_program(
+        source: T.Tensor((4, 32), "float32"),
+        destination: T.Tensor((4, 32), "float32"),
+):
+    with T.Kernel(1, is_cpu=True):
+        source_local = T.alloc_shared((4, 32), "float32")
+        destination_local = T.alloc_shared((4, 32), "float32")
+        T.ppl_copy(source, source_local)
+        T.ppl_copy(source_local, destination_local)
+        T.ppl_copy(destination_local, destination)
+
+
+@T.prim_func
+def _copy_fp16_global_program(
+        source: T.Tensor((4, 32), "float16"),
+        destination: T.Tensor((4, 32), "float16"),
+):
+    with T.Kernel(1, is_cpu=True):
+        T.ppl_copy(source, destination)
+
+
+@T.prim_func
+def _copy_fp16_local_program(
+        source: T.Tensor((4, 32), "float16"),
+        destination: T.Tensor((4, 32), "float16"),
+):
+    with T.Kernel(1, is_cpu=True):
+        source_local = T.alloc_shared((4, 32), "float16")
+        destination_local = T.alloc_shared((4, 32), "float16")
+        T.ppl_copy(source, source_local)
+        T.ppl_copy(source_local, destination_local)
+        T.ppl_copy(destination_local, destination)
+
+
+_COPY_PROGRAMS = {
+    ("float32", "global"): _copy_fp32_global_program,
+    ("float32", "local"): _copy_fp32_local_program,
+    ("float16", "global"): _copy_fp16_global_program,
+    ("float16", "local"): _copy_fp16_local_program,
+}
 
 
 def _matmul(chip: str, programming_model: str, runtime_mode: str) -> None:
@@ -150,6 +210,41 @@ def _elementwise(operation: str, chip: str, programming_model: str,
             f"max abs difference={difference}")
 
 
+def _copy(dtype: str, transfer: str, chip: str, programming_model: str,
+          runtime_mode: str) -> None:
+    shape = (4, 32)
+    try:
+        copy_kernel = _COPY_PROGRAMS[(dtype, transfer)]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported copy combination dtype={dtype!r}, transfer={transfer!r}"
+        ) from exc
+
+    torch_dtype = {
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }[dtype]
+    # Quarter-integers in this range have exact FP16 and FP32 encodings.  An
+    # exact comparison therefore checks copy semantics without introducing a
+    # numerical tolerance that could conceal a missing or partial transfer.
+    source = (torch.arange(128, dtype=torch.float32).reshape(shape) * 0.25 -
+              16.0).to(torch_dtype)
+    destination = torch.full(shape, 113.0, dtype=torch_dtype)
+    kernel = tilelang.compile(
+        copy_kernel,
+        out_idx=-1,
+        target=(f"tpu -mcpu={chip} "
+                f"-tpu-programming-model={programming_model}"),
+        runtime_mode=runtime_mode,
+    )
+    kernel(source, destination)
+    if not torch.equal(destination, source):
+        mismatches = int(torch.count_nonzero(destination != source))
+        raise RuntimeError(
+            f"{programming_model} {transfer}-to-{transfer} {dtype} copy "
+            f"mismatch; unequal elements={mismatches}")
+
+
 def _rv_control(chip: str, programming_model: str, runtime_mode: str) -> None:
     if programming_model != "rv":
         raise RuntimeError("rv-control requires programming_model='rv'.")
@@ -181,6 +276,7 @@ def main() -> None:
             "elementwise-sub",
             "elementwise-mul",
             "elementwise-div",
+            *_COPY_CASES,
             "rv-control",
         ),
         required=True,
@@ -192,6 +288,9 @@ def main() -> None:
     elif args.case.startswith("elementwise-"):
         _elementwise(args.case.removeprefix("elementwise-"), chip, programming_model,
                      runtime_mode)
+    elif args.case in _COPY_CASES:
+        dtype, transfer = _COPY_CASES[args.case]
+        _copy(dtype, transfer, chip, programming_model, runtime_mode)
     else:
         _rv_control(chip, programming_model, runtime_mode)
     print(

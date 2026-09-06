@@ -2,12 +2,15 @@
 # Licensed under the MIT License.
 """Acceptance-policy tests for the isolated TPU core-op matrix runner."""
 
+import json
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from testing.python.jit import tpu_core_ops_matrix as matrix_module
 from testing.python.jit import tpu_matrix_common
+from testing.python.jit import tpu_profile_worker
 from testing.python.jit.tpu_core_ops_matrix import (
     _report_summary,
     _validate_profile_report,
@@ -64,10 +67,77 @@ def test_git_source_identity_records_revision_and_tracked_dirty_state(monkeypatc
 
     assert identity == {
         "git_commit": "55c1c6d",
-        "tracked_worktree_dirty": True,
+        "implementation_worktree_dirty": True,
+        "source_identity_scope": "tracked files excluding research/**",
     }
-    assert calls[1][0][-1] == "--untracked-files=no"
+    assert calls[1][0][-2:] == [".", ":(exclude)research/**"]
     assert all(call[1]["timeout"] == 5 for call in calls)
+
+
+def test_portable_copy_cases_are_worker_cases_and_default_matrix_cases():
+    expected = (
+        "copy-fp32-local-roundtrip",
+        "copy-fp32-global-to-global",
+        "copy-fp16-local-roundtrip",
+        "copy-fp16-global-to-global",
+    )
+
+    assert tuple(tpu_profile_worker._COPY_CASES) == expected
+    assert matrix_module._COPY_CASES == expected
+    assert matrix_module._CASES[-len(expected):] == expected
+
+
+def test_runner_dispatches_every_portable_copy_case(monkeypatch, tmp_path):
+    calls = []
+    configs = []
+
+    class FakeProfiler:
+        def __init__(self, config):
+            configs.append(config)
+
+        def run_cmodel(self, command, *, environment):
+            calls.append((command, environment))
+            return _report()
+
+    monkeypatch.setattr(matrix_module, "TPUInstructionProfiler", FakeProfiler)
+    monkeypatch.setattr(
+        matrix_module,
+        "git_source_identity",
+        lambda _repo_root: {
+            "git_commit": "test-revision",
+            "implementation_worktree_dirty": False,
+            "source_identity_scope": "tracked files excluding research/**",
+        },
+    )
+    output_dir = tmp_path / "matrix"
+    output_dir.mkdir()
+    args = SimpleNamespace(
+        runtime_mode="cmodel",
+        require_decoded_timing=False,
+        timeout=10.0,
+    )
+
+    status = matrix_module._run_matrix(
+        args,
+        tmp_path,
+        output_dir,
+        (("sg2260e", "rv"),),
+        matrix_module._COPY_CASES,
+        {"PPL_PROJECT_ROOT": "/sdk"},
+    )
+
+    assert status == 0
+    assert [call[0][-2:] for call in calls] == [
+        ["--case", case] for case in matrix_module._COPY_CASES
+    ]
+    assert all(call[0][0] == sys.executable for call in calls)
+    assert [config.label for config in configs] == [
+        f"sg2260e-rv-{case}" for case in matrix_module._COPY_CASES
+    ]
+    summary = json.loads((output_dir / "summary.json").read_text())
+    assert summary["complete"] is True
+    assert set(summary["cases"]) == set(
+        f"sg2260e/rv/{case}" for case in matrix_module._COPY_CASES)
 
 
 def test_numeric_and_raw_acceptance_does_not_require_vendor_decoder():

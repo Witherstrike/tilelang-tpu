@@ -33,8 +33,10 @@ else:
     from tpu_matrix_common import git_source_identity
 
 
+_COPY_CASES = ("copy-fp32-local-roundtrip", "copy-fp32-global-to-global",
+               "copy-fp16-local-roundtrip", "copy-fp16-global-to-global")
 _CASES = ("elementwise-add", "elementwise-sub", "elementwise-mul",
-          "elementwise-div", "matmul")
+          "elementwise-div", "matmul", *_COPY_CASES)
 _CMODEL_CONFIGS = (("sg2260e", "tpukernel"), ("sg2260e", "rv"),
                    ("bm1690", "tpukernel"))
 _PCIE_CONFIGS = (("sg2260e", "tpukernel"), ("sg2260e", "rv"))
