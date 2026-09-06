@@ -55,6 +55,7 @@ _INTEGER_DTYPES = ("int8", "uint8", "int16", "uint16", "int32", "uint32")
 _ALL_DTYPES = _FLOAT_DTYPES + _INTEGER_DTYPES
 _OPERATIONS = tuple(sorted({case.operation for case in build_case_specs()}))
 _SCHEMA_VERSION = 1
+_PROCESS_PIPE_DRAIN_S = 5.0
 _TPU_PROCESS_SUPERVISOR = (
     Path(__file__).resolve().parents[3] / "tilelang" / "jit" /
     "_tpu_profile_supervisor.py"
@@ -300,6 +301,51 @@ def _terminate_process_group(
     return report
 
 
+def _timeout_output_as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _terminate_and_collect(
+        process: subprocess.Popen[str], grace_seconds: float
+) -> tuple[str, str, dict[str, Any]]:
+    """Terminate a timed-out worker group and drain pipes with a hard bound.
+
+    An escaped or uninterruptible descendant can retain an inherited stdout or
+    stderr descriptor after the supervised group has died.  An unbounded final
+    ``communicate()`` would then defeat the per-case TPU watchdog.  Preserve
+    whatever output is available, close this runner's pipe handles, and return
+    the machine-readable termination report even in that pathological case.
+    """
+
+    termination = _terminate_process_group(process, grace_seconds)
+    termination["pipe_drain_timeout_seconds"] = _PROCESS_PIPE_DRAIN_S
+    termination["pipe_drain_timed_out"] = False
+    try:
+        stdout, stderr = process.communicate(timeout=_PROCESS_PIPE_DRAIN_S)
+        return stdout, stderr, termination
+    except subprocess.TimeoutExpired as error:
+        stdout = _timeout_output_as_text(error.output)
+        stderr = _timeout_output_as_text(error.stderr)
+        diagnostic = (
+            "TileLang TPU numerical watchdog: process group did not close its "
+            f"output pipes within {_PROCESS_PIPE_DRAIN_S:g}s after termination"
+        )
+        termination["pipe_drain_timed_out"] = True
+        termination["errors"].append(diagnostic)
+        stderr = f"{stderr}\n{diagnostic}\n" if stderr else diagnostic + "\n"
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+        return stdout, stderr, termination
+
+
 def _spawn_guarded_worker(
         command: Sequence[str], *, cwd: Path,
         environment: Mapping[str, str]) -> subprocess.Popen[str]:
@@ -405,10 +451,12 @@ def _run_one(
             stdout, stderr = process.communicate(timeout=args.timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            termination = _terminate_process_group(process, args.kill_grace)
-            # communicate() returns the complete captured streams after the
-            # group dies; do not append TimeoutExpired's partial copies.
-            stdout, stderr = process.communicate()
+            # Do not append TimeoutExpired's partial copies: the bounded drain
+            # returns the complete captured streams when all descriptors close,
+            # or its own latest partial copies when a stuck/escaped descendant
+            # retains an inherited pipe.
+            stdout, stderr, termination = _terminate_and_collect(
+                process, args.kill_grace)
         returncode = process.poll()
         if returncode not in (0, None) and termination is None:
             # The direct worker may have exited while compiler/runtime children

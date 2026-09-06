@@ -4,12 +4,14 @@
 
 from pathlib import Path
 import hashlib
+import importlib
 import os
 import signal
 import stat
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -610,6 +612,83 @@ def test_tpukernel_matrix_parent_death_guard_prevents_orphans(tmp_path):
         if supervisor_pid is not None and _pid_is_running(supervisor_pid):
             try:
                 os.killpg(supervisor_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="process-group timeout supervision is a Linux TPU safety contract",
+)
+def test_tpukernel_matrix_timeout_has_bounded_pipe_drain(tmp_path, monkeypatch):
+    """An escaped pipe holder cannot turn a numerical timeout into a hang."""
+
+    matrix_dir = Path(__file__).resolve().parent
+    monkeypatch.syspath_prepend(str(matrix_dir))
+    matrix_module = importlib.import_module("tpukernel_ops_matrix")
+    monkeypatch.setattr(matrix_module, "_PROCESS_PIPE_DRAIN_S", 0.1)
+
+    pid_path = tmp_path / "timeout-worker-pids.txt"
+    worker_path = tmp_path / "timeout-worker.py"
+    worker_path.write_text(
+        "import os, signal, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "ignore_term = 'import signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'\n"
+        "controlled = subprocess.Popen([sys.executable, '-c', ignore_term])\n"
+        "escaped = subprocess.Popen(\n"
+        "    [sys.executable, '-c', ignore_term], start_new_session=True)\n"
+        "Path(os.environ['TILELANG_TEST_TIMEOUT_PIDS']).write_text(\n"
+        "    f'{os.getpid()} {controlled.pid} {escaped.pid}')\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["TILELANG_TEST_TIMEOUT_PIDS"] = str(pid_path)
+    monkeypatch.setattr(
+        matrix_module,
+        "_worker_environment",
+        lambda *_args, **_kwargs: environment,
+    )
+    args = SimpleNamespace(runtime_mode="cmodel", timeout=1.0, kill_grace=0.1)
+    case = matrix_module.CaseSpec("timeout-pipe", "copy", "float32")
+
+    escaped_pid = None
+    try:
+        started = time.monotonic()
+        result = matrix_module._run_one(
+            args,
+            Path(__file__).resolve().parents[3],
+            tmp_path / "matrix",
+            worker_path,
+            "sg2260e",
+            case,
+        )
+        elapsed = time.monotonic() - started
+        _wait_for_file(pid_path)
+        worker_pid, controlled_pid, escaped_pid = map(
+            int, pid_path.read_text(encoding="utf-8").split())
+
+        assert elapsed < 2.5
+        assert result["timed_out"] is True
+        assert result["status"] == "failed"
+        assert result["termination"]["pipe_drain_timed_out"] is True
+        assert "did not close its output pipes" in result["stderr"]
+        deadline = time.monotonic() + 2
+        while _pid_is_running(worker_pid) or _pid_is_running(controlled_pid):
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    "numerical timeout left an in-group worker process running")
+            time.sleep(0.02)
+        # The deliberate start_new_session descendant is outside the private
+        # group and keeps the inherited pipes open, which is what exercises the
+        # bounded drain.  It is not claimed as an ordinarily supervised child.
+        assert _pid_is_running(escaped_pid)
+    finally:
+        if escaped_pid is not None and _pid_is_running(escaped_pid):
+            try:
+                os.killpg(escaped_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
 
