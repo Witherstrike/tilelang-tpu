@@ -470,7 +470,9 @@ def _pid_is_running(pid: int) -> bool:
     stat_path = Path(f"/proc/{pid}/stat")
     try:
         fields = stat_path.read_text(encoding="utf-8").split()
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+        # procfs may remove the entry between open and read, reporting either
+        # FileNotFoundError or ProcessLookupError depending on the exact race.
         return False
     return len(fields) > 2 and fields[2] != "Z"
 
@@ -530,6 +532,76 @@ def test_parent_death_guard_kills_worker_and_ordinary_descendant(tmp_path):
         while _pid_is_running(worker_pid) or _pid_is_running(descendant_pid):
             if time.monotonic() >= deadline:
                 raise AssertionError("parent-death guard left a profile process running")
+            time.sleep(0.02)
+    finally:
+        if controller.poll() is None:
+            controller.kill()
+            controller.wait(timeout=5)
+        if supervisor_pid is not None and _pid_is_running(supervisor_pid):
+            try:
+                os.killpg(supervisor_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="parent-death guard is a Linux TPU numerical-runner safety contract",
+)
+def test_tpukernel_matrix_parent_death_guard_prevents_orphans(tmp_path):
+    """Killing the numerical matrix runner must kill its worker tree."""
+
+    worker_pids_path = tmp_path / "numeric-worker-pids.txt"
+    supervisor_pid_path = tmp_path / "numeric-supervisor-pid.txt"
+    matrix_dir = Path(__file__).resolve().parent
+    target_source = (
+        "import os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "Path(sys.argv[1]).write_text(f'{os.getpid()} {grandchild.pid} {os.getpgrp()}')\n"
+        "time.sleep(30)\n"
+    )
+    controller_source = (
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from tpukernel_ops_matrix import _spawn_guarded_worker\n"
+        f"target_source = {target_source!r}\n"
+        "supervisor = _spawn_guarded_worker(\n"
+        "    [sys.executable, '-c', target_source, sys.argv[2]],\n"
+        "    cwd=Path(sys.argv[4]), environment=os.environ.copy())\n"
+        "Path(sys.argv[3]).write_text(str(supervisor.pid))\n"
+        "time.sleep(30)\n"
+    )
+    controller_env = os.environ.copy()
+    controller_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    controller = subprocess.Popen([
+        sys.executable,
+        "-c",
+        controller_source,
+        str(matrix_dir),
+        str(worker_pids_path),
+        str(supervisor_pid_path),
+        str(tmp_path),
+    ], env=controller_env)
+    supervisor_pid = None
+    try:
+        _wait_for_file(supervisor_pid_path)
+        _wait_for_file(worker_pids_path)
+        supervisor_pid = int(supervisor_pid_path.read_text(encoding="utf-8"))
+        worker_pid, descendant_pid, worker_pgid = map(
+            int, worker_pids_path.read_text(encoding="utf-8").split())
+        assert worker_pgid == supervisor_pid
+        assert os.getpgid(descendant_pid) == supervisor_pid
+
+        os.kill(controller.pid, signal.SIGKILL)
+        controller.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while any(_pid_is_running(pid) for pid in (
+                supervisor_pid, worker_pid, descendant_pid)):
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    "parent-death guard left a TPU numerical process running")
             time.sleep(0.02)
     finally:
         if controller.poll() is None:

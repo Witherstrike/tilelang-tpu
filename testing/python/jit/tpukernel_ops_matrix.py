@@ -4,9 +4,11 @@
 
 The default matrix is CModel-only and covers BM1690 plus SG2260E.  PCIe is
 impossible to enter without ``--runtime-mode pcie --allow-pcie --device-id``.
-Every case owns a fresh process group.  On a timeout or first failure, the
-runner sends SIGTERM to that group, waits a bounded grace interval, follows
-with SIGKILL if necessary, records the partial JSON report, and stops.
+Every case owns a fresh parent-death-supervised process group.  On a timeout
+or first failure, the runner sends SIGTERM to that group, waits a bounded
+grace interval, follows with SIGKILL if necessary, records the partial JSON
+report, and stops.  If an outer watchdog kills the runner itself, the shared
+TPU supervisor kills the worker group before it can become orphaned.
 
 Examples::
 
@@ -53,6 +55,10 @@ _INTEGER_DTYPES = ("int8", "uint8", "int16", "uint16", "int32", "uint32")
 _ALL_DTYPES = _FLOAT_DTYPES + _INTEGER_DTYPES
 _OPERATIONS = tuple(sorted({case.operation for case in build_case_specs()}))
 _SCHEMA_VERSION = 1
+_TPU_PROCESS_SUPERVISOR = (
+    Path(__file__).resolve().parents[3] / "tilelang" / "jit" /
+    "_tpu_profile_supervisor.py"
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -294,6 +300,43 @@ def _terminate_process_group(
     return report
 
 
+def _spawn_guarded_worker(
+        command: Sequence[str], *, cwd: Path,
+        environment: Mapping[str, str]) -> subprocess.Popen[str]:
+    """Start one numerical worker under the shared TPU process-tree guard.
+
+    A new session alone protects the runner's own process group, but it also
+    lets a worker outlive the runner if an outer watchdog kills the latter.
+    Reuse the profiling path's Linux parent-death supervisor so that such a
+    death kills the private worker group before it can become an orphan.
+    """
+
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError(
+            "safe TPU numerical execution requires Linux PR_SET_PDEATHSIG")
+    if not _TPU_PROCESS_SUPERVISOR.is_file():
+        raise RuntimeError(
+            "TPU process-tree supervisor is missing: "
+            f"{_TPU_PROCESS_SUPERVISOR}")
+    guarded_command = [
+        sys.executable,
+        str(_TPU_PROCESS_SUPERVISOR),
+        "--parent-pid",
+        str(os.getpid()),
+        "--",
+        *command,
+    ]
+    return subprocess.Popen(
+        guarded_command,
+        cwd=cwd,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+
+
 def _worker_payload(stdout: str) -> dict[str, Any] | None:
     for line in reversed(stdout.splitlines()):
         if line.startswith(_RESULT_PREFIX):
@@ -352,17 +395,12 @@ def _run_one(
     launch_error: str | None = None
     returncode: int | None = None
     try:
-        process = subprocess.Popen(
-            command,
-            # Keep autotuner/vendor/compiler byproducts in disposable storage;
-            # only the explicit JSON report escapes into case_dir.
-            cwd=scratch_dir,
-            env=environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
+        # Keep autotuner/vendor/compiler byproducts in disposable storage;
+        # only the explicit JSON report escapes into case_dir.  The shared
+        # supervisor additionally guarantees cleanup if this runner itself is
+        # killed by an outer watchdog.
+        process = _spawn_guarded_worker(
+            command, cwd=scratch_dir, environment=environment)
         try:
             stdout, stderr = process.communicate(timeout=args.timeout)
         except subprocess.TimeoutExpired:
