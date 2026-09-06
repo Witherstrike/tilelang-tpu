@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from testing.python.jit import tpu_core_ops_matrix as matrix_module
 from testing.python.jit.tpu_core_ops_matrix import (
     _report_summary,
     _validate_profile_report,
@@ -25,9 +26,47 @@ def _report(*, parser_status="unavailable", timings=(), has_raw_trace=True):
     )
 
 
-def _timing(*, begin=2, end=7, duration=5):
+def _timing(*, begin=2, end=7, duration=5, unit="ns"):
     return SimpleNamespace(
-        engine="bd", unit="cycles", begin=begin, end=end, duration=duration)
+        engine="bd", unit=unit, begin=begin, end=end, duration=duration)
+
+
+_INVALID_TIMINGS = (
+    _timing(duration=None),
+    _timing(duration=True),
+    _timing(duration=float("nan")),
+    _timing(duration=float("inf")),
+    _timing(duration=-1),
+    _timing(begin=True),
+    _timing(begin=float("nan")),
+    _timing(end=float("inf")),
+    _timing(begin=8, end=7, duration=1),
+    _timing(unit=""),
+    _timing(unit="cycles"),
+)
+
+
+def test_git_source_identity_records_revision_and_tracked_dirty_state(monkeypatch):
+    responses = iter((
+        SimpleNamespace(stdout="55c1c6d\n"),
+        SimpleNamespace(stdout=" M tracked.py\n"),
+    ))
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return next(responses)
+
+    monkeypatch.setattr(matrix_module.subprocess, "run", fake_run)
+
+    identity = matrix_module._git_source_identity(matrix_module.Path("/repo"))
+
+    assert identity == {
+        "git_commit": "55c1c6d",
+        "tracked_worktree_dirty": True,
+    }
+    assert calls[1][0][-1] == "--untracked-files=no"
+    assert all(call[1]["timeout"] == 5 for call in calls)
 
 
 def test_numeric_and_raw_acceptance_does_not_require_vendor_decoder():
@@ -69,14 +108,22 @@ def test_explicit_decoded_timing_acceptance_accepts_valid_rows():
 
 @pytest.mark.parametrize(
     "timing",
-    (
-        _timing(duration=None),
-        _timing(duration=-1),
-        _timing(begin=8, end=7, duration=1),
-    ),
+    _INVALID_TIMINGS,
 )
 def test_explicit_decoded_timing_acceptance_rejects_invalid_rows(timing):
     report = _report(parser_status="ready", timings=(timing,))
 
     with pytest.raises(RuntimeError, match="invalid instruction interval"):
         _validate_profile_report(report, require_decoded_timing=True)
+
+
+@pytest.mark.parametrize("timing", _INVALID_TIMINGS)
+def test_optional_decoded_timing_never_accepts_invalid_rows(timing):
+    report = _report(parser_status="ready", timings=(timing,))
+
+    _validate_profile_report(report, require_decoded_timing=False)
+    summary = _report_summary(report, require_decoded_timing=False)
+
+    assert summary["status"] == "passed"
+    assert summary["decoded_timing_accepted"] is False
+    assert summary["timing_by_engine_and_unit"] == {}

@@ -20,11 +20,13 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 from typing import Any
 
 from tilelang.jit import TPUInstructionProfiler, TPUProfilingConfig
+from tilelang.jit.adapter.tpu_profiling import _pcie_instruction_timings_error
 
 
 _CASES = ("elementwise-add", "elementwise-sub", "elementwise-mul",
@@ -32,6 +34,40 @@ _CASES = ("elementwise-add", "elementwise-sub", "elementwise-mul",
 _CMODEL_CONFIGS = (("sg2260e", "tpukernel"), ("sg2260e", "rv"),
                    ("bm1690", "tpukernel"))
 _PCIE_CONFIGS = (("sg2260e", "tpukernel"), ("sg2260e", "rv"))
+
+
+def _git_source_identity(repo_root: Path) -> dict[str, Any]:
+    """Capture the exact tracked source state used to launch a matrix."""
+
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        if not revision:
+            raise RuntimeError("git returned an empty HEAD revision")
+        tracked_status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+        return {
+            "git_commit": None,
+            "tracked_worktree_dirty": None,
+            "git_identity_error": f"{type(error).__name__}: {error}",
+        }
+    return {
+        "git_commit": revision,
+        "tracked_worktree_dirty": bool(tracked_status.strip()),
+    }
 
 
 def _worker_environment(repo_root: Path, runtime_mode: str,
@@ -60,9 +96,12 @@ def _report_summary(report: Any, *, require_decoded_timing: bool) -> dict[str, A
     raw_by_opcode = Counter(
         item.opcode for item in report.raw_instructions if item.opcode is not None)
     timing_by_engine: dict[str, dict[str, Any]] = {}
+    decoded_timing_error = (
+        _pcie_instruction_timings_error(report.instruction_timings)
+        if report.parser_status == "ready" else "decoder is not ready")
     grouped = defaultdict(list)
-    for timing in report.instruction_timings:
-        if timing.duration is not None:
+    if decoded_timing_error is None:
+        for timing in report.instruction_timings:
             grouped[(timing.engine, timing.unit)].append(float(timing.duration))
     for (engine, unit), durations in sorted(grouped.items()):
         timing_by_engine[f"{engine}:{unit}"] = {
@@ -82,8 +121,7 @@ def _report_summary(report: Any, *, require_decoded_timing: bool) -> dict[str, A
         "timed_instruction_count": len(report.instruction_timings),
         "timing_by_engine_and_unit": timing_by_engine,
         "decoded_timing_required": require_decoded_timing,
-        "decoded_timing_accepted": (
-            report.parser_status == "ready" and report.has_instruction_timings),
+        "decoded_timing_accepted": decoded_timing_error is None,
     }
 
 
@@ -106,9 +144,11 @@ def _validate_profile_report(report: Any, *, require_decoded_timing: bool) -> No
             "successful PCIe dispatch did not produce it "
             f"(parser_status={report.parser_status!r}, "
             f"message={report.parser_message!r})")
-    if any(item.duration is None or item.duration < 0 or item.end < item.begin
-           for item in report.instruction_timings):
-        raise RuntimeError("PCIe decoder produced an invalid instruction interval")
+    timing_error = _pcie_instruction_timings_error(report.instruction_timings)
+    if timing_error is not None:
+        raise RuntimeError(
+            "PCIe decoder produced an invalid instruction interval: "
+            f"{timing_error}")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -132,7 +172,7 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _run_matrix(args: argparse.Namespace, output_dir: Path,
+def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                 configurations: tuple[tuple[str, str], ...],
                 cases: tuple[str, ...],
                 environment: dict[str, str]) -> int:
@@ -145,6 +185,7 @@ def _run_matrix(args: argparse.Namespace, output_dir: Path,
         "complete": False,
         "cases": {},
     }
+    summary.update(_git_source_identity(repo_root))
     summary_path = output_dir / "summary.json"
     worker = Path(__file__).with_name("tpu_profile_worker.py")
 
@@ -232,7 +273,8 @@ def main() -> int:
     environment["TMPDIR"] = str(scratch_dir)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
-        return _run_matrix(args, output_dir, configurations, cases, environment)
+        return _run_matrix(
+            args, repo_root, output_dir, configurations, cases, environment)
     finally:
         # Delete only the unique directory created by this invocation.  Trace,
         # decoder, and report artifacts are siblings and remain intact.

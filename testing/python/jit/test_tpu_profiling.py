@@ -5,6 +5,7 @@
 from pathlib import Path
 import hashlib
 import importlib
+import json
 import os
 import signal
 import stat
@@ -60,9 +61,16 @@ def _fake_trace_worker(
     return [sys.executable, "-c", source]
 
 
-def _fake_pcie_trace_worker(programming_model: str = "tpukernel"):
+def _fake_pcie_trace_worker(
+        programming_model: str = "tpukernel",
+        profile_name: str | None = "global.profile",
+        profile_payload: bytes = b"raw-pcie"):
     """Model the environment and recorder artifact of one PCIe launch."""
 
+    profile_write = ""
+    if profile_name is not None:
+        profile_write = (
+            f"(profile / {profile_name!r}).write_bytes({profile_payload!r})\n")
     source = (
         "import os\n"
         "from pathlib import Path\n"
@@ -81,7 +89,7 @@ def _fake_pcie_trace_worker(programming_model: str = "tpukernel"):
         "assert os.environ['PROFILE_BOOK_KEEPING'] == '1'\n"
         "profile = Path('cdm_profile_data_dev0-0')\n"
         "profile.mkdir()\n"
-        "(profile / 'global.profile').write_bytes(b'raw-pcie')\n"
+        f"{profile_write}"
     )
     return [sys.executable, "-c", source]
 
@@ -693,6 +701,87 @@ def test_tpukernel_matrix_timeout_has_bounded_pipe_drain(tmp_path, monkeypatch):
                 pass
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="process-group descendant cleanup is a Linux TPU safety contract",
+)
+def test_tpukernel_matrix_rejects_success_with_lingering_descendant(
+        tmp_path, monkeypatch):
+    """A nominally successful worker may not background an in-group child."""
+
+    matrix_dir = Path(__file__).resolve().parent
+    monkeypatch.syspath_prepend(str(matrix_dir))
+    matrix_module = importlib.import_module("tpukernel_ops_matrix")
+
+    child_pid_path = tmp_path / "lingering-child-pid.txt"
+    child_ready_path = tmp_path / "lingering-child-ready.txt"
+    worker_path = tmp_path / "lingering-worker.py"
+    child_source = (
+        "import os, signal, sys, time\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(30)\n"
+    )
+    worker_path.write_text(
+        "import json, os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        f"child_source = {child_source!r}\n"
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', child_source, "
+        "os.environ['TILELANG_TEST_CHILD_READY']],\n"
+        "    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "ready = Path(os.environ['TILELANG_TEST_CHILD_READY'])\n"
+        "while not ready.is_file():\n"
+        "    time.sleep(0.01)\n"
+        "Path(os.environ['TILELANG_TEST_CHILD_PID']).write_text(str(child.pid))\n"
+        "print('TPUKERNEL_NUMERIC_RESULT=' + "
+        "json.dumps({'status': 'passed'}), flush=True)\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["TILELANG_TEST_CHILD_PID"] = str(child_pid_path)
+    environment["TILELANG_TEST_CHILD_READY"] = str(child_ready_path)
+    monkeypatch.setattr(
+        matrix_module,
+        "_worker_environment",
+        lambda *_args, **_kwargs: environment,
+    )
+    args = SimpleNamespace(runtime_mode="cmodel", timeout=3.0, kill_grace=0.1)
+    case = matrix_module.CaseSpec("lingering-child", "copy", "float32")
+
+    child_pid = None
+    try:
+        result = matrix_module._run_one(
+            args,
+            Path(__file__).resolve().parents[3],
+            tmp_path / "matrix-lingering",
+            worker_path,
+            "sg2260e",
+            case,
+        )
+        _wait_for_file(child_pid_path)
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+
+        assert result["status"] == "failed"
+        assert result["returncode"] == 0
+        assert "left a live descendant" in result["failure"]
+        assert result["termination"] is not None
+        deadline = time.monotonic() + 2
+        while _pid_is_running(child_pid):
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    "successful numerical worker left its child running")
+            time.sleep(0.02)
+    finally:
+        if child_pid is not None and _pid_is_running(child_pid):
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def test_pcie_profile_environment_requires_two_acknowledgements():
     profiler = TPUInstructionProfiler(
         TPUProfilingConfig(chip="sg2260e", runtime_mode="pcie"))
@@ -740,6 +829,33 @@ def test_pcie_profile_worker_isolated_and_keeps_raw_trace(tmp_path):
         "cdm_profile_data_dev0-0"
     ]
     assert report.raw_instructions == ()
+
+
+@pytest.mark.parametrize(
+    "profile_name,profile_payload",
+    (
+        (None, b""),
+        ("global.profile", b""),
+        ("unexpected.bin", b"raw-pcie"),
+    ),
+)
+def test_pcie_profile_rejects_empty_or_unrecognized_raw_artifacts(
+        tmp_path, profile_name, profile_payload):
+    config = TPUProfilingConfig(
+        chip="sg2260e",
+        runtime_mode="pcie",
+        output_dir=tmp_path / "profile",
+        postprocess=False,
+    )
+
+    report = TPUInstructionProfiler(config).run_pcie(
+        _fake_pcie_trace_worker(
+            profile_name=profile_name, profile_payload=profile_payload),
+        environment=_pcie_profile_environment(),
+    )
+
+    assert report.raw_trace_files == ()
+    assert report.has_raw_trace is False
 
 
 def test_pcie_profile_requires_all_gates_before_spawning(tmp_path):
@@ -814,6 +930,37 @@ def test_pcie_canonical_decoder_report_rejects_an_unknown_schema(tmp_path):
     report_path.write_text('{"schema_version": 2, "events": []}', encoding="utf-8")
 
     with pytest.raises(ValueError, match="Unsupported TileLang PCIe profile schema"):
+        parse_pcie_decoded_instruction_timings(report_path)
+
+
+@pytest.mark.parametrize(
+    "event_update",
+    (
+        {"begin": True},
+        {"begin": float("nan")},
+        {"end": float("inf")},
+        {"begin": 8, "end": 7},
+        {"unit": ""},
+        {"unit": "cycles"},
+    ),
+)
+def test_pcie_canonical_decoder_report_rejects_invalid_timing(
+        tmp_path, event_update):
+    event = {
+        "engine": "bdc",
+        "begin": 2,
+        "end": 7,
+        "unit": "ns",
+        "fields": {},
+    }
+    event.update(event_update)
+    report_path = tmp_path / "tilelang_pcie_profile.json"
+    report_path.write_text(
+        json.dumps({"schema_version": 1, "events": [event]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="PCIe profile event 0 is invalid"):
         parse_pcie_decoded_instruction_timings(report_path)
 
 

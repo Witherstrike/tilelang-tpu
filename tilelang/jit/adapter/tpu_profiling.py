@@ -59,6 +59,8 @@ _RAW_TRACE_RE = re.compile(
     r"^(?P<label>[A-Za-z0-9][A-Za-z0-9_.-]*)-"
     r"(?P<launch>\d+)-(?P<group>\d+)\."
     r"(?P<engine>BD|GDMA|SDMA|VSDMA)\.(?P<core>\d+)\.txt$")
+_PCIE_RAW_PROFILE_FILE_RE = re.compile(
+    r"^(?:global|cdmlib\d+_\d+)\.profile$")
 
 _PROFILE_SUPERVISOR_PATH = Path(__file__).parent.parent / "_tpu_profile_supervisor.py"
 _PCIE_PROFILE_DECODER_PATH = Path(__file__).parent.parent / "_tpu_pcie_profile_decoder.py"
@@ -167,6 +169,59 @@ class TPUInstructionTiming:
     fields: Mapping[str, Any] = field(default_factory=dict)
 
 
+def _pcie_instruction_timing_error(timing: Any) -> Optional[str]:
+    """Return why a decoded PCIe timing row is invalid, or ``None``."""
+
+    for field_name in ("begin", "end", "duration"):
+        value = getattr(timing, field_name, None)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return f"{field_name} must be a numeric nanosecond value"
+        try:
+            finite = math.isfinite(value)
+        except (OverflowError, TypeError, ValueError):
+            finite = False
+        if not finite:
+            return f"{field_name} must be finite"
+    if timing.unit != "ns":
+        return "unit must be exactly 'ns'"
+    if timing.duration < 0:
+        return "duration must be non-negative"
+    if timing.end < timing.begin:
+        return "end must not precede begin"
+    return None
+
+
+def _pcie_instruction_timings_error(timings: Sequence[Any]) -> Optional[str]:
+    """Validate all decoded PCIe rows through one shared acceptance predicate."""
+
+    if not timings:
+        return "no decoded instruction timings"
+    for index, timing in enumerate(timings):
+        error = _pcie_instruction_timing_error(timing)
+        if error is not None:
+            return f"event {index}: {error}"
+    return None
+
+
+def _is_valid_pcie_raw_trace_artifact(raw_path: PathLike) -> bool:
+    """Return whether one recorder directory contains non-empty profile data."""
+
+    path = Path(raw_path)
+    if not path.is_dir():
+        return False
+    try:
+        profile_files = tuple(
+            candidate for candidate in path.iterdir()
+            if candidate.is_file() and
+            _PCIE_RAW_PROFILE_FILE_RE.fullmatch(candidate.name) is not None)
+        return bool(profile_files) and all(
+            candidate.stat().st_size > 0 for candidate in profile_files)
+    except OSError:
+        # Recorder output may disappear or become inaccessible between worker
+        # exit and collection.  Such a path is not usable raw evidence.
+        return False
+
+
 @dataclass(frozen=True)
 class TPURawInstruction:
     """One decoded textual CModel command-dump line, without a fabricated time."""
@@ -201,6 +256,10 @@ class TPUProfileReport:
 
     @property
     def has_raw_trace(self) -> bool:
+        if self.config.runtime_mode == "pcie":
+            return any(
+                _is_valid_pcie_raw_trace_artifact(path)
+                for path in self.raw_trace_files)
         return bool(self.raw_trace_files)
 
     @property
@@ -724,6 +783,10 @@ def parse_pcie_decoded_instruction_timings(
             opcode=raw_event.get("opcode"),
             fields=fields,
         ))
+        error = _pcie_instruction_timing_error(events[-1])
+        if error is not None:
+            raise ValueError(
+                f"PCIe profile event {index} is invalid: {error}: {path}")
     return tuple(events)
 
 
@@ -865,7 +928,7 @@ class TPUInstructionProfiler:
 
         raw_files = tuple(sorted(
             path for path in output_dir.glob("cdm_profile_data_dev*")
-            if path.exists()))
+            if _is_valid_pcie_raw_trace_artifact(path)))
         parser_status = "not-requested"
         parser_message: Optional[str] = None
         report_paths: Tuple[Path, ...] = ()

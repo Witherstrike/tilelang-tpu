@@ -458,6 +458,17 @@ def _run_one(
             stdout, stderr, termination = _terminate_and_collect(
                 process, args.kill_grace)
         returncode = process.poll()
+        if returncode == 0 and termination is None and \
+                _process_group_exists(process.pid):
+            # A successful direct worker is not allowed to background ordinary
+            # children.  Once the supervisor exits, its parent-death contract
+            # no longer protects such processes, so clean the group and fail
+            # this case before another TPU workload can start.
+            termination = _terminate_process_group(process, args.kill_grace)
+            launch_error = (
+                "RuntimeError: successful worker left a live descendant in "
+                "its supervised process group")
+            returncode = process.poll()
         if returncode not in (0, None) and termination is None:
             # The direct worker may have exited while compiler/runtime children
             # survived.  Clean its still-addressable process group on first
