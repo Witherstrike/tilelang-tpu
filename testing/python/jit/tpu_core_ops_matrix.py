@@ -6,7 +6,10 @@ Every case is compiled, loaded, launched once, checked against PyTorch, and
 profiled by ``TPUInstructionProfiler``.  The first failure stops the matrix;
 the profiler has already terminated that worker's process group before this
 runner records the partial result.  PCIe additionally requires two explicit
-CLI acknowledgements and a numeric device id.
+CLI acknowledgements and a numeric device id.  PCIe decoded timing is
+best-effort unless ``--require-decoded-timing`` explicitly makes it part of
+the acceptance contract; numerical correctness and raw trace collection do
+not depend on an optional vendor decoder being installed.
 """
 
 from __future__ import annotations
@@ -52,7 +55,7 @@ def _worker_environment(repo_root: Path, runtime_mode: str,
     return environment
 
 
-def _report_summary(report: Any) -> dict[str, Any]:
+def _report_summary(report: Any, *, require_decoded_timing: bool) -> dict[str, Any]:
     raw_by_engine = Counter(item.engine for item in report.raw_instructions)
     raw_by_opcode = Counter(
         item.opcode for item in report.raw_instructions if item.opcode is not None)
@@ -78,7 +81,34 @@ def _report_summary(report: Any) -> dict[str, Any]:
         "raw_instruction_count_by_opcode": dict(sorted(raw_by_opcode.items())),
         "timed_instruction_count": len(report.instruction_timings),
         "timing_by_engine_and_unit": timing_by_engine,
+        "decoded_timing_required": require_decoded_timing,
+        "decoded_timing_accepted": (
+            report.parser_status == "ready" and report.has_instruction_timings),
     }
+
+
+def _validate_profile_report(report: Any, *, require_decoded_timing: bool) -> None:
+    """Apply the selected evidence contract to a successful worker report.
+
+    A worker exit status already covers compilation, dispatch, and its PyTorch
+    numerical check.  Raw recorder output is always required.  Decoding that
+    output is a separate, optional evidence layer because ``bigTpuProfile`` is
+    not part of every runtime installation.
+    """
+
+    if not report.has_raw_trace:
+        raise RuntimeError("successful dispatch produced no profiling trace")
+    if not require_decoded_timing:
+        return
+    if report.parser_status != "ready" or not report.has_instruction_timings:
+        raise RuntimeError(
+            "decoded instruction timing was explicitly required but the "
+            "successful PCIe dispatch did not produce it "
+            f"(parser_status={report.parser_status!r}, "
+            f"message={report.parser_message!r})")
+    if any(item.duration is None or item.duration < 0 or item.end < item.begin
+           for item in report.instruction_timings):
+        raise RuntimeError("PCIe decoder produced an invalid instruction interval")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -92,6 +122,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device-id", type=int)
     parser.add_argument("--allow-pcie", action="store_true")
     parser.add_argument("--allow-pcie-profile", action="store_true")
+    parser.add_argument(
+        "--require-decoded-timing",
+        action="store_true",
+        help=("make parser_status=ready and at least one valid decoded device "
+              "timing row mandatory; by default PCIe accepts numerical success "
+              "plus raw trace and treats decoding as best-effort"),
+    )
     return parser.parse_args()
 
 
@@ -102,6 +139,9 @@ def _run_matrix(args: argparse.Namespace, output_dir: Path,
     summary: dict[str, Any] = {
         "schema_version": 1,
         "runtime_mode": args.runtime_mode,
+        "acceptance": ("numeric-raw-and-decoded-timing"
+                       if args.require_decoded_timing else "numeric-and-raw"),
+        "decoded_timing_required": args.require_decoded_timing,
         "complete": False,
         "cases": {},
     }
@@ -127,22 +167,10 @@ def _run_matrix(args: argparse.Namespace, output_dir: Path,
                 report = (profiler.run_pcie(command, environment=environment)
                           if args.runtime_mode == "pcie"
                           else profiler.run_cmodel(command, environment=environment))
-                if not report.has_raw_trace:
-                    raise RuntimeError("successful dispatch produced no profiling trace")
-                if args.runtime_mode == "pcie":
-                    if report.parser_status != "ready" or \
-                            not report.has_instruction_timings:
-                        raise RuntimeError(
-                            "successful PCIe dispatch did not produce decoded "
-                            "instruction timings "
-                            f"(parser_status={report.parser_status!r}, "
-                            f"message={report.parser_message!r})")
-                    if any(item.duration is None or item.duration < 0 or
-                           item.end < item.begin
-                           for item in report.instruction_timings):
-                        raise RuntimeError(
-                            "PCIe decoder produced an invalid instruction interval")
-                summary["cases"][key] = _report_summary(report)
+                _validate_profile_report(
+                    report, require_decoded_timing=args.require_decoded_timing)
+                summary["cases"][key] = _report_summary(
+                    report, require_decoded_timing=args.require_decoded_timing)
                 print(
                     f"PASS {key} raw={len(report.raw_instructions)} "
                     f"timed={len(report.instruction_timings)}",
@@ -184,6 +212,8 @@ def main() -> int:
             raise RuntimeError("PCIe requires a non-negative --device-id")
     elif args.device_id is not None or args.allow_pcie or args.allow_pcie_profile:
         raise RuntimeError("PCIe acknowledgements must not be supplied to CModel")
+    if args.require_decoded_timing and args.runtime_mode != "pcie":
+        raise RuntimeError("--require-decoded-timing is only valid with PCIe")
 
     repo_root = Path(__file__).resolve().parents[3]
     output_dir = args.output_dir.expanduser().resolve()
