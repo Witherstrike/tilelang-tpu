@@ -36,6 +36,13 @@ def _target(chip: str) -> str:
     return f"tpu -mcpu={chip} -tpu-programming-model=tpukernel"
 
 
+def _elementwise_operation(case: str) -> str:
+    suffix = "-broadcast"
+    if case.endswith(suffix):
+        return case[:-len(suffix)]
+    return case
+
+
 def _compile(kernel, chip: str, runtime_mode: str):
     return tilelang.compile(
         kernel,
@@ -334,7 +341,7 @@ def main() -> None:
     elif args.case.startswith("cast-"):
         _run_cast(args.case[len("cast-"):], dtype, torch_dtype, chip, runtime_mode)
     elif args.case in ("add", "sub", "mul", "add-broadcast", "sub-broadcast", "mul-broadcast"):
-        operation = args.case[:-len("-broadcast")]
+        operation = _elementwise_operation(args.case)
         _run_elementwise(
             operation,
             dtype,

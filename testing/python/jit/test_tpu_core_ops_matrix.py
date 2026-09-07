@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import tpu_core_ops_matrix as matrix_module
+import tpu_fp8_ops_worker
 import tpu_matrix_common
 import tpu_profile_worker
 from tpu_core_ops_matrix import (
@@ -72,6 +73,13 @@ def test_tir_script_workers_keep_evaluated_annotations(source_name):
     ]
 
     assert "annotations" not in annotation_futures
+
+
+def test_fp8_elementwise_case_names_preserve_unsuffixed_operations():
+    cases = ("add", "sub", "mul", "add-broadcast", "sub-broadcast", "mul-broadcast")
+
+    assert [tpu_fp8_ops_worker._elementwise_operation(case) for case in cases
+           ] == ["add", "sub", "mul", "add", "sub", "mul"]
 
 
 def test_git_source_identity_records_revision_and_tracked_dirty_state(monkeypatch):
