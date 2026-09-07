@@ -63,12 +63,18 @@ def _fake_trace_worker(label: str, programming_model: str = "tpukernel", sleep_s
 
 def _fake_pcie_trace_worker(programming_model: str = "tpukernel",
                             profile_name: Optional[str] = "global.profile",
-                            profile_payload: bytes = b"raw-pcie"):
+                            profile_payload: bytes = b"raw-pcie",
+                            forbidden_pythonpath: Optional[Path] = None):
     """Model the environment and recorder artifact of one PCIe launch."""
 
     profile_write = ""
     if profile_name is not None:
         profile_write = (f"(profile / {profile_name!r}).write_bytes({profile_payload!r})\n")
+    pythonpath_check = ""
+    if forbidden_pythonpath is not None:
+        pythonpath_check = (
+            f"assert {str(forbidden_pythonpath)!r} not in "
+            "os.environ.get('PYTHONPATH', '').split(os.pathsep)\n")
     source = ("import os\n"
               "from pathlib import Path\n"
               "assert 'FILE_DUMP_CMD' not in os.environ\n"
@@ -84,6 +90,7 @@ def _fake_pcie_trace_worker(programming_model: str = "tpukernel",
               "assert os.environ['BMLIB_ENABLE_ALL_PROFILE'] == '1'\n"
               "assert os.environ['PROFILE_RECORD_SIZE'] == '4096'\n"
               "assert os.environ['PROFILE_BOOK_KEEPING'] == '1'\n"
+              f"{pythonpath_check}"
               "profile = Path('cdm_profile_data_dev0-0')\n"
               "profile.mkdir()\n"
               f"{profile_write}")
@@ -105,7 +112,15 @@ def _create_fake_pcie_decoder_packages(root: Path) -> Path:
     package_root = root / "vendor-python"
     big_profile = package_root / "bigTpuProfile"
     big_profile.mkdir(parents=True)
-    (big_profile / "__init__.py").write_text("__version__ = '0.2.0'\n", encoding="utf-8")
+    (big_profile / "__init__.py").write_text(
+        "import os\n"
+        "assert 'TILELANG_TPU_ALLOW_PCIE_LOAD' not in os.environ\n"
+        "assert 'TILELANG_TPU_ALLOW_PCIE_PROFILE' not in os.environ\n"
+        "assert 'TILELANG_TPU_DEVICE_ID' not in os.environ\n"
+        "assert 'BMLIB_ENABLE_ALL_PROFILE' not in os.environ\n"
+        "__version__ = '0.2.0'\n",
+        encoding="utf-8",
+    )
     (big_profile / "bmprofile_perfAI_2260.py").write_text(
         "from types import SimpleNamespace\n"
         "class BMProfileParserPerfAI:\n"
@@ -850,6 +865,74 @@ def test_pcie_profile_environment_requires_two_acknowledgements():
     }
 
 
+def test_pcie_decoder_config_normalizes_only_explicit_pcie_paths(tmp_path):
+    decoder_path = tmp_path / "decoder-python"
+    decoder_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    decoder_path.chmod(decoder_path.stat().st_mode | stat.S_IXUSR)
+    package_path = tmp_path / "packages"
+    package_path.mkdir()
+
+    config = TPUProfilingConfig(
+        chip="sg2260e",
+        runtime_mode="pcie",
+        pcie_decoder_python=decoder_path,
+        pcie_decoder_pythonpath=[package_path],
+    )
+
+    assert config.pcie_decoder_python == decoder_path.resolve()
+    assert config.pcie_decoder_pythonpath == (package_path.resolve(),)
+    with pytest.raises(ValueError, match="only valid"):
+        TPUProfilingConfig(
+            chip="sg2260e",
+            runtime_mode="cmodel",
+            pcie_decoder_pythonpath=(package_path,),
+        )
+    with pytest.raises(TypeError, match="sequence"):
+        TPUProfilingConfig(
+            chip="sg2260e",
+            runtime_mode="pcie",
+            pcie_decoder_pythonpath=package_path,
+        )
+    with pytest.raises(ValueError, match="not a directory"):
+        TPUProfilingConfig(
+            chip="sg2260e",
+            runtime_mode="pcie",
+            pcie_decoder_pythonpath=(tmp_path / "missing",),
+        )
+
+
+def test_pcie_decoder_preflight_is_offline_and_returns_api_identity(tmp_path):
+    package_root = _create_fake_pcie_decoder_packages(tmp_path)
+    config = TPUProfilingConfig(
+        chip="sg2260e",
+        runtime_mode="pcie",
+        pcie_decoder_python=sys.executable,
+        pcie_decoder_pythonpath=(package_root,),
+    )
+
+    identity = TPUInstructionProfiler(config).preflight_pcie_decoder(
+        environment=_pcie_profile_environment())
+
+    assert identity == {
+        "package": "bigTpuProfile",
+        "package_version": "0.2.0",
+        "parser_api": "bigTpuProfile.bmprofile_perfAI_2260.BMProfileParserPerfAI.parse",
+    }
+
+
+def test_pcie_decoder_preflight_reports_only_the_required_package(tmp_path, monkeypatch):
+    missing_decoder = tmp_path / "missing_decoder.py"
+    missing_decoder.write_text("raise SystemExit(3)\n", encoding="utf-8")
+    monkeypatch.setattr(tpu_profiling_module, "_PCIE_PROFILE_DECODER_PATH", missing_decoder)
+    profiler = TPUInstructionProfiler(
+        TPUProfilingConfig(chip="sg2260e", runtime_mode="pcie"))
+
+    with pytest.raises(TPUProfilingError, match="preinstalled bigTpuProfile") as exc_info:
+        profiler.preflight_pcie_decoder(environment=_pcie_profile_environment())
+
+    assert "PerfAI" not in str(exc_info.value)
+
+
 def test_pcie_profile_worker_isolated_and_keeps_raw_trace(tmp_path):
     config = TPUProfilingConfig(
         chip="sg2260e",
@@ -932,6 +1015,30 @@ def test_pcie_profile_decodes_with_preinstalled_vendor_packages(tmp_path):
     assert [
         (item.engine, item.duration, item.unit, item.opcode) for item in report.instruction_timings
     ] == [("bdc", 7.0, "ns", "rvt_fadd")]
+
+
+def test_explicit_pcie_decoder_pythonpath_never_reaches_profile_worker(tmp_path):
+    package_root = _create_fake_pcie_decoder_packages(tmp_path)
+    config = TPUProfilingConfig(
+        chip="sg2260e",
+        programming_model="rv",
+        runtime_mode="pcie",
+        output_dir=tmp_path / "profile",
+        pcie_decoder_python=sys.executable,
+        pcie_decoder_pythonpath=(package_root,),
+    )
+
+    report = TPUInstructionProfiler(config).run_pcie(
+        _fake_pcie_trace_worker("rv", forbidden_pythonpath=package_root.resolve()),
+        environment=_pcie_profile_environment(),
+    )
+
+    assert report.parser_status == "ready"
+    assert report.decoder_identity == {
+        "package": "bigTpuProfile",
+        "package_version": "0.2.0",
+        "parser_api": "bigTpuProfile.bmprofile_perfAI_2260.BMProfileParserPerfAI.parse",
+    }
 
 
 def test_pcie_decoder_requires_canonical_tilelang_json(tmp_path, monkeypatch):

@@ -170,6 +170,119 @@ def test_runner_dispatches_every_portable_copy_case(monkeypatch, tmp_path):
     assert set(summary["cases"]) == set(f"sg2260e/rv/{case}" for case in matrix_module._COPY_CASES)
 
 
+def test_required_decoding_preflights_before_any_pcie_dispatch(monkeypatch, tmp_path):
+    events = []
+
+    class FakeProfiler:
+
+        def __init__(self, config):
+            self.config = config
+
+        def preflight_pcie_decoder(self, *, environment):
+            events.append(("preflight", environment))
+            return {
+                "package": "bigTpuProfile",
+                "package_version": "0.3.5",
+                "parser_api": "bigTpuProfile.bmprofile_perfAI_2260.BMProfileParserPerfAI.parse",
+            }
+
+        def run_pcie(self, command, *, environment):
+            events.append(("dispatch", command, environment))
+            return _report(parser_status="ready", timings=(_timing(),))
+
+    monkeypatch.setattr(matrix_module, "TPUInstructionProfiler", FakeProfiler)
+    monkeypatch.setattr(
+        matrix_module,
+        "git_source_identity",
+        lambda _repo_root: {
+            "git_commit": "test-revision",
+            "implementation_worktree_dirty": False,
+            "source_identity_scope": "tracked files excluding research/**",
+        },
+    )
+    output_dir = tmp_path / "matrix"
+    output_dir.mkdir()
+    args = SimpleNamespace(
+        runtime_mode="pcie",
+        require_decoded_timing=True,
+        timeout=10.0,
+        pcie_decoder_python=None,
+        pcie_decoder_pythonpath=(),
+    )
+
+    status = matrix_module._run_matrix(
+        args,
+        tmp_path,
+        output_dir,
+        (("sg2260e", "rv"),),
+        ("elementwise-add",),
+        {"PPL_PROJECT_ROOT": "/sdk"},
+    )
+
+    assert status == 0
+    assert [event[0] for event in events] == ["preflight", "dispatch"]
+    summary = json.loads((output_dir / "summary.json").read_text())
+    assert summary["decoder_preflight"] == {
+        "status": "ready",
+        "identity": {
+            "package": "bigTpuProfile",
+            "package_version": "0.3.5",
+            "parser_api": "bigTpuProfile.bmprofile_perfAI_2260.BMProfileParserPerfAI.parse",
+        },
+    }
+
+
+def test_failed_decoder_preflight_stops_matrix_without_dispatch(monkeypatch, tmp_path):
+    dispatches = []
+
+    class FakeProfiler:
+
+        def __init__(self, config):
+            pass
+
+        def preflight_pcie_decoder(self, *, environment):
+            raise RuntimeError("decoder unavailable")
+
+        def run_pcie(self, command, *, environment):
+            dispatches.append(command)
+            raise AssertionError("hardware dispatch must not be reached")
+
+    monkeypatch.setattr(matrix_module, "TPUInstructionProfiler", FakeProfiler)
+    monkeypatch.setattr(
+        matrix_module,
+        "git_source_identity",
+        lambda _repo_root: {
+            "git_commit": "test-revision",
+            "implementation_worktree_dirty": False,
+            "source_identity_scope": "tracked files excluding research/**",
+        },
+    )
+    output_dir = tmp_path / "matrix"
+    output_dir.mkdir()
+    args = SimpleNamespace(
+        runtime_mode="pcie",
+        require_decoded_timing=True,
+        timeout=10.0,
+        pcie_decoder_python=None,
+        pcie_decoder_pythonpath=(),
+    )
+
+    status = matrix_module._run_matrix(
+        args,
+        tmp_path,
+        output_dir,
+        (("sg2260e", "rv"),),
+        ("elementwise-add",),
+        {"PPL_PROJECT_ROOT": "/sdk"},
+    )
+
+    assert status == 1
+    assert dispatches == []
+    summary = json.loads((output_dir / "summary.json").read_text())
+    assert summary["decoder_preflight"]["status"] == "failed"
+    assert summary["cases"] == {}
+
+
 def test_numeric_and_raw_acceptance_does_not_require_vendor_decoder():
     report = _report()
 

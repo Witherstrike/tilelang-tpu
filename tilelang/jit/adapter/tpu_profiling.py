@@ -68,6 +68,23 @@ _PCIE_RAW_PROFILE_FILE_RE = re.compile(r"^(?:global|cdmlib\d+_\d+)\.profile$")
 _PROFILE_SUPERVISOR_PATH = Path(__file__).parent.parent / "_tpu_profile_supervisor.py"
 _PCIE_PROFILE_DECODER_PATH = Path(__file__).parent.parent / "_tpu_pcie_profile_decoder.py"
 _PCIE_DECODED_REPORT_NAME = "tilelang_pcie_profile.json"
+_PCIE_DECODER_IDENTITY_PREFIX = "TILELANG_TPU_PCIE_DECODER_IDENTITY="
+_PCIE_DECODER_PREFLIGHT_TIMEOUT_S = 10.0
+_PCIE_HARDWARE_ENVIRONMENT_KEYS = frozenset((
+    "BMLIB_ENABLE_ALL_PROFILE",
+    "FILE_DUMP_CMD",
+    "PROFILE_BOOK_KEEPING",
+    "PROFILE_RECORD_SIZE",
+    "TILELANG_TPU_ALLOW_PCIE_LOAD",
+    "TILELANG_TPU_ALLOW_PCIE_PROFILE",
+    "TILELANG_TPU_BENCHMARK_RUNS",
+    "TILELANG_TPU_DEVICE_ID",
+    "TILELANG_TPU_PROFILE_CHIP",
+    "TILELANG_TPU_PROFILE_OUTPUT_DIR",
+    "TILELANG_TPU_PROFILE_PROGRAMMING_MODEL",
+    "TILELANG_TPU_PROFILE_RUNTIME_MODE",
+    "TILELANG_TPU_PROFILE_SESSION",
+))
 
 
 class TPUProfilingError(RuntimeError):
@@ -84,6 +101,50 @@ class TPUProfilingCommandError(TPUProfilingError):
 
 class _PerfAIWorkspaceBusy(RuntimeError):
     """The vendor PerfAI work directory is already owned by another session."""
+
+
+def _normalize_decoder_python(value: PathLike) -> Path:
+    """Resolve and validate an explicitly selected offline decoder Python."""
+
+    try:
+        raw_value = os.fspath(value)
+    except TypeError as exc:
+        raise TypeError("pcie_decoder_python must be a path-like value.") from exc
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        raise ValueError("pcie_decoder_python must be a non-empty filesystem path.")
+    path = Path(raw_value).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"pcie_decoder_python is not a file: {path}")
+    if not os.access(path, os.X_OK):
+        raise ValueError(f"pcie_decoder_python is not executable: {path}")
+    return path
+
+
+def _normalize_decoder_pythonpath(values: Sequence[PathLike]) -> Tuple[Path, ...]:
+    """Resolve an explicit decoder-only import path without accepting strings as lists."""
+
+    if isinstance(values, (str, bytes, os.PathLike)):
+        raise TypeError("pcie_decoder_pythonpath must be a sequence of directory paths, "
+                        "not one path-like value.")
+    try:
+        raw_values = tuple(values)
+    except TypeError as exc:
+        raise TypeError("pcie_decoder_pythonpath must be a sequence of directory paths.") from exc
+    normalized = []
+    for value in raw_values:
+        try:
+            raw_value = os.fspath(value)
+        except TypeError as exc:
+            raise TypeError("Every pcie_decoder_pythonpath entry must be path-like.") from exc
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            raise ValueError("pcie_decoder_pythonpath entries must be non-empty paths.")
+        path = Path(raw_value).expanduser().resolve()
+        if not path.is_dir():
+            raise ValueError(f"pcie_decoder_pythonpath entry is not a directory: {path}")
+        if path in normalized:
+            raise ValueError(f"pcie_decoder_pythonpath contains a duplicate directory: {path}")
+        normalized.append(path)
+    return tuple(normalized)
 
 
 @dataclass(frozen=True)
@@ -106,6 +167,8 @@ class TPUProfilingConfig:
     postprocess: bool = True
     profile_record_size: int = 4096
     profile_book_keeping: int = 1
+    pcie_decoder_python: Optional[PathLike] = None
+    pcie_decoder_pythonpath: Tuple[PathLike, ...] = ()
 
     def __post_init__(self) -> None:
         if self.runtime_mode not in ("cmodel", "pcie"):
@@ -133,6 +196,15 @@ class TPUProfilingConfig:
         object.__setattr__(self, "chip", target_spec.chip)
         object.__setattr__(self, "programming_model", target_spec.programming_model)
         object.__setattr__(self, "runtime_mode", runtime_config.runtime_mode)
+        if (self.pcie_decoder_python is not None or self.pcie_decoder_pythonpath) and \
+                runtime_config.runtime_mode != "pcie":
+            raise ValueError("pcie_decoder_python and pcie_decoder_pythonpath are only valid "
+                             "for runtime_mode='pcie'.")
+        if self.pcie_decoder_python is not None:
+            object.__setattr__(self, "pcie_decoder_python",
+                               _normalize_decoder_python(self.pcie_decoder_python))
+        object.__setattr__(self, "pcie_decoder_pythonpath",
+                           _normalize_decoder_pythonpath(self.pcie_decoder_pythonpath))
 
     @property
     def target_spec(self) -> TPUTargetSpec:
@@ -250,6 +322,7 @@ class TPUProfileReport:
     perfai_report_paths: Tuple[Path, ...] = ()
     decoded_report_path: Optional[Path] = None
     decoded_report_paths: Tuple[Path, ...] = ()
+    decoder_identity: Mapping[str, str] = field(default_factory=dict)
     timeline_events: Tuple[TPUInstructionTiming, ...] = ()
     instruction_timings: Tuple[TPUInstructionTiming, ...] = ()
 
@@ -272,6 +345,69 @@ def _copy_environment(extra: Optional[Mapping[str, str]]) -> MutableMapping[str,
                 raise TypeError("TPU profiling environment keys and values must be strings.")
             environment[key] = value
     return environment
+
+
+def _pcie_decoder_environment(config: TPUProfilingConfig,
+                              environment: Optional[Mapping[str, str]]) -> MutableMapping[str, str]:
+    """Build an offline-only decoder environment without PCIe permissions.
+
+    An explicit ``pcie_decoder_pythonpath`` replaces, rather than extends, the
+    caller's ``PYTHONPATH``.  The worker environment is never modified, so a
+    separately installed decoder stack cannot shadow compiler dependencies.
+    The legacy default still inherits ``PYTHONPATH`` for callers that have not
+    opted into the isolated path fields.
+    """
+
+    decoder_env = _copy_environment(environment)
+    for key in _PCIE_HARDWARE_ENVIRONMENT_KEYS:
+        decoder_env.pop(key, None)
+    if config.pcie_decoder_pythonpath:
+        decoder_env["PYTHONPATH"] = os.pathsep.join(
+            str(path) for path in config.pcie_decoder_pythonpath)
+        decoder_env["PYTHONNOUSERSITE"] = "1"
+    return decoder_env
+
+
+def _pcie_decoder_python(config: TPUProfilingConfig) -> str:
+    return str(config.pcie_decoder_python or sys.executable)
+
+
+def _parse_pcie_decoder_identity(stdout: str) -> Mapping[str, str]:
+    """Extract and validate the decoder helper's machine-readable identity."""
+
+    identity_line = next(
+        (line for line in reversed(stdout.splitlines())
+         if line.startswith(_PCIE_DECODER_IDENTITY_PREFIX)), None)
+    if identity_line is None:
+        raise ValueError("The offline PCIe decoder did not report its package/API identity.")
+    payload = json.loads(identity_line[len(_PCIE_DECODER_IDENTITY_PREFIX):])
+    required = ("package", "package_version", "parser_api")
+    if not isinstance(payload, dict) or any(
+            not isinstance(payload.get(key), str) or not payload[key] for key in required):
+        raise ValueError("The offline PCIe decoder reported an invalid package/API identity.")
+    return {key: payload[key] for key in required}
+
+
+def _read_pcie_decoder_identity(report_paths: Sequence[Path]) -> Mapping[str, str]:
+    """Return the common decoder identity recorded in canonical reports."""
+
+    identities = []
+    for path in report_paths:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw_identity = payload.get("decoder_identity") if isinstance(payload, dict) else None
+        if not isinstance(raw_identity, dict):
+            raise ValueError(f"TileLang PCIe profile has no decoder identity: {path}")
+        identity = {
+            key: raw_identity.get(key) for key in ("package", "package_version", "parser_api")
+        }
+        if any(not isinstance(value, str) or not value for value in identity.values()):
+            raise ValueError(f"TileLang PCIe profile has an invalid decoder identity: {path}")
+        identities.append(identity)
+    if not identities:
+        return {}
+    if any(identity != identities[0] for identity in identities[1:]):
+        raise ValueError("TileLang PCIe profile reports were produced by different decoders.")
+    return identities[0]
 
 
 def _profile_output_dir(config: TPUProfilingConfig) -> Path:
@@ -881,6 +1017,80 @@ class TPUInstructionProfiler:
             raise TPUProfilingError("PPL 1.7 dependency preflight failed for "
                                     f"{self.config.runtime_mode} profiling: {exc}") from exc
 
+    def preflight_pcie_decoder(
+            self, *, environment: Optional[Mapping[str, str]] = None) -> Mapping[str, str]:
+        """Validate the offline decoder without loading or dispatching a TPU.
+
+        The check runs the decoder helper under the same process-tree watchdog
+        as profiling, but with every board/profile permission removed.  Matrix
+        runners that require decoded timing can call this before their first
+        hardware worker and fail without risking a launch when the selected
+        Python environment lacks the supported structured API.
+        """
+
+        if self.config.runtime_mode != "pcie":
+            raise TPUProfilingError(
+                "preflight_pcie_decoder only supports runtime_mode='pcie'.")
+        if not _PCIE_PROFILE_DECODER_PATH.is_file():
+            raise TPUProfilingError(
+                f"TileLang's offline PCIe profile decoder helper is missing: "
+                f"{_PCIE_PROFILE_DECODER_PATH}")
+        decoder_env = _pcie_decoder_environment(self.config, environment)
+        command = (
+            _pcie_decoder_python(self.config),
+            str(_PCIE_PROFILE_DECODER_PATH),
+            "--preflight",
+        )
+        decoder: Optional[subprocess.Popen] = None
+        timeout = min(float(self.config.timeout_s), _PCIE_DECODER_PREFLIGHT_TIMEOUT_S)
+        try:
+            decoder = _spawn_guarded_profile_process(
+                command,
+                cwd=_PCIE_PROFILE_DECODER_PATH.parent.resolve(),
+                environment=decoder_env,
+            )
+            guarded_output = _communicate_guarded_process(decoder, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            assert decoder is not None
+            stdout, stderr = _terminate_and_collect(decoder)
+            detail = (stderr or stdout).strip()
+            raise TPUProfilingError(
+                f"Offline PCIe decoder preflight exceeded {timeout:g}s and its process "
+                f"group was terminated{': ' + detail if detail else '.'}") from None
+        except (OSError, subprocess.SubprocessError, TPUProfilingError) as exc:
+            raise TPUProfilingError(f"Could not start offline PCIe decoder preflight: {exc}") \
+                from exc
+        except BaseException:
+            if decoder is not None:
+                with suppress(Exception):
+                    _terminate_and_collect(decoder)
+            raise
+
+        if guarded_output.left_live_descendant:
+            cleanup = ("was terminated" if guarded_output.cleanup_complete else
+                       "could not be fully reaped")
+            raise TPUProfilingError(
+                "Offline PCIe decoder preflight left a live descendant; its supervised "
+                f"process group {cleanup}.")
+        detail = (guarded_output.stderr or guarded_output.stdout).strip()
+        if decoder.returncode == 3:
+            raise TPUProfilingError(
+                "Offline PCIe decoding requires preinstalled bigTpuProfile; no package "
+                f"was installed automatically{': ' + detail if detail else '.'}")
+        if decoder.returncode == 4:
+            raise TPUProfilingError(
+                "The installed bigTpuProfile does not provide the callable "
+                f"BMProfileParserPerfAI.parse API required by TileLang"
+                f"{': ' + detail if detail else '.'}")
+        if decoder.returncode != 0:
+            raise TPUProfilingError(
+                f"Offline PCIe decoder preflight exited with status {decoder.returncode}"
+                f"{': ' + detail if detail else '.'}")
+        try:
+            return _parse_pcie_decoder_identity(guarded_output.stdout)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise TPUProfilingError(str(exc)) from exc
+
     def pcie_profile_environment_overrides(self,
                                            environment: Optional[Mapping[str, str]] = None
                                           ) -> Mapping[str, str]:
@@ -924,9 +1134,9 @@ class TPUInstructionProfiler:
         synchronization, and disables recording before copying results back.
         The worker has the same parent-death/process-group watchdog as CModel.
 
-        Offline decoding never installs packages.  When ``bigTpuProfile`` (and
-        its PerfAI module) is absent, raw ``cdm_profile_data_dev*`` artifacts
-        are retained and the report returns ``parser_status='unavailable'``.
+        Offline decoding never installs packages.  When ``bigTpuProfile`` is
+        absent, raw ``cdm_profile_data_dev*`` artifacts are retained and the
+        report returns ``parser_status='unavailable'``.
         """
 
         if self.config.runtime_mode != "pcie":
@@ -1001,6 +1211,7 @@ class TPUInstructionProfiler:
         parser_message: Optional[str] = None
         report_paths: Tuple[Path, ...] = ()
         decoded_report_paths: Tuple[Path, ...] = ()
+        decoder_identity: Mapping[str, str] = {}
         timeline_events: Tuple[TPUInstructionTiming, ...] = ()
         timings: Tuple[TPUInstructionTiming, ...] = ()
 
@@ -1023,16 +1234,10 @@ class TPUInstructionProfiler:
                         parser_message = ("The PCIe worker used the total profile deadline; "
                                           "offline decoding was not started.")
                     else:
-                        decoder_env = dict(worker_env)
-                        # Decoding is offline and must not inherit permission to
-                        # initialize the board a second time.
-                        decoder_env.pop("TILELANG_TPU_ALLOW_PCIE_LOAD", None)
-                        decoder_env.pop("TILELANG_TPU_ALLOW_PCIE_PROFILE", None)
-                        decoder_env.pop("TILELANG_TPU_DEVICE_ID", None)
-                        decoder_env.pop("BMLIB_ENABLE_ALL_PROFILE", None)
+                        decoder_env = _pcie_decoder_environment(self.config, worker_env)
                         decoder = _spawn_guarded_profile_process(
                             [
-                                sys.executable,
+                                _pcie_decoder_python(self.config),
                                 str(_PCIE_PROFILE_DECODER_PATH), "--profile-dir",
                                 str(output_dir), "--arch",
                                 _pcie_profile_arch(self.config)
@@ -1078,9 +1283,15 @@ class TPUInstructionProfiler:
                                           f"Logs: {parser_stdout}, {parser_stderr}")
                     elif decoder.returncode == 3:
                         parser_status = "unavailable"
-                        parser_message = ("bigTpuProfile/PerfAI is not installed; no package was "
+                        parser_message = ("bigTpuProfile is not installed; no package was "
                                           "installed automatically and raw PCIe traces were kept. "
                                           f"Logs: {parser_stdout}, {parser_stderr}")
+                    elif decoder.returncode == 4:
+                        parser_status = "incompatible"
+                        parser_message = (
+                            "The installed bigTpuProfile does not provide the callable "
+                            "BMProfileParserPerfAI.parse API required by TileLang. Logs: "
+                            f"{parser_stdout}, {parser_stderr}")
                     elif decoder.returncode != 0:
                         parser_status = "failed"
                         parser_message = (
@@ -1091,6 +1302,13 @@ class TPUInstructionProfiler:
                             sorted(output_dir.rglob(_PCIE_DECODED_REPORT_NAME)))
                         if decoded_report_paths:
                             try:
+                                decoder_identity = _read_pcie_decoder_identity(
+                                    decoded_report_paths)
+                                stdout_identity = _parse_pcie_decoder_identity(decoder_stdout)
+                                if decoder_identity != stdout_identity:
+                                    raise ValueError(
+                                        "The offline PCIe decoder identity differs between its "
+                                        "stdout and canonical report.")
                                 timings = tuple(
                                     event for path in decoded_report_paths
                                     for event in parse_pcie_decoded_instruction_timings(path))
@@ -1124,6 +1342,7 @@ class TPUInstructionProfiler:
             perfai_report_paths=report_paths,
             decoded_report_path=(decoded_report_paths[0] if decoded_report_paths else None),
             decoded_report_paths=decoded_report_paths,
+            decoder_identity=decoder_identity,
             timeline_events=timeline_events,
             instruction_timings=timings,
         )

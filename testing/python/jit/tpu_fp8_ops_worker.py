@@ -4,6 +4,7 @@
 
 import argparse
 import os
+import re
 from typing import Tuple
 
 import torch
@@ -16,6 +17,15 @@ _DTYPES = {
     "e5m2": ("e5m2_float8", torch.float8_e5m2),
 }
 
+_PCIE_GATE_VARIABLES = (
+    "TILELANG_TPU_ALLOW_PCIE_LOAD",
+    "TILELANG_TPU_ALLOW_PCIE_PROFILE",
+    "TILELANG_TPU_DEVICE_ID",
+    "BMLIB_ENABLE_ALL_PROFILE",
+    "PROFILE_RECORD_SIZE",
+    "PROFILE_BOOK_KEEPING",
+)
+
 
 def _profile_selection() -> Tuple[str, str]:
     if os.environ.get("TILELANG_TPU_PROFILE_SESSION") != "1":
@@ -25,10 +35,34 @@ def _profile_selection() -> Tuple[str, str]:
     runtime_mode = os.environ.get("TILELANG_TPU_PROFILE_RUNTIME_MODE", "")
     if programming_model != "tpukernel":
         raise RuntimeError("FP8 capability worker requires programming_model=tpukernel")
-    if chip not in ("bm1690", "sg2260e") or runtime_mode != "cmodel":
-        raise RuntimeError("FP8 capability worker accepts only a supported CModel profile")
+    if chip not in ("bm1690", "sg2260e"):
+        raise RuntimeError("FP8 capability worker requires a supported TPU chip")
+    if runtime_mode not in ("cmodel", "pcie"):
+        raise RuntimeError("FP8 capability worker requires runtime_mode=cmodel or pcie")
     if os.environ.get("TILELANG_TPU_BENCHMARK_RUNS") != "0":
         raise RuntimeError("FP8 profiling requires exactly one kernel launch")
+    if runtime_mode == "cmodel":
+        inherited_gates = tuple(name for name in _PCIE_GATE_VARIABLES if name in os.environ)
+        if inherited_gates:
+            raise RuntimeError(
+                "CModel FP8 worker refuses PCIe recorder/device state: " +
+                ", ".join(inherited_gates))
+    else:
+        required = {
+            "TILELANG_TPU_ALLOW_PCIE_LOAD": "1",
+            "TILELANG_TPU_ALLOW_PCIE_PROFILE": "1",
+            "BMLIB_ENABLE_ALL_PROFILE": "1",
+        }
+        invalid = tuple(
+            name for name, expected in required.items()
+            if os.environ.get(name) != expected)
+        if invalid:
+            raise RuntimeError(
+                "PCIe FP8 worker requires explicit load/profile/recorder gates: " +
+                ", ".join(invalid))
+        device_id = os.environ.get("TILELANG_TPU_DEVICE_ID", "")
+        if re.fullmatch(r"[0-9]+", device_id) is None or int(device_id) > 2**31 - 1:
+            raise RuntimeError("PCIe FP8 worker requires a valid numeric device id")
     return chip, runtime_mode
 
 

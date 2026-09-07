@@ -15,7 +15,6 @@ not depend on an optional vendor decoder being installed.
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
 import json
 import os
 from pathlib import Path
@@ -25,12 +24,19 @@ import tempfile
 from typing import Any, Optional
 
 from tilelang.jit import TPUInstructionProfiler, TPUProfilingConfig
-from tilelang.jit.adapter.tpu_profiling import _pcie_instruction_timings_error
 
 if __package__:
     from .tpu_matrix_common import git_source_identity
+    from .tpu_profile_matrix_common import (
+        profile_report_summary as _report_summary,
+        validate_profile_report as _validate_profile_report,
+    )
 else:
     from tpu_matrix_common import git_source_identity
+    from tpu_profile_matrix_common import (
+        profile_report_summary as _report_summary,
+        validate_profile_report as _validate_profile_report,
+    )
 
 _COPY_CASES = ("copy-fp32-local-roundtrip", "copy-fp32-global-to-global",
                "copy-fp16-local-roundtrip", "copy-fp16-global-to-global")
@@ -62,64 +68,6 @@ def _worker_environment(repo_root: Path, runtime_mode: str,
     return environment
 
 
-def _report_summary(report: Any, *, require_decoded_timing: bool) -> dict[str, Any]:
-    raw_by_engine = Counter(item.engine for item in report.raw_instructions)
-    raw_by_opcode = Counter(
-        item.opcode for item in report.raw_instructions if item.opcode is not None)
-    timing_by_engine: dict[str, dict[str, Any]] = {}
-    decoded_timing_error = (
-        _pcie_instruction_timings_error(report.instruction_timings)
-        if report.parser_status == "ready" else "decoder is not ready")
-    grouped = defaultdict(list)
-    if decoded_timing_error is None:
-        for timing in report.instruction_timings:
-            grouped[(timing.engine, timing.unit)].append(float(timing.duration))
-    for (engine, unit), durations in sorted(grouped.items()):
-        timing_by_engine[f"{engine}:{unit}"] = {
-            "count": len(durations),
-            "sum": sum(durations),
-            "min": min(durations),
-            "max": max(durations),
-        }
-    return {
-        "status": "passed",
-        "artifact_dir": str(report.output_dir),
-        "parser_status": report.parser_status,
-        "raw_trace_file_count": len(report.raw_trace_files),
-        "raw_instruction_count": len(report.raw_instructions),
-        "raw_instruction_count_by_engine": dict(sorted(raw_by_engine.items())),
-        "raw_instruction_count_by_opcode": dict(sorted(raw_by_opcode.items())),
-        "timed_instruction_count": len(report.instruction_timings),
-        "timing_by_engine_and_unit": timing_by_engine,
-        "decoded_timing_required": require_decoded_timing,
-        "decoded_timing_accepted": decoded_timing_error is None,
-    }
-
-
-def _validate_profile_report(report: Any, *, require_decoded_timing: bool) -> None:
-    """Apply the selected evidence contract to a successful worker report.
-
-    A worker exit status already covers compilation, dispatch, and its PyTorch
-    numerical check.  Raw recorder output is always required.  Decoding that
-    output is a separate, optional evidence layer because ``bigTpuProfile`` is
-    not part of every runtime installation.
-    """
-
-    if not report.has_raw_trace:
-        raise RuntimeError("successful dispatch produced no profiling trace")
-    if not require_decoded_timing:
-        return
-    if report.parser_status != "ready" or not report.has_instruction_timings:
-        raise RuntimeError("decoded instruction timing was explicitly required but the "
-                           "successful PCIe dispatch did not produce it "
-                           f"(parser_status={report.parser_status!r}, "
-                           f"message={report.parser_message!r})")
-    timing_error = _pcie_instruction_timings_error(report.instruction_timings)
-    if timing_error is not None:
-        raise RuntimeError("PCIe decoder produced an invalid instruction interval: "
-                           f"{timing_error}")
-
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-mode", choices=("cmodel", "pcie"), required=True)
@@ -131,6 +79,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device-id", type=int)
     parser.add_argument("--allow-pcie", action="store_true")
     parser.add_argument("--allow-pcie-profile", action="store_true")
+    parser.add_argument(
+        "--pcie-decoder-python",
+        type=Path,
+        help="Python executable used only by the offline PCIe decoder child",
+    )
+    parser.add_argument(
+        "--pcie-decoder-pythonpath",
+        type=Path,
+        action="append",
+        default=[],
+        help=("decoder-only import directory; repeat for multiple directories; "
+              "never added to the compile/worker PYTHONPATH"),
+    )
     parser.add_argument(
         "--require-decoded-timing",
         action="store_true",
@@ -157,6 +118,48 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
     summary.update(git_source_identity(repo_root))
     summary_path = output_dir / "summary.json"
     worker = Path(__file__).with_name("tpu_profile_worker.py")
+    decoder_config = {
+        "pcie_decoder_python": getattr(args, "pcie_decoder_python", None),
+        "pcie_decoder_pythonpath": tuple(
+            getattr(args, "pcie_decoder_pythonpath", ()) or ()),
+    }
+
+    if args.require_decoded_timing:
+        chip, programming_model = configurations[0]
+        print("PREFLIGHT PCIe decoder", flush=True)
+        try:
+            preflight_config = TPUProfilingConfig(
+                chip=chip,
+                programming_model=programming_model,
+                runtime_mode="pcie",
+                output_dir=output_dir,
+                label="pcie-decoder-preflight",
+                timeout_s=args.timeout,
+                postprocess=True,
+                **decoder_config,
+            )
+            decoder_identity = TPUInstructionProfiler(
+                preflight_config).preflight_pcie_decoder(environment=environment)
+        except BaseException as exc:
+            summary["decoder_preflight"] = {
+                "status": "failed",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+            summary_path.write_text(
+                json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(f"STOP decoder preflight: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+        summary["decoder_preflight"] = {
+            "status": "ready",
+            "identity": dict(decoder_identity),
+        }
+        summary_path.write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     for chip, programming_model in configurations:
         for case in cases:
@@ -170,6 +173,7 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                 label=f"{chip}-{programming_model}-{case}",
                 timeout_s=args.timeout,
                 postprocess=args.runtime_mode == "pcie",
+                **decoder_config,
             )
             profiler = TPUInstructionProfiler(config)
             command = [sys.executable, str(worker), "--case", case]
@@ -219,6 +223,9 @@ def main() -> int:
             raise RuntimeError("PCIe requires a non-negative --device-id")
     elif args.device_id is not None or args.allow_pcie or args.allow_pcie_profile:
         raise RuntimeError("PCIe acknowledgements must not be supplied to CModel")
+    if args.runtime_mode != "pcie" and \
+            (args.pcie_decoder_python is not None or args.pcie_decoder_pythonpath):
+        raise RuntimeError("PCIe decoder options must not be supplied to CModel")
     if args.require_decoded_timing and args.runtime_mode != "pcie":
         raise RuntimeError("--require-decoded-timing is only valid with PCIe")
 
