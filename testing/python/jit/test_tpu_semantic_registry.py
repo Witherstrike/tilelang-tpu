@@ -306,7 +306,12 @@ def test_historical_pcie_scope_is_explicitly_non_authorizing(monkeypatch):
     stage = next(result["verification"]["pcie_numeric_passed"]
                  for capability in contract["capabilities"]
                  for result in capability["target_results"].values()
-                 if result["verification"]["pcie_numeric_passed"]["status"] == "historical_passed")
+                 if result["verification"]["pcie_numeric_passed"]["status"] == "passed")
+    # The current contract no longer needs a historical stage.  Synthesize one
+    # so this invariant remains covered even when every old PCIe result has
+    # been superseded by same-revision evidence.
+    stage["status"] = "historical_passed"
+    stage["scope"] = "Historical " + stage["scope"]
     stage["scope"] = stage["scope"][len("Historical "):]
 
     real_load = validator._load_json
