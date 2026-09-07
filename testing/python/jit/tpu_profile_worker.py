@@ -8,8 +8,6 @@ compile/load/dispatch lifecycle.  It never loads a prebuilt TileLang TPU shared
 object; PCIe is accepted only when the profiler supplies every safety gate.
 """
 
-from __future__ import annotations
-
 import argparse
 import os
 

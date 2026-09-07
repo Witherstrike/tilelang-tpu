@@ -7,8 +7,6 @@ with ``--operation``; compilation and dispatch only happen from ``main``.
 PCIe use is fail-closed and needs both ``--allow-pcie`` and ``--device-id``.
 """
 
-from __future__ import annotations
-
 import argparse
 import os
 from typing import Optional, Sequence

@@ -2,7 +2,9 @@
 # Licensed under the MIT License.
 """Acceptance-policy tests for the isolated TPU core-op matrix runner."""
 
+import ast
 import json
+from pathlib import Path
 import sys
 from types import SimpleNamespace
 
@@ -47,6 +49,29 @@ _INVALID_TIMINGS = (
     _timing(unit=""),
     _timing(unit="cycles"),
 )
+
+
+@pytest.mark.parametrize(
+    "source_name",
+    (
+        "testing/python/jit/tpukernel_ops_worker.py",
+        "testing/python/jit/tpu_fp8_ops_worker.py",
+        "testing/python/jit/tpu_profile_worker.py",
+        "tpu_demo/elementwise/tpu_test_elementwise.py",
+        "tpu_demo/matmul/tpu_test_matmul_fp16.py",
+    ),
+)
+def test_tir_script_workers_keep_evaluated_annotations(source_name):
+    """TVM Script consumes ``T.Tensor`` annotations as live objects."""
+
+    repo_root = Path(__file__).resolve().parents[3]
+    tree = ast.parse((repo_root / source_name).read_text(encoding="utf-8"))
+    annotation_futures = [
+        alias.name for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__" for alias in node.names
+    ]
+
+    assert "annotations" not in annotation_futures
 
 
 def test_git_source_identity_records_revision_and_tracked_dirty_state(monkeypatch):

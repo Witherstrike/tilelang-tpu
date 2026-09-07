@@ -7,8 +7,6 @@ The module is safe to import: compilation and device dispatch only happen from
 explicit device id because loading the vendor runtime can initialize hardware.
 """
 
-from __future__ import annotations
-
 import argparse
 import os
 from typing import Optional, Sequence

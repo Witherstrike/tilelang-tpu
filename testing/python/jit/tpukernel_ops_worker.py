@@ -13,8 +13,6 @@ This file is an executable worker, not a pytest test.  Use
 supervision.
 """
 
-from __future__ import annotations
-
 import argparse
 from dataclasses import asdict, dataclass, field
 import json
@@ -22,7 +20,7 @@ import math
 import os
 import time
 import traceback
-from typing import Any, Mapping, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 import zlib
 
 _CHIPS = ("sg2260e", "bm1690")
@@ -41,13 +39,13 @@ class CaseSpec:
     operation: str
     dtype: str
     parameters: Mapping[str, Any] = field(default_factory=dict)
-    supported_chips: tuple[str, ...] = _CHIPS
+    supported_chips: Tuple[str, ...] = _CHIPS
 
-    def to_json(self) -> dict[str, Any]:
+    def to_json(self) -> Dict[str, Any]:
         return asdict(self)
 
 
-def build_case_specs() -> tuple[CaseSpec, ...]:
+def build_case_specs() -> Tuple[CaseSpec, ...]:
     """Return the stable, non-FP8 TPU-Kernel numerical matrix.
 
     The registry intentionally contains only dtypes accepted explicitly by the
@@ -56,13 +54,13 @@ def build_case_specs() -> tuple[CaseSpec, ...]:
     characterization before it can be added to this conformance matrix.
     """
 
-    cases: list[CaseSpec] = []
+    cases: List[CaseSpec] = []
 
     def add(operation: str,
             dtype: str,
             variant: str = "dense",
             *,
-            supported_chips: tuple[str, ...] = _CHIPS,
+            supported_chips: Tuple[str, ...] = _CHIPS,
             **parameters: Any) -> None:
         suffix = f".{variant}" if variant else ""
         case_id = f"{operation}.{dtype}{suffix}"
@@ -189,7 +187,7 @@ class NumericalMismatch(RuntimeError):
         self.details = dict(details)
 
 
-def _json_sample(tensor: Any) -> list[Any]:
+def _json_sample(tensor: Any) -> List[Any]:
     """Return a short JSON-safe sample, spelling non-finite values as text."""
 
     values = tensor.reshape(-1)[:8].tolist()
@@ -269,7 +267,7 @@ def _torch_dtype(torch: Any, dtype: str) -> Any:
 
 
 def _random_float(torch: Any,
-                  shape: tuple[int, ...],
+                  shape: Tuple[int, ...],
                   dtype: str,
                   generator: Any,
                   *,
@@ -286,7 +284,7 @@ def _comparison(actual: Any,
                 *,
                 atol: float,
                 rtol: float,
-                exact: bool = False) -> dict[str, Any]:
+                exact: bool = False) -> Dict[str, Any]:
     if tuple(actual.shape) != tuple(expected.shape):
         raise NumericalMismatch(
             f"shape mismatch: actual={tuple(actual.shape)}, expected={tuple(expected.shape)}",
@@ -307,7 +305,7 @@ def _comparison(actual: Any,
     if exact:
         equal = actual == expected
         mismatch_count = int((~equal).sum().item())
-        metrics: dict[str, Any] = {
+        metrics: Dict[str, Any] = {
             "exact": True,
             "atol": 0.0,
             "rtol": 0.0,
@@ -359,7 +357,7 @@ def _comparison(actual: Any,
     return metrics
 
 
-def _tolerance(dtype: str, operation: str) -> tuple[float, float]:
+def _tolerance(dtype: str, operation: str) -> Tuple[float, float]:
     base = {
         "float32": (1.0e-5, 1.0e-5),
         "float16": (5.0e-3, 5.0e-3),
@@ -388,10 +386,10 @@ def _tolerance(dtype: str, operation: str) -> tuple[float, float]:
 
 def _compile_and_launch(tilelang: Any,
                         prim_func: Any,
-                        arguments: tuple[Any, ...],
+                        arguments: Tuple[Any, ...],
                         chip: str,
                         runtime_mode: str,
-                        out_idx: Union[int, list[int]] = -1) -> dict[str, float]:
+                        out_idx: Union[int, List[int]] = -1) -> Dict[str, float]:
     target = f"tpu -mcpu={chip} -tpu-programming-model=tpukernel"
     compile_begin = time.monotonic()
     kernel = tilelang.compile(
@@ -411,7 +409,7 @@ def _compile_and_launch(tilelang: Any,
 
 
 def _run_copy(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
-              generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
+              generator: Any) -> Tuple[Dict[str, Any], Dict[str, float]]:
     shape = tuple(int(extent) for extent in spec.parameters.get("shape", (4, 32)))
     src_dtype = str(spec.parameters["src_dtype"])
     dst_dtype = str(spec.parameters["dst_dtype"])
@@ -447,7 +445,7 @@ def _run_copy(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: An
 
 
 def _run_fill(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
-              _generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
+              _generator: Any) -> Tuple[Dict[str, Any], Dict[str, float]]:
     shape = (4, 32)
     dtype = spec.dtype
     value = float(spec.parameters["value"])
@@ -466,7 +464,7 @@ def _run_fill(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: An
 
 
 def _run_elementwise(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any,
-                     torch: Any, generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
+                     torch: Any, generator: Any) -> Tuple[Dict[str, Any], Dict[str, float]]:
     shape = (4, 32)
     rhs_shape = (4, 1) if spec.parameters.get("broadcast_rhs") else shape
     dtype = spec.dtype
@@ -511,7 +509,7 @@ def _run_elementwise(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any
 
 
 def _run_scalar(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
-                generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
+                generator: Any) -> Tuple[Dict[str, Any], Dict[str, float]]:
     shape = (4, 32)
     dtype = spec.dtype
     value = float(spec.parameters["value"])
@@ -539,7 +537,7 @@ def _run_scalar(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: 
 
 
 def _run_gemm(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
-              generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
+              generator: Any) -> Tuple[Dict[str, Any], Dict[str, float]]:
     m, n, k = 16, 16, 16
     dtype = spec.dtype
     accumulate = bool(spec.parameters["accumulate"])
@@ -585,7 +583,7 @@ def _run_gemm(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: An
 
 
 def _run_exp(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
-             generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
+             generator: Any) -> Tuple[Dict[str, Any], Dict[str, float]]:
     shape = (4, 32)
     dtype = spec.dtype
 
@@ -613,7 +611,7 @@ def _run_exp(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any
 
 
 def _run_sigmoid(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
-                 generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
+                 generator: Any) -> Tuple[Dict[str, Any], Dict[str, float]]:
     shape = (4, 32)
     dtype = spec.dtype
 
@@ -642,7 +640,7 @@ def _run_sigmoid(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T:
 
 
 def _run_reduction(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
-                   generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
+                   generator: Any) -> Tuple[Dict[str, Any], Dict[str, float]]:
     rows = 65
     width = int(spec.parameters["width"])
     dtype = spec.dtype
@@ -679,7 +677,7 @@ def _run_reduction(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, 
 
 
 def _run_rsqrt(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
-               generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
+               generator: Any) -> Tuple[Dict[str, Any], Dict[str, float]]:
     shape = (4, 32)
     dtype = spec.dtype
 
@@ -701,7 +699,7 @@ def _run_rsqrt(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: A
 
 
 def _run_rope(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
-              generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
+              generator: Any) -> Tuple[Dict[str, Any], Dict[str, float]]:
     shape = (4, 32)
     dtype = spec.dtype
 
@@ -735,7 +733,7 @@ def _run_rope(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: An
 
 
 def _run_gather(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
-                generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
+                generator: Any) -> Tuple[Dict[str, Any], Dict[str, float]]:
     rows, width, count = 17, 32, 7
     dtype = spec.dtype
 
@@ -755,7 +753,7 @@ def _run_gather(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: 
 
 
 def _run_topk(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
-              generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
+              generator: Any) -> Tuple[Dict[str, Any], Dict[str, float]]:
     length, k = 257, 11
     dtype = spec.dtype
     descended = bool(spec.parameters["descended"])
@@ -802,7 +800,7 @@ def _run_topk(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: An
     }, timing
 
 
-def _run_case(spec: CaseSpec, chip: str, runtime_mode: str) -> dict[str, Any]:
+def _run_case(spec: CaseSpec, chip: str, runtime_mode: str) -> Dict[str, Any]:
     # Imports are intentionally delayed until all PCIe/session gates pass.
     import torch
     import tilelang
@@ -878,7 +876,7 @@ def main() -> int:
         _emit_result(payload)
         return 0
     except BaseException as error:  # Preserve a machine-readable first failure.
-        payload: dict[str, Any] = {
+        payload: Dict[str, Any] = {
             "status": "failed",
             "case": _CASE_BY_ID[args.case_id].to_json(),
             "chip": args.chip,

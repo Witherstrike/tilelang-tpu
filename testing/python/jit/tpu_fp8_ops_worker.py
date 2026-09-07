@@ -2,10 +2,9 @@
 # Licensed under the MIT License.
 """Isolated numerical worker for the TPU-Kernel FP8 capability contract."""
 
-from __future__ import annotations
-
 import argparse
 import os
+from typing import Tuple
 
 import torch
 
@@ -18,7 +17,7 @@ _DTYPES = {
 }
 
 
-def _profile_selection() -> tuple[str, str]:
+def _profile_selection() -> Tuple[str, str]:
     if os.environ.get("TILELANG_TPU_PROFILE_SESSION") != "1":
         raise RuntimeError("FP8 worker must run through TPUInstructionProfiler")
     chip = os.environ.get("TILELANG_TPU_PROFILE_CHIP", "")
