@@ -2,7 +2,7 @@
 
 ## 1. 范围与判定
 
-本报告汇总 2026-09-04 至 2026-09-07 的已保存实验与 source-only 回归。每个数值 case 都在独立进程中 fresh-compile、加载、单次执行并与 PyTorch/精确 oracle 比较；矩阵采用首错停止。CModel 和 PCIe 是独立证据层，未执行的层级保持 `unverified`。当前 canonical CModel 数值基线绑定到实现提交 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335`；板端结果按实际实验日期与实现基线单独陈述，不从历史结果外推到当前提交。
+本报告汇总 2026-09-04 至 2026-09-07 的已保存实验与 source-only 回归。每个数值 case 都在独立进程中 fresh-compile、加载、单次执行并与 PyTorch/精确 oracle 比较；矩阵采用首错停止。CModel 和 PCIe 是独立证据层，未执行的层级保持 `unverified`。当前 canonical 实现基线为 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335`；下文列出的当前 CModel 与 SG2260E PCIe summary 均记录该 revision，且 tracked implementation worktree 为 clean。
 
 `research/artifacts/**` 已由 Git 忽略。下文只使用仓库相对路径引用实验结果；机器可读状态以 `research/tpu-op-contract/contract.json` 为准。
 
@@ -20,16 +20,24 @@
 | 2026-09-07 | source-only | TPU descriptor + frontend contract | 32/32 + 41/41 | descriptor 边界与 frontend alias/region 约束分别验证，非等价 alias fail-closed |
 | 2026-09-07 | source-only | 全部 TPU/PPL 非硬件回归 | 335 passed，4 skipped | skipped 均为需显式 opt-in 的真实 CModel/PCIe profiling worker；默认测试不访问板卡 |
 | 2026-09-07 | compile/link/header-only | PPL 1.7 私有 CModel/PCIe artifact | 8/8 | 7 项真实 compile/link + 1 项 SDK header/flag 检查；PCIe 只链接，不加载板卡 |
+| 2026-09-07 | PCIe profiling | `44a6fc2`：SG2260E/TPU-Kernel matmul | 1/1，36 条 timing | 数值、非空 raw profile 和 decoded timing 严格验收均通过；36 条区间均以 ns 计量 |
+| 2026-09-07 | PCIe profiling | `44a6fc2`：SG2260E/RV 核心矩阵 | 9/9，108 条 timing | 四则、GEMM 和四个 FP16/FP32 copy case 均通过数值、非空 raw profile 与 decoded timing 严格验收 |
+| 2026-09-07 | PCIe numeric | `44a6fc2`：SG2260E/TPU-Kernel | 141/141 | core 54/54、extended 15/15、reductions 72/72；三批均 `complete=true`、failed=0 |
 | 2026-09-05 | 历史 PCIe | SG2260E/TPU-Kernel | 140/140 | core 53/53、extended 15/15、reductions 72/72；仅为旧实现基线的回归范围，不授权当前提交上板 |
 | 2026-09-05 | 历史 PCIe profiling | SG2260E/TPU-Kernel matmul | 1 次 launch | 数值 dispatch 成功，并采集一个含五个 profile 文件的 raw 目录；既有 trace 后续在隔离 decoder 环境离线得到 36 条有效事件。会话内缺 decoder，故原始矩阵 summary 为 `complete=false` |
 | 2026-09-04 | 历史 PCIe | SG2260E/RV | 5/5 | FP32 四则与 FP16 GEMM 数值通过；仅为旧实现核心竖切，不授权当前提交上板 |
-| 2026-09-07 | PCIe preflight | SG2260E | 跳过 | 最近一次有界 `tpu-smi --noloop --json_format` 正常退出但报告 `status=Fault`、`tpu_util=100%`；按 fail-stop 规则未启动任何当前提交板端算子 |
+| 2026-09-07 | PCIe 运行边界 | BM1690、FP8 | 未验证 | 本机没有 BM1690 板卡；FP8 matrix/worker 仍只接受 CModel，76/76 不能外推为 PCIe 结果 |
 
 当前 canonical 证据：
 
 - `research/artifacts/2026-09-07/tpukernel-cmodel-44a6fc2/summary.json`
 - `research/artifacts/2026-09-07/fp8-cmodel-44a6fc2/summary.json`
 - `research/artifacts/2026-09-07/core-cmodel-44a6fc2/summary.json`
+- `research/artifacts/2026-09-07/pcie-tpukernel-matmul-44a6fc2/summary.json`
+- `research/artifacts/2026-09-07/pcie-rv-core-44a6fc2/summary.json`
+- `research/artifacts/2026-09-07/pcie-tpukernel-core-44a6fc2/summary.json`
+- `research/artifacts/2026-09-07/pcie-tpukernel-extended-44a6fc2/summary.json`
+- `research/artifacts/2026-09-07/pcie-tpukernel-reductions-44a6fc2/summary.json`
 
 过程定位与历史证据：
 
@@ -105,7 +113,7 @@ pytest -q -rs testing/python/jit/test_ppl_layout.py \
 
 结果为 `335 passed, 4 skipped`；四个 skip 均要求显式开启真实 profiling worker，普通单测不会静默访问 CModel 或板卡。其中 descriptor contract 32/32、frontend contract 41/41、core matrix 35/35。定向 SDK 测试共 `8 passed`，其中 7 项真实 compile/link、1 项检查 SG2260E RV header/flags；PCIe 用例只生成并链接私有 artifact，没有加载设备。NT accumulate 测试确认同一公开 `T.ppl_gemm(..., transpose_B=True, accumulate=True)` 在 TPU-Kernel target 的 codegen 失败，而在 SG2260E/RV target 生成 `rvt_fmm2a_nt`；direct semantic call 不能绕过 FP32 C 约束。
 
-实现提交 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335` 的正式 runner 完成 TPU-Kernel 288/288（SG2260E 141/141、BM1690 147/147）、FP8 76/76 和三组核心 profiling 27/27。三份 canonical summary 都记录该 revision，且 `implementation_worktree_dirty=false`。核心 profiling case 的 raw trace 均非空；由于本机没有兼容 decoder，验收未启用后处理，全部 `timed_instruction_count=0`。因此 27/27 只证明数值与 raw 收集，不表示已获得逐指令耗时。PCIe 仍只采用历史证据。
+实现提交 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335` 的正式 runner 完成 TPU-Kernel CModel 288/288（SG2260E 141/141、BM1690 147/147）、FP8 CModel 76/76 和三组核心 CModel profiling 27/27。对应 summary 均记录该 revision，且 `implementation_worktree_dirty=false`。CModel profiling case 的 raw trace 均非空；由于本机没有兼容 CModel decoder，验收未启用后处理，全部 `timed_instruction_count=0`。因此 27/27 只证明 CModel 数值与 raw 收集，不表示已获得逐指令耗时。SG2260E PCIe 的当前证据单独列于第 6 节。
 
 ### 3.5 远程提交前审查结论
 
@@ -140,7 +148,7 @@ FP8 copy/fill/arithmetic 使用 `(1,64)`；W broadcast 的 rhs 为 `(1,1)`。Gat
 
 NT accumulate 的公开 helper 保留为 target-independent 语义，再由编程模型分流：TPU-Kernel 的 FP8 A/B + FP32 C 生成 `_R_trans(..., result_add=true)` 并匹配 `C + A @ B.T`；TPU-Kernel 的 FP16/BF16 因底层右转置 API 没有 `result_add` 而在 codegen 拒绝；SG2260E/RV 的 FP16/BF16 + FP32 C 已通过 `rvt_fmm2a_nt` 源码选择回归，但尚无 CModel/PCIe 数值结果。公开 helper 还允许基础浮点 overwrite 写入 FP32 C（NN/NT），该 selector 也尚未做精确源码与数值验证。
 
-未验证范围包括 PCIe、非零 fill、FP16/BF16 与 FP8 间 cast、FP8 C、异常值与更大 shape。
+未验证范围包括 FP8 PCIe、非零 fill、FP16/BF16 与 FP8 间 cast、FP8 C、异常值与更大 shape。FP8 matrix 与 worker 当前把运行模式固定为 CModel，因此尚未执行任何 FP8 板端 dispatch；这是 runner 覆盖缺口，不是芯片不支持 FP8 的结论。
 
 ### 4.1 FP8 scalar 调用契约与历史无效探针
 
@@ -162,23 +170,27 @@ BM1690 CModel 的 FP32/INT32/UINT32 升序与降序均通过，公开 API 与 fi
 
 生产实现已经把该事实转为芯片能力 guard：SG2260E topk 在 codegen 失败，当前 CModel 与 PCIe 阶段为 `not_applicable`。不得为了“接口一致”在 SG2260E 上运行该原语。
 
-## 6. 历史 SG2260E PCIe 核心闭环
+## 6. SG2260E PCIe 当前闭环
 
-2026-09-05 的 TPU-Kernel final 使用与 CModel 相同的公开 case registry，在 SG2260E device 0 完成 140/140：
+实现基线 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335` 已在 SG2260E device 0 上完成当前非 FP8 验收。运行前后的板卡状态均为 `Active`、利用率 0%；结束后未发现受控 profiler、runner、decoder 或 runtime 后代残留。该观测只覆盖本轮有界会话，不等价于长期稳定性证明。
+
+TPU-Kernel 数值矩阵按三批运行：
 
 | 批次 | 结果 | 数值范围 |
 | --- | ---: | --- |
-| core | 53/53 | 22 个 copy/cast、3 个非零 fill、6 个 FP16/BF16 GEMM、16 个 tensor arithmetic、6 个 scalar arithmetic |
+| core | 54/54 | 23 个 copy/cast、3 个非零 fill、6 个 FP16/BF16 GEMM、16 个 tensor arithmetic、6 个 scalar arithmetic |
 | extended | 15/15 | 三种基础浮点各自的 exp、sigmoid、rsqrt、gather、rope |
 | reductions | 72/72 | sum/max × 三种基础浮点 × 12 个 width，含 63/64/65 |
 
-三个 summary 均为 `complete=true`、`status=passed`、failed=0；监管器未记录 timeout、retry 或 device fault。由于这些实验早于当前 region ABI 与安全监管修订，契约只把精确 selector 标记为 `historical_passed`：它们可确定上板回归范围，但不能满足当前提交的 PCIe 门禁，也不外推到 FP8、BM1690、RV 或未列 scope。
+三批合计 141/141；summary 均为 `complete=true`、`status=passed`、failed=0。它们是当前 region ABI 与安全监管实现上的 PCIe 数值证据，但不包含逐指令 timing 门禁，也不外推到 FP8、BM1690、RV 扩展项或未列 scope。
 
-profiling 与数值矩阵独立。受监管的 matmul profiling 硬件 dispatch 数值执行成功，并生成一个 `cdm_profile_data_dev0-0` raw 目录；其中包含 `cdmlib0_0.profile` 至 `cdmlib0_3.profile` 与 `global.profile` 五份文件。该会话内没有可用的 `bigTpuProfile/PerfAI`，所以 summary 按严格解析准则记录 `parser_status=unavailable`，不能伪装成完整 profiling pass。随后仅在临时隔离环境安装 `bigTpuProfile==0.3.5`，对既有 raw trace 离线解码，未再次下发板卡；规范化结果包含 36 个有效 ns 区间：BDC 16、GDMA 20，opcode 分布为 copy 4、MM2_NN 8、data_convert 4、tensorLd 16、tensorSt 4。生产框架有意不自动安装依赖，因此 recorder/raw 采集已验证，常规逐指令解码仍要求用户显式配置兼容 decoder。
+profiling 与上述数值矩阵独立。当前 TPU-Kernel matmul canary 为 1/1，严格要求数值正确、规范命名且非空的 raw profile、`parser_status=ready` 和合法 decoded timing；结果解码 36 条 ns 区间，其中 BDC 16、GDMA 20。当前 RV 核心矩阵为 9/9，共 108 条 ns timing：两个 global-to-global copy 各 1 条、两个 local-roundtrip copy 各 3 条、四个 elementwise case 各 16 条、matmul 36 条。九项均满足同一严格门禁。
 
-单次 recorder 事件用于审查指令映射和定位瓶颈，不构成无 recorder 开销、warmup/repeat 条件下的性能结论。
+对应证据分别为 `research/artifacts/2026-09-07/pcie-tpukernel-matmul-44a6fc2/summary.json`、`research/artifacts/2026-09-07/pcie-rv-core-44a6fc2/summary.json` 以及同日的三份 TPU-Kernel numeric summary。单次 recorder 事件用于审查指令映射和定位瓶颈，不构成无 recorder 开销、warmup/repeat 条件下的性能结论。
 
-2026-09-07 最近一次准备重跑板端时，PCIe 枚举、`/dev/sg-host-drv-0` 与 `sgcard` 驱动均存在。首次无参数 `tpu-smi` 因默认 `--loop` 持续运行，测试器 TERM 其完整进程组并确认无残留；随后带 10 秒硬上限的一次性 `--noloop --json_format` 在约 4 秒内正常退出，但报告 `status=Fault`、`tpu_util=100%`、`mem_usage=0MB`。因此未启动任何算子或 profiling launch。本节 140/140 与 RV 5/5 仍是历史板端证据；当前提交所有 PCIe stage 均没有 `passed`，只可能是 `historical_passed`、`unverified` 或 `not_applicable`。
+同日较早的 preflight 曾报告 `status=Fault`、`tpu_util=100%`，当时按照 fail-stop 规则没有发射算子。后续只有在状态恢复为 `Active`、利用率 0% 后才启动上述矩阵；旧 preflight artifact 保留为过程记录，不能覆盖稍后的成功 summary。
+
+2026-09-05 的 TPU-Kernel 140/140 与 2026-09-04 的 RV 5/5 仍保留为历史证据；本节当前结论只采用同 revision、clean tracked implementation 的 `44a6fc2` 工件。FP8 PCIe 因 runner 固定为 CModel 而未验证；本机没有 BM1690 板卡，故 BM1690 PCIe 同样保持 `unverified`。
 
 早期 PCIe GEMM 曾暴露 software-pipeline 数据依赖冒险；改为串行 K 循环后两种编程模型均通过。这也是当前 TPU pass pipeline 禁用 software-pipeline injection 的实验证据。
 
@@ -198,12 +210,10 @@ profiling 与数值矩阵独立。受监管的 matmul profiling 硬件 dispatch 
 
 | 优先级 | 项目 | 原因 |
 | --- | --- | --- |
-| P0 | 当前 SG 板端重新授权 | 设备恢复健康后先跑 TPU-Kernel matmul canary，再跑 TPU-Kernel/RV 各 9 项核心矩阵；当前 PCIe `passed=0`，历史结果不能跳过这一步 |
-| P0 | 当前 TPU-Kernel 非 FP8 SG PCIe | 核心通过后按 core/extended/reductions 分批重跑现行 141 项适用范围，任一首错即停止 |
-| P1 | FP8 SG PCIe | 只有当前非 FP8 板端基线恢复后才按 copy/cast、arithmetic、GEMM、gather/rope 分批；76/76 CModel 不能替代真实板端 FP8 执行 |
-| P1 | BM1690 PCIe | 当前 BM1690 只有 147/147 CModel；板端 runtime、驱动和稳定性仍无证据 |
+| P0 | FP8 runner 的 PCIe 参数化与 SG 板端验证 | matrix/worker 当前硬编码 CModel；先把 runtime mode 与三重授权接入现有 supervisor，再按 copy/cast、arithmetic、GEMM、gather/rope 分批上板。76/76 CModel 不能替代真实板端执行 |
+| P1 | BM1690 PCIe | 当前 BM1690 只有 147/147 CModel，本机没有 BM1690 板卡；取得设备后仍需独立验证 board runtime、驱动与数值路径 |
 | P1 | RV BF16、NT overwrite/accumulate 与基础浮点 FP32 overwrite | source path 存在或 frontend 已接受，但精确 RV CModel/PCIe 证据不足；其中 FP32 overwrite 连精确 source-emission 结果也未记录 |
-| P2 | 可部署的 profiling decoder | raw 采集已闭环，离线 36-event 解码只在隔离环境验证；若要求常规 timing，需要显式供应并锁定兼容 vendor decoder |
+| P2 | 可复现的 decoder 环境 | 当前 SG PCIe 已完成 36/108 条结构化解码，但框架不会自动安装 vendor 包；常规 timing 运行仍需显式供应并锁定兼容 decoder |
 | P2 | tail、异常值、alias 与更广 shape | 当前矩阵是静态、规则形状和受控输入域；TopK 写入 tail 已单独闭合，其他 op 仍需覆盖 |
 | P2 | 多核分片与依赖安全 pipeline | 当前只证明单核串行语义 |
 

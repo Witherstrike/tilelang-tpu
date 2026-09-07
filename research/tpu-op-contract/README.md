@@ -89,21 +89,23 @@ Schema 1.1 起，`invariants` 记录跨 op 的不可绕过规则。当前 `seman
 
 PPL 1.7 高层 DSL 和当前 TileLang 使用同一 scalar 序列：FP32 常量以 round-to-even cast 成目标 FP8，再调用通用 `tpu_bdc_fp_add_C/tpu_bdc_fp_mul_C`。[PPL probe](../artifacts/2026-09-05/fp8-scalar-ppl-probe/summary.json) 在两芯片的 moderate 与 boundary 输入上完成；当前公共路径随后 8/8 通过。历史 E4M3 direct `tpu_bdc_fp8_add_C` 探针在 [SG2260E](../artifacts/2026-09-05/fp8-scalar-cmodel/summary.json) 与 [BM1690](../artifacts/2026-09-05/fp8-scalar-bm1690-cmodel/summary.json) 的 exit 139 已定位为非法参数：FP8 dst/src 搭配 FP32 `C_dtype` 违反 `sizeof(C_dtype) <= sizeof(dst_dtype)`。它不是硬件不支持证据。当前只承诺默认非饱和行为；E4M3 overflow 为 NaN、E5M2 为 infinity，不暴露可选 saturation。
 
-### 3.3 历史 PCIe 与当前门禁
+### 3.3 当前 PCIe 证据与门禁
 
-2026-09-05 的 SG2260E/TPU-Kernel 板端 final 数值矩阵为 140/140。它早于当前 region ABI、copy lowering 与进程监管修订，只作为 `historical_passed` 回归范围，不是当前实现的上板授权：
+板卡恢复健康后，2026-09-07 在干净实现基线 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335` 上按 fail-stop 顺序完成 151 次 SG2260E device 0 launch。每份 summary 都由 runner 自记相同 revision、`implementation_worktree_dirty=false` 与 `source_identity_scope="tracked files excluding research/**"`；每个 contract runtime expectation 又锁定完整 required case manifest，不能用同数量的其他 selector 替换。
 
 | 批次 | 结果 | 覆盖 |
 | --- | ---: | --- |
-| [core](../artifacts/2026-09-05/tpukernel-sg2260e-pcie-final/core/summary.json) | 53/53 | 浮点/整数 copy、支持的本地 cast、非零 fill、FP16/BF16 GEMM、基础浮点等形四则、FP32 W broadcast、基础浮点 scalar add/mul |
-| [extended](../artifacts/2026-09-05/tpukernel-sg2260e-pcie-final/extended/summary.json) | 15/15 | FP16/BF16/FP32 exp、sigmoid、rsqrt、gather、rope |
-| [reductions](../artifacts/2026-09-05/tpukernel-sg2260e-pcie-final/reductions/summary.json) | 72/72 | 三种基础浮点 sum/max，覆盖十二个 EU 边界 width |
+| [TPU-Kernel matmul canary](../artifacts/2026-09-07/pcie-tpukernel-matmul-44a6fc2/summary.json) | 1/1 | `64×64×64` FP16 GEMM、FP32 accumulator zero、FP32→FP16 输出转换；数值、raw recorder 与 36 条 ns timing 均通过 |
+| [RV core](../artifacts/2026-09-07/pcie-rv-core-44a6fc2/summary.json) | 9/9 | FP32 四则、FP16 GEMM，以及 FP16/FP32 各自的 local-roundtrip 与 S2S；数值、raw recorder 与 108 条 ns timing 均通过 |
+| [TPU-Kernel core](../artifacts/2026-09-07/pcie-tpukernel-core-44a6fc2/summary.json) | 54/54 | 23 个浮点/整数 copy/cast（含 `(2,3,17)` FP32 rank-3）、三种非零 fill、六种 FP16/BF16 GEMM、16 种 tensor arithmetic、六种 scalar arithmetic |
+| [TPU-Kernel extended](../artifacts/2026-09-07/pcie-tpukernel-extended-44a6fc2/summary.json) | 15/15 | FP16/BF16/FP32 exp、sigmoid、rsqrt、gather、rope |
+| [TPU-Kernel reductions](../artifacts/2026-09-07/pcie-tpukernel-reductions-44a6fc2/summary.json) | 72/72 | 三种基础浮点 sum/max，覆盖 width `15,16,17,31,32,33,47,48,49,63,64,65` |
 
-三批均逐 case 使用独立受控进程组和超时，未发生 timeout、retry 或 device fault。2026-09-04 的 [RV summary](../artifacts/2026-09-04/pcie-final/rv-summary.json) 同样只保留 SG2260E/RV 的 FP32 四则与 FP16 GEMM 五项历史数值结果；其中 copy/cast/fill 仅是在这些复合 workload 中被端到端覆盖，不是独立 PCIe case，更不能外推到当前新增的 L2L/S2S selector。
+TPU-Kernel 三个数值批次合计现行 141/141；独立 matmul canary 用于验证 accumulator zero 与 PCIe profiling，不与 141 项解释为不同 selector。RV 的四条独立 copy case 直接闭合 G2L→L2L→L2S 与 S2S，因此 `copy.same-fp32-fp16.same-space` 可以在该精确 `(4,32)` 范围内从 `unverified` 提升为当前 `passed`；GEMM 内的 FP32→FP16 cast 和 zero fill 仍只按复合 workload 记载，不外推为独立 selector。
 
-profiling 证据分两层记录：[汇总记录](../artifacts/2026-09-05/tpukernel-sg2260e-pcie-profiling-final/offline-decode-summary.json) 表明受监管的 matmul 硬件 dispatch 成功，并采集一个 `cdm_profile_data_dev0-0` raw 目录（四份 core profile 和一份 global profile）；但该会话内没有可用的 vendor decoder，原始矩阵 summary 因而是 `complete=false`，不能把它写成整项测试通过。随后仅在临时隔离环境安装 `bigTpuProfile==0.3.5`，对同一份 raw trace 离线解码，未再次下发板卡；[规范化 JSON](../artifacts/2026-09-05/tpukernel-sg2260e-pcie-profiling-final/sg2260e-tpukernel-matmul-m_z_ztmr/decoded_0/tilelang_pcie_profile.json) 含 36 条有效 ns 区间：BDC 16、GDMA 20，按 opcode 为 copy 4、MM2_NN 8、data_convert 4、tensorLd 16、tensorSt 4。生产路径不会自动安装 decoder，因此 raw 采集已经闭环，而日常逐指令时间解码仍以显式提供兼容的外部 decoder 为前提。
+两份 profiling 矩阵都显式要求 decoded timing，所有 case 的 parser 均为 `ready`，并同时保留非空 raw trace。单次事件用于证明指令选择和定位问题，不是稳定性能结论；生产路径仍不会自动安装 decoder。此前 2026-09-04/05 的 RV 5/5、TPU-Kernel 140/140 与离线 decode 文件只保留为演进记录，不再授权或重复累计当前 capability。
 
-BM1690 PCIe、FP8 PCIe 及更宽的 SG2260E/RV 能力没有对应板端证据，契约保持 `unverified`。2026-09-07 最近一次有界 `tpu-smi --noloop --json_format` 虽正常退出，却报告 `status=Fault`、`tpu_util=100%`；随后未启动任何当前提交板端算子。因此契约中 `pcie_numeric_passed` 的当前 `passed` 数量为零；旧 TPU-Kernel 140/140 与 RV 5/5 只使用 `historical_passed`。
+契约现在有 43 个当前 `pcie_numeric_passed=passed` stage：42 个是对旧历史精确范围的同 revision 重跑，另一个是 RV FP16/FP32 L2L/S2S 的四条直接 copy case。BM1690 PCIe、FP8 PCIe及更宽的 SG2260E/RV selector 没有对应板端证据，继续保持 `unverified`；SG2260E topk 仍为 `not_applicable`。
 
 ### 3.4 远程提交前审查
 
@@ -141,7 +143,7 @@ Agent 或生成器使用时还必须遵守以下规则：
 
 `research/artifacts/**` 被 Git 忽略，适合保留本机完整结果；因此克隆仓库后工件可能不存在。可移植结论由本目录契约和 `research/tpu-backend-design/test-report.md` 汇总，工件路径只是证据定位符。
 
-当前自动校验还有一个刻意保留的边界：核心 27 项 evidence 列出了完整 `required_case_ids`，而 TPU-Kernel 288 项与 FP8 76 项 evidence 目前只锁定总数、target 分布和全量通过，尚未把 capability 与直接或复合覆盖它的具体 case id 建成机器可检验的明确映射。本轮已人工比较新旧 case 集合一致；后续若允许 Agent 自动提升 capability，必须先增加稳定 case manifest 或 `claims_by_target` 映射，不能仅凭数量相同自动升级。
+当前五份 PCIe canonical evidence 都列出了完整 `required_case_ids`；其数量分别与 target case count 的 1、9、54、15、72 完全相等，严格校验因此能识别 selector 缺失或等量替换。仍刻意保留的边界是 TPU-Kernel CModel 288 项与 FP8 CModel 76 项 evidence 目前只锁定总数、target 分布和全量通过，尚未把 capability 与直接或复合覆盖它的具体 case id 建成机器可检验的明确映射。本轮已人工比较 CModel 新旧 case 集合一致；后续若允许 Agent 自动提升这些 CModel capability，必须先增加稳定 case manifest 或 `claims_by_target` 映射，不能仅凭数量相同自动升级。
 
 ## 6. 校验
 

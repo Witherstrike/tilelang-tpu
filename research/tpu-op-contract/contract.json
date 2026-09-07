@@ -2,7 +2,7 @@
   "$schema": "./schema.json",
   "schema_version": "1.2.0",
   "contract_id": "tilelang-tpu.current-op-capabilities",
-  "reviewed_at": "2026-09-07T14:51:00+08:00",
+  "reviewed_at": "2026-09-07T19:30:16+08:00",
   "validated_source_revision": "44a6fc2ab6e8ca60569853fd781e21bfa0b78335",
   "scope": {
     "description": "Current TileLang TPU frontend/internal operation contract for BM1690 TPU-Kernel and SG2260E TPU-Kernel/RV, with evidence scoped by dtype, variant, target, and execution mode.",
@@ -1127,20 +1127,23 @@
       "id": "artifact.pcie-rv-core",
       "kind": "runtime_report",
       "source_root": "artifacts",
-      "path": "2026-09-04/pcie-final/rv-summary.json",
-      "locator": "all five sg2260e/rv cases",
-      "observed_at": "2026-09-04T00:00:00+08:00",
-      "time_precision": "day",
+      "path": "2026-09-07/pcie-rv-core-44a6fc2/summary.json",
+      "locator": "complete=true and all nine SG2260E/RV PCIe core cases passed with required decoded timing",
+      "observed_at": "2026-09-07T19:02:54+08:00",
+      "time_precision": "second",
+      "source_revision": "44a6fc2ab6e8ca60569853fd781e21bfa0b78335",
+      "identity_source": "runner_recorded",
       "runtime_expectation": {
         "runtime_mode": "pcie",
         "complete": true,
-        "case_count": 5,
+        "case_count": 9,
         "all_cases_passed": true,
         "claim_targets": ["sg2260e.rv"],
         "capability_ids": [
           "add.fp32-equal.numeric",
           "copy.cast-fp32-to-fp16.numeric",
           "copy.same-fp16.global-local",
+          "copy.same-fp32-fp16.same-space",
           "copy.same-fp32.global-local",
           "div.fp32-equal.numeric",
           "fill.zero-fp32.numeric",
@@ -1148,25 +1151,31 @@
           "mul.fp32-equal.numeric",
           "sub.fp32-equal.numeric"
         ],
-        "target_case_counts": {"sg2260e.rv": 5},
+        "target_case_counts": {"sg2260e.rv": 9},
         "required_case_ids": [
           "sg2260e/rv/elementwise-add",
           "sg2260e/rv/elementwise-sub",
           "sg2260e/rv/elementwise-mul",
           "sg2260e/rv/elementwise-div",
-          "sg2260e/rv/matmul"
+          "sg2260e/rv/matmul",
+          "sg2260e/rv/copy-fp32-local-roundtrip",
+          "sg2260e/rv/copy-fp32-global-to-global",
+          "sg2260e/rv/copy-fp16-local-roundtrip",
+          "sg2260e/rv/copy-fp16-global-to-global"
         ]
       },
-      "summary": "Historical 2026-09-04 ignored local artifact records SG2260E RV PCIe numerical pass for four FP32 elementwise cases and FP16 GEMM; it is not current-revision authorization. Historical parser-ready fields are not used as current decoder evidence."
+      "summary": "The clean 44a6fc2 SG2260E/RV PCIe core matrix passed 9/9 with numerical oracles, nonempty raw recorder output, and required decoded timing: four FP32 elementwise cases, FP16 GEMM, and exact FP16/FP32 local-roundtrip plus global-to-global copies."
     },
     {
       "id": "artifact.pcie-tpukernel-gemm",
       "kind": "runtime_report",
       "source_root": "artifacts",
-      "path": "2026-09-04/pcie-final/tpukernel-matmul-summary.json",
-      "locator": "sg2260e/tpukernel/matmul",
-      "observed_at": "2026-09-04T00:00:00+08:00",
-      "time_precision": "day",
+      "path": "2026-09-07/pcie-tpukernel-matmul-44a6fc2/summary.json",
+      "locator": "complete=true and sg2260e/tpukernel/matmul passed with required decoded timing",
+      "observed_at": "2026-09-07T19:01:51+08:00",
+      "time_precision": "second",
+      "source_revision": "44a6fc2ab6e8ca60569853fd781e21bfa0b78335",
+      "identity_source": "runner_recorded",
       "runtime_expectation": {
         "runtime_mode": "pcie",
         "complete": true,
@@ -1177,20 +1186,22 @@
         "target_case_counts": {"sg2260e.tpukernel": 1},
         "required_case_ids": ["sg2260e/tpukernel/matmul"]
       },
-      "summary": "Historical 2026-09-04 ignored local artifact records SG2260E TPU-Kernel PCIe numerical pass for FP16 GEMM with FP32 accumulation; it is not current-revision authorization. Historical parser-ready fields are not used as current decoder evidence."
+      "summary": "The clean 44a6fc2 SG2260E/TPU-Kernel PCIe matmul canary passed its numerical oracle, retained nonempty raw recorder output, and decoded 36 valid nanosecond instruction intervals; the workload directly includes FP32 accumulator zero fill."
     },
     {
       "id": "artifact.pcie-sg-tpukernel-core-final",
       "kind": "runtime_report",
       "source_root": "artifacts",
-      "path": "2026-09-05/tpukernel-sg2260e-pcie-final/core/summary.json",
-      "locator": "complete=true, status=passed, 53/53 scheduled cases passed",
-      "observed_at": "2026-09-05T11:46:20.508363+00:00",
+      "path": "2026-09-07/pcie-tpukernel-core-44a6fc2/summary.json",
+      "locator": "complete=true, status=passed, 54/54 scheduled cases passed",
+      "observed_at": "2026-09-07T11:06:03.278491+00:00",
       "time_precision": "second",
+      "source_revision": "44a6fc2ab6e8ca60569853fd781e21bfa0b78335",
+      "identity_source": "runner_recorded",
       "runtime_expectation": {
         "runtime_mode": "pcie",
         "complete": true,
-        "case_count": 53,
+        "case_count": 54,
         "all_cases_passed": true,
         "claim_targets": ["sg2260e.tpukernel"],
         "capability_ids": [
@@ -1220,18 +1231,76 @@
           "sub.fp16-bf16.numeric",
           "sub.fp32-equal.numeric"
         ],
-        "target_case_counts": {"sg2260e.tpukernel": 53}
+        "target_case_counts": {"sg2260e.tpukernel": 54},
+        "required_case_ids": [
+          "sg2260e/tpukernel/copy.float16.local-roundtrip",
+          "sg2260e/tpukernel/copy.float16.global-to-global",
+          "sg2260e/tpukernel/copy.bfloat16.local-roundtrip",
+          "sg2260e/tpukernel/copy.bfloat16.global-to-global",
+          "sg2260e/tpukernel/copy.float32.local-roundtrip",
+          "sg2260e/tpukernel/copy.float32.global-to-global",
+          "sg2260e/tpukernel/copy.float32.rank3-local-roundtrip",
+          "sg2260e/tpukernel/copy.float32.float16-to-float32",
+          "sg2260e/tpukernel/copy.float32.bfloat16-to-float32",
+          "sg2260e/tpukernel/copy.float16.float32-to-float16",
+          "sg2260e/tpukernel/copy.bfloat16.float32-to-bfloat16",
+          "sg2260e/tpukernel/copy.int8.local-roundtrip",
+          "sg2260e/tpukernel/copy.int8.global-to-global",
+          "sg2260e/tpukernel/copy.uint8.local-roundtrip",
+          "sg2260e/tpukernel/copy.uint8.global-to-global",
+          "sg2260e/tpukernel/copy.int16.local-roundtrip",
+          "sg2260e/tpukernel/copy.int16.global-to-global",
+          "sg2260e/tpukernel/copy.uint16.local-roundtrip",
+          "sg2260e/tpukernel/copy.uint16.global-to-global",
+          "sg2260e/tpukernel/copy.int32.local-roundtrip",
+          "sg2260e/tpukernel/copy.int32.global-to-global",
+          "sg2260e/tpukernel/copy.uint32.local-roundtrip",
+          "sg2260e/tpukernel/copy.uint32.global-to-global",
+          "sg2260e/tpukernel/fill.float16.dense",
+          "sg2260e/tpukernel/fill.bfloat16.dense",
+          "sg2260e/tpukernel/fill.float32.dense",
+          "sg2260e/tpukernel/gemm.float16.overwrite",
+          "sg2260e/tpukernel/gemm.float16.accumulate",
+          "sg2260e/tpukernel/gemm.float16.transpose-b",
+          "sg2260e/tpukernel/gemm.bfloat16.overwrite",
+          "sg2260e/tpukernel/gemm.bfloat16.accumulate",
+          "sg2260e/tpukernel/gemm.bfloat16.transpose-b",
+          "sg2260e/tpukernel/add.float16.dense",
+          "sg2260e/tpukernel/add.bfloat16.dense",
+          "sg2260e/tpukernel/add.float32.dense",
+          "sg2260e/tpukernel/add.float32.broadcast",
+          "sg2260e/tpukernel/sub.float16.dense",
+          "sg2260e/tpukernel/sub.bfloat16.dense",
+          "sg2260e/tpukernel/sub.float32.dense",
+          "sg2260e/tpukernel/sub.float32.broadcast",
+          "sg2260e/tpukernel/mul.float16.dense",
+          "sg2260e/tpukernel/mul.bfloat16.dense",
+          "sg2260e/tpukernel/mul.float32.dense",
+          "sg2260e/tpukernel/mul.float32.broadcast",
+          "sg2260e/tpukernel/div.float16.dense",
+          "sg2260e/tpukernel/div.bfloat16.dense",
+          "sg2260e/tpukernel/div.float32.dense",
+          "sg2260e/tpukernel/div.float32.broadcast",
+          "sg2260e/tpukernel/add-scalar.float16.dense",
+          "sg2260e/tpukernel/add-scalar.bfloat16.dense",
+          "sg2260e/tpukernel/add-scalar.float32.dense",
+          "sg2260e/tpukernel/mul-scalar.float16.dense",
+          "sg2260e/tpukernel/mul-scalar.bfloat16.dense",
+          "sg2260e/tpukernel/mul-scalar.float32.dense"
+        ]
       },
-      "summary": "Historical 2026-09-05 SG2260E TPU-Kernel PCIe core matrix passed 53/53: base-float and six-integer copy paths, supported base-float local casts and nonzero fill, FP16/BF16 NN overwrite/accumulate and NT overwrite GEMM, dense base-float arithmetic, FP32 W broadcast, and base-float add/mul scalar; it is not current-revision authorization."
+      "summary": "The clean 44a6fc2 SG2260E TPU-Kernel PCIe core matrix passed 54/54: base-float and six-integer copy paths, the exact FP32 rank-3 local round trip, supported base-float local casts and nonzero fill, FP16/BF16 NN overwrite/accumulate and NT overwrite GEMM, dense base-float arithmetic, FP32 W broadcast, and base-float add/mul scalar."
     },
     {
       "id": "artifact.pcie-sg-tpukernel-extended-final",
       "kind": "runtime_report",
       "source_root": "artifacts",
-      "path": "2026-09-05/tpukernel-sg2260e-pcie-final/extended/summary.json",
+      "path": "2026-09-07/pcie-tpukernel-extended-44a6fc2/summary.json",
       "locator": "complete=true, status=passed, 15/15 scheduled cases passed",
-      "observed_at": "2026-09-05T11:47:07.732120+00:00",
+      "observed_at": "2026-09-07T11:07:19.822779+00:00",
       "time_precision": "second",
+      "source_revision": "44a6fc2ab6e8ca60569853fd781e21bfa0b78335",
+      "identity_source": "runner_recorded",
       "runtime_expectation": {
         "runtime_mode": "pcie",
         "complete": true,
@@ -1246,18 +1315,37 @@
           "rsqrt.fp32",
           "sigmoid.float"
         ],
-        "target_case_counts": {"sg2260e.tpukernel": 15}
+        "target_case_counts": {"sg2260e.tpukernel": 15},
+        "required_case_ids": [
+          "sg2260e/tpukernel/exp.float16.dense",
+          "sg2260e/tpukernel/sigmoid.float16.dense",
+          "sg2260e/tpukernel/exp.bfloat16.dense",
+          "sg2260e/tpukernel/sigmoid.bfloat16.dense",
+          "sg2260e/tpukernel/exp.float32.dense",
+          "sg2260e/tpukernel/sigmoid.float32.dense",
+          "sg2260e/tpukernel/rsqrt.float16.dense",
+          "sg2260e/tpukernel/rsqrt.bfloat16.dense",
+          "sg2260e/tpukernel/rsqrt.float32.dense",
+          "sg2260e/tpukernel/rope.float16.dense",
+          "sg2260e/tpukernel/gather.float16.dense",
+          "sg2260e/tpukernel/rope.bfloat16.dense",
+          "sg2260e/tpukernel/gather.bfloat16.dense",
+          "sg2260e/tpukernel/rope.float32.dense",
+          "sg2260e/tpukernel/gather.float32.dense"
+        ]
       },
-      "summary": "Historical 2026-09-05 SG2260E TPU-Kernel PCIe extended matrix passed 15/15: FP16/BF16/FP32 exp, sigmoid, generic rsqrt, global gather, and interleaved RoPE; it is not current-revision authorization."
+      "summary": "The clean 44a6fc2 SG2260E TPU-Kernel PCIe extended matrix passed 15/15: FP16/BF16/FP32 exp, sigmoid, generic rsqrt, global gather, and interleaved RoPE."
     },
     {
       "id": "artifact.pcie-sg-tpukernel-reductions-final",
       "kind": "runtime_report",
       "source_root": "artifacts",
-      "path": "2026-09-05/tpukernel-sg2260e-pcie-final/reductions/summary.json",
+      "path": "2026-09-07/pcie-tpukernel-reductions-44a6fc2/summary.json",
       "locator": "complete=true, status=passed, 72/72 scheduled cases passed",
-      "observed_at": "2026-09-05T11:51:39.449046+00:00",
+      "observed_at": "2026-09-07T11:11:13.969816+00:00",
       "time_precision": "second",
+      "source_revision": "44a6fc2ab6e8ca60569853fd781e21bfa0b78335",
+      "identity_source": "runner_recorded",
       "runtime_expectation": {
         "runtime_mode": "pcie",
         "complete": true,
@@ -1265,9 +1353,83 @@
         "all_cases_passed": true,
         "claim_targets": ["sg2260e.tpukernel"],
         "capability_ids": ["reduce.sum-max-float"],
-        "target_case_counts": {"sg2260e.tpukernel": 72}
+        "target_case_counts": {"sg2260e.tpukernel": 72},
+        "required_case_ids": [
+          "sg2260e/tpukernel/reduce-sum.float16.w15",
+          "sg2260e/tpukernel/reduce-sum.float16.w16",
+          "sg2260e/tpukernel/reduce-sum.float16.w17",
+          "sg2260e/tpukernel/reduce-sum.float16.w31",
+          "sg2260e/tpukernel/reduce-sum.float16.w32",
+          "sg2260e/tpukernel/reduce-sum.float16.w33",
+          "sg2260e/tpukernel/reduce-sum.float16.w47",
+          "sg2260e/tpukernel/reduce-sum.float16.w48",
+          "sg2260e/tpukernel/reduce-sum.float16.w49",
+          "sg2260e/tpukernel/reduce-sum.float16.w63",
+          "sg2260e/tpukernel/reduce-sum.float16.w64",
+          "sg2260e/tpukernel/reduce-sum.float16.w65",
+          "sg2260e/tpukernel/reduce-sum.bfloat16.w15",
+          "sg2260e/tpukernel/reduce-sum.bfloat16.w16",
+          "sg2260e/tpukernel/reduce-sum.bfloat16.w17",
+          "sg2260e/tpukernel/reduce-sum.bfloat16.w31",
+          "sg2260e/tpukernel/reduce-sum.bfloat16.w32",
+          "sg2260e/tpukernel/reduce-sum.bfloat16.w33",
+          "sg2260e/tpukernel/reduce-sum.bfloat16.w47",
+          "sg2260e/tpukernel/reduce-sum.bfloat16.w48",
+          "sg2260e/tpukernel/reduce-sum.bfloat16.w49",
+          "sg2260e/tpukernel/reduce-sum.bfloat16.w63",
+          "sg2260e/tpukernel/reduce-sum.bfloat16.w64",
+          "sg2260e/tpukernel/reduce-sum.bfloat16.w65",
+          "sg2260e/tpukernel/reduce-sum.float32.w15",
+          "sg2260e/tpukernel/reduce-sum.float32.w16",
+          "sg2260e/tpukernel/reduce-sum.float32.w17",
+          "sg2260e/tpukernel/reduce-sum.float32.w31",
+          "sg2260e/tpukernel/reduce-sum.float32.w32",
+          "sg2260e/tpukernel/reduce-sum.float32.w33",
+          "sg2260e/tpukernel/reduce-sum.float32.w47",
+          "sg2260e/tpukernel/reduce-sum.float32.w48",
+          "sg2260e/tpukernel/reduce-sum.float32.w49",
+          "sg2260e/tpukernel/reduce-sum.float32.w63",
+          "sg2260e/tpukernel/reduce-sum.float32.w64",
+          "sg2260e/tpukernel/reduce-sum.float32.w65",
+          "sg2260e/tpukernel/reduce-max.float16.w15",
+          "sg2260e/tpukernel/reduce-max.float16.w16",
+          "sg2260e/tpukernel/reduce-max.float16.w17",
+          "sg2260e/tpukernel/reduce-max.float16.w31",
+          "sg2260e/tpukernel/reduce-max.float16.w32",
+          "sg2260e/tpukernel/reduce-max.float16.w33",
+          "sg2260e/tpukernel/reduce-max.float16.w47",
+          "sg2260e/tpukernel/reduce-max.float16.w48",
+          "sg2260e/tpukernel/reduce-max.float16.w49",
+          "sg2260e/tpukernel/reduce-max.float16.w63",
+          "sg2260e/tpukernel/reduce-max.float16.w64",
+          "sg2260e/tpukernel/reduce-max.float16.w65",
+          "sg2260e/tpukernel/reduce-max.bfloat16.w15",
+          "sg2260e/tpukernel/reduce-max.bfloat16.w16",
+          "sg2260e/tpukernel/reduce-max.bfloat16.w17",
+          "sg2260e/tpukernel/reduce-max.bfloat16.w31",
+          "sg2260e/tpukernel/reduce-max.bfloat16.w32",
+          "sg2260e/tpukernel/reduce-max.bfloat16.w33",
+          "sg2260e/tpukernel/reduce-max.bfloat16.w47",
+          "sg2260e/tpukernel/reduce-max.bfloat16.w48",
+          "sg2260e/tpukernel/reduce-max.bfloat16.w49",
+          "sg2260e/tpukernel/reduce-max.bfloat16.w63",
+          "sg2260e/tpukernel/reduce-max.bfloat16.w64",
+          "sg2260e/tpukernel/reduce-max.bfloat16.w65",
+          "sg2260e/tpukernel/reduce-max.float32.w15",
+          "sg2260e/tpukernel/reduce-max.float32.w16",
+          "sg2260e/tpukernel/reduce-max.float32.w17",
+          "sg2260e/tpukernel/reduce-max.float32.w31",
+          "sg2260e/tpukernel/reduce-max.float32.w32",
+          "sg2260e/tpukernel/reduce-max.float32.w33",
+          "sg2260e/tpukernel/reduce-max.float32.w47",
+          "sg2260e/tpukernel/reduce-max.float32.w48",
+          "sg2260e/tpukernel/reduce-max.float32.w49",
+          "sg2260e/tpukernel/reduce-max.float32.w63",
+          "sg2260e/tpukernel/reduce-max.float32.w64",
+          "sg2260e/tpukernel/reduce-max.float32.w65"
+        ]
       },
-      "summary": "Historical 2026-09-05 SG2260E TPU-Kernel PCIe reduction matrix passed 72/72: sum and max for FP16/BF16/FP32 across widths 15,16,17,31,32,33,47,48,49,63,64,65; it is not current-revision authorization."
+      "summary": "The clean 44a6fc2 SG2260E TPU-Kernel PCIe reduction matrix passed 72/72: sum and max for FP16/BF16/FP32 across widths 15,16,17,31,32,33,47,48,49,63,64,65."
     },
     {
       "id": "artifact.pcie-sg-tpukernel-profiling-final",
@@ -1419,13 +1581,13 @@
               "reason": "Both directions passed the exact numerical oracle at the stated shapes."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical SG2260E device 0 run; FP32 G2L/L2S at shape (4,32), exact equality",
-              "reason": "The 2026-09-05 local-roundtrip case exercised both directions; the current region-ABI implementation has not been rerun on PCIe."
+              "scope": "Current clean 44a6fc2 SG2260E device 0 run; FP32 G2L/L2S at shape (4,32), exact equality",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -1463,13 +1625,13 @@
               "reason": "The dedicated current copy oracle directly checks the payload returned by both transfer directions."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.numeric-worker",
                 "artifact.pcie-rv-core"
               ],
-              "scope": "Historical SG2260E device 0 run; G2L/L2S in four FP32 elementwise workloads",
-              "reason": "All four 2026-09-04 workloads passed numerical comparison; the current region-ABI implementation has not been rerun on PCIe."
+              "scope": "Current clean 44a6fc2 SG2260E device 0 run; G2L/L2S in four FP32 elementwise workloads",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/RV PCIe matrix passed the exact scoped workload(s)."
             }
           }
         }
@@ -1563,13 +1725,13 @@
               "reason": "Both transfer directions passed the exact numerical oracle."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical SG2260E device 0 run; FP16 G2L/L2S at shape (4,32), exact equality",
-              "reason": "The 2026-09-05 local-roundtrip case exercised both directions; the current region-ABI implementation has not been rerun on PCIe."
+              "scope": "Current clean 44a6fc2 SG2260E device 0 run; FP16 G2L/L2S at shape (4,32), exact equality",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -1607,13 +1769,13 @@
               "reason": "The dedicated current copy oracle directly checks the payload returned by both transfer directions."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.numeric-worker",
                 "artifact.pcie-rv-core"
               ],
-              "scope": "Historical SG2260E device 0 run; FP16 G2L/L2S in the GEMM workload",
-              "reason": "The 2026-09-04 RV board GEMM passed numerical comparison; the current region-ABI implementation has not been rerun on PCIe."
+              "scope": "Current clean 44a6fc2 SG2260E device 0 run; FP16 G2L/L2S in the GEMM workload",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/RV PCIe matrix passed the exact scoped workload(s)."
             }
           }
         }
@@ -1707,13 +1869,13 @@
               "reason": "Both local chains and both independent S2S cases passed their exact numerical oracle."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical SG2260E device 0 run; FP32/FP16 G2L→L2L→L2S chains and independent S2S at shape (4,32)",
-              "reason": "The 2026-09-05 local chains and S2S cases passed exactly; the current region-ABI implementation has not been rerun on PCIe."
+              "scope": "Current clean 44a6fc2 SG2260E device 0 run; FP32/FP16 G2L→L2L→L2S chains and independent S2S at shape (4,32)",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -1748,10 +1910,13 @@
               "reason": "All four selector cases passed their exact numerical oracle; local-roundtrip exercised G2L, L2L, and L2S while global-to-global exercised S2S."
             },
             "pcie_numeric_passed": {
-              "status": "unverified",
-              "evidence_ids": [],
-              "scope": "SG2260E RV PCIe FP32/FP16 L2L and S2S",
-              "reason": "No exact board experiment is recorded."
+              "status": "passed",
+              "evidence_ids": [
+                "test.numeric-worker",
+                "artifact.pcie-rv-core"
+              ],
+              "scope": "SG2260E device 0, FP32/FP16 L2L and S2S at shape (4,32), exact quarter-integer equality",
+              "reason": "The clean 44a6fc2 PCIe local-roundtrip and global-to-global cases passed exact comparison for both dtypes."
             }
           }
         }
@@ -1847,13 +2012,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; local FP32-to-FP16 cast, shape (4,32), dtype-specific tolerance",
-              "reason": "The FP32-to-FP16 PCIe cast passed its numerical oracle."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; local FP32-to-FP16 cast, shape (4,32), dtype-specific tolerance",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -1892,13 +2057,13 @@
               "reason": "Final FP16 output matched."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.numeric-worker",
                 "artifact.pcie-rv-core"
               ],
-              "scope": "Historical SG2260E device 0: FP32-to-FP16 conversion of four 32x32 output tiles in a 64x64x64 GEMM",
-              "reason": "The older RV board workload using this conversion passed its end-to-end comparison; the conversion was not tested as a standalone PCIe case and the current revision was not loaded."
+              "scope": "Current clean 44a6fc2 SG2260E device 0: FP32-to-FP16 conversion of four 32x32 output tiles in a 64x64x64 GEMM",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/RV PCIe matrix passed the exact scoped workload(s)."
             }
           }
         }
@@ -2005,13 +2170,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; BF16 local round trip and direct global-to-global copy, shape (4,32), exact equality",
-              "reason": "Both BF16 PCIe copy cases passed the recorded exact numerical oracle."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; BF16 local round trip and direct global-to-global copy, shape (4,32), exact equality",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             },
             "sdk_declared": {
               "status": "passed",
@@ -2197,13 +2362,13 @@
               "reason": "All twelve SG2260E cases completed without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; INT8/UINT8/INT16/UINT16/INT32/UINT32 local round trip and global-to-global copy, shape (4,32), exact equality",
-              "reason": "All twelve integer PCIe copy cases passed exact comparison."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; INT8/UINT8/INT16/UINT16/INT32/UINT32 local round trip and global-to-global copy, shape (4,32), exact equality",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             },
             "sdk_declared": {
               "status": "passed",
@@ -2414,13 +2579,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; FP16/BF16-to-FP32 and FP32-to-BF16 local casts, shape (4,32), dtype-specific tolerances",
-              "reason": "All three listed floating PCIe cast cases passed their numerical oracles."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; FP16/BF16-to-FP32 and FP32-to-BF16 local casts, shape (4,32), dtype-specific tolerances",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -2648,7 +2813,7 @@
             "declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "float32 zero fill", "reason": "Public helper accepts it."},
             "codegen_passed": {"status": "passed", "evidence_ids": ["test.core-codegen", "artifact.cmodel-core"], "scope": "SG2260E TPU-Kernel tpu_bdc_set_C float32 zero in the current matmul case", "reason": "The exact current core case compiled and executed the zero-initialized GEMM accumulator."},
             "cmodel_numeric_passed": {"status": "passed", "evidence_ids": ["test.numeric-worker", "artifact.cmodel-core"], "scope": "SG2260E TPU-Kernel 64x64 matmul using four 32x32 FP32 zero-initialized accumulator tiles", "reason": "The end-to-end accumulated GEMM result passed on the current clean-source baseline."},
-            "pcie_numeric_passed": {"status": "historical_passed", "evidence_ids": ["test.numeric-worker", "artifact.pcie-tpukernel-gemm"], "scope": "Historical SG2260E device 0: FP32 zero initialization of four 32x32 accumulator tiles in a 64x64x64 TPU-Kernel GEMM", "reason": "The older board GEMM workload using accumulator zero passed end to end; zero fill was not a standalone PCIe case and the current revision was not loaded."}
+            "pcie_numeric_passed": {"status": "passed", "evidence_ids": ["test.numeric-worker", "artifact.pcie-tpukernel-gemm"], "scope": "Current clean 44a6fc2 SG2260E device 0: FP32 zero initialization of four 32x32 accumulator tiles in a 64x64x64 TPU-Kernel GEMM", "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe matmul canary passed the exact scoped workload."}
           }
         },
         "sg2260e.rv": {
@@ -2657,7 +2822,7 @@
             "declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-rv"], "scope": "float32 zero fill", "reason": "This is the exact RV fill value allowed by codegen."},
             "codegen_passed": {"status": "passed", "evidence_ids": ["test.core-codegen", "artifact.cmodel-core", "artifact.cmodel-rv-core-region-abi"], "scope": "SG2260E RV rvt_cr plus rvt_cp FP32 zero in the current matmul case", "reason": "The current core case compiled and executed the zero-initialized GEMM accumulator."},
             "cmodel_numeric_passed": {"status": "passed", "evidence_ids": ["test.numeric-worker", "artifact.cmodel-core", "artifact.cmodel-rv-core-region-abi"], "scope": "SG2260E RV 64x64 matmul using four 32x32 FP32 zero-initialized accumulator tiles", "reason": "The end-to-end accumulated GEMM result passed on the current clean-source baseline."},
-            "pcie_numeric_passed": {"status": "historical_passed", "evidence_ids": ["test.numeric-worker", "artifact.pcie-rv-core"], "scope": "Historical SG2260E device 0: FP32 zero initialization of four 32x32 accumulator tiles in a 64x64x64 RV GEMM", "reason": "The older RV board GEMM workload using accumulator zero passed end to end; zero fill was not a standalone PCIe case and the current revision was not loaded."}
+            "pcie_numeric_passed": {"status": "passed", "evidence_ids": ["test.numeric-worker", "artifact.pcie-rv-core"], "scope": "Current clean 44a6fc2 SG2260E device 0: FP32 zero initialization of four 32x32 accumulator tiles in a 64x64x64 RV GEMM", "reason": "The runner-recorded clean 44a6fc2 SG2260E/RV PCIe matrix passed the exact scoped workload(s)."}
           }
         }
       }
@@ -2796,13 +2961,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; FP16/BF16/FP32 local fill with value 1.25, shape (4,32)",
-              "reason": "All three nonzero floating fill cases passed their numerical oracles."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; FP16/BF16/FP32 local fill with value 1.25, shape (4,32)",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -3023,13 +3188,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical SG2260E device 0 run; FP16 NN GEMM with FP32 accumulation, M=N=K=16",
-              "reason": "The 2026-09-05 TPU-Kernel board matrix passed this exact numerical case; the current region-ABI implementation has not been rerun on PCIe."
+              "scope": "Current clean 44a6fc2 SG2260E device 0 run; FP16 NN GEMM with FP32 accumulation, M=N=K=16",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -3068,13 +3233,13 @@
               "reason": "Numerically passed."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.numeric-worker",
                 "artifact.pcie-rv-core"
               ],
-              "scope": "Historical SG2260E device 0: 64x64x64 GEMM, four 32x32 output tiles, two serial K iterations",
-              "reason": "The older RV board GEMM passed its numerical oracle; the current revision has not been rerun on PCIe."
+              "scope": "Current clean 44a6fc2 SG2260E device 0: 64x64x64 GEMM, four 32x32 output tiles, two serial K iterations",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/RV PCIe matrix passed the exact scoped workload(s)."
             }
           }
         }
@@ -3176,13 +3341,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical SG2260E device 0 run; FP16 NN overwrite GEMM, M=N=K=16",
-              "reason": "The 2026-09-05 board case passed this exact numerical comparison; the current region-ABI implementation has not been rerun on PCIe."
+              "scope": "Current clean 44a6fc2 SG2260E device 0 run; FP16 NN overwrite GEMM, M=N=K=16",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -3323,13 +3488,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical SG2260E device 0 run; BF16 NN overwrite and FP32 accumulation, M=N=K=16",
-              "reason": "Both 2026-09-05 BF16 board cases passed; the current region-ABI implementation has not been rerun on PCIe."
+              "scope": "Current clean 44a6fc2 SG2260E device 0 run; BF16 NN overwrite and FP32 accumulation, M=N=K=16",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -3518,13 +3683,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical SG2260E device 0 run; FP16 and BF16 right-transposed overwrite GEMM, M=N=K=16",
-              "reason": "Both 2026-09-05 NT overwrite board cases passed; the current region-ABI implementation has not been rerun on PCIe."
+              "scope": "Current clean 44a6fc2 SG2260E device 0 run; FP16 and BF16 right-transposed overwrite GEMM, M=N=K=16",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -3975,13 +4140,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; equal-shape FP32 add on (4,32) local tiles",
-              "reason": "The FP32 dense add PCIe case passed its numerical oracle."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; equal-shape FP32 add on (4,32) local tiles",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -4019,12 +4184,12 @@
               "reason": "Matched torch.add."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "artifact.pcie-rv-core"
               ],
-              "scope": "Historical SG2260E device 0: 64x64 FP32 add split into four 32x32 tiles; atol/rtol 1e-5",
-              "reason": "The older RV board add workload passed its numerical oracle; the current revision has not been rerun on PCIe."
+              "scope": "Current clean 44a6fc2 SG2260E device 0: 64x64 FP32 add split into four 32x32 tiles; atol/rtol 1e-5",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/RV PCIe matrix passed the exact scoped workload(s)."
             }
           }
         }
@@ -4117,13 +4282,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; equal-shape FP32 subtract on (4,32) local tiles",
-              "reason": "The FP32 dense subtract PCIe case passed its numerical oracle."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; equal-shape FP32 subtract on (4,32) local tiles",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -4161,12 +4326,12 @@
               "reason": "Matched torch.sub."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "artifact.pcie-rv-core"
               ],
-              "scope": "Historical SG2260E device 0: 64x64 FP32 subtract split into four 32x32 tiles; atol/rtol 1e-5",
-              "reason": "The older RV board subtract workload passed its numerical oracle; the current revision has not been rerun on PCIe."
+              "scope": "Current clean 44a6fc2 SG2260E device 0: 64x64 FP32 subtract split into four 32x32 tiles; atol/rtol 1e-5",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/RV PCIe matrix passed the exact scoped workload(s)."
             }
           }
         }
@@ -4259,13 +4424,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; equal-shape FP32 multiply on (4,32) local tiles",
-              "reason": "The FP32 dense multiply PCIe case passed its numerical oracle."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; equal-shape FP32 multiply on (4,32) local tiles",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -4303,12 +4468,12 @@
               "reason": "Matched torch.mul."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "artifact.pcie-rv-core"
               ],
-              "scope": "Historical SG2260E device 0: 64x64 FP32 multiply split into four 32x32 tiles; atol/rtol 1e-5",
-              "reason": "The older RV board multiply workload passed its numerical oracle; the current revision has not been rerun on PCIe."
+              "scope": "Current clean 44a6fc2 SG2260E device 0: 64x64 FP32 multiply split into four 32x32 tiles; atol/rtol 1e-5",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/RV PCIe matrix passed the exact scoped workload(s)."
             }
           }
         }
@@ -4402,13 +4567,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; equal-shape FP32 divide on (4,32) local tiles with bounded nonzero divisor",
-              "reason": "The FP32 dense divide PCIe case passed its numerical oracle."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; equal-shape FP32 divide on (4,32) local tiles with bounded nonzero divisor",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -4447,12 +4612,12 @@
               "reason": "Matched torch.div within declared tolerance."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "artifact.pcie-rv-core"
               ],
-              "scope": "Historical SG2260E device 0: 64x64 FP32 divide split into four 32x32 tiles, rhs in [0.5,2.0], atol/rtol 1e-2",
-              "reason": "The older RV board divide workload passed its bounded-domain oracle; the current revision has not been rerun on PCIe."
+              "scope": "Current clean 44a6fc2 SG2260E device 0: 64x64 FP32 divide split into four 32x32 tiles, rhs in [0.5,2.0], atol/rtol 1e-2",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/RV PCIe matrix passed the exact scoped workload(s)."
             }
           }
         }
@@ -4552,13 +4717,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; equal-shape FP16 and BF16 add on (4,32) local tiles",
-              "reason": "Both lower-precision dense add PCIe cases passed their numerical oracles."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; equal-shape FP16 and BF16 add on (4,32) local tiles",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -4692,13 +4857,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; equal-shape FP16 and BF16 subtract on (4,32) local tiles",
-              "reason": "Both lower-precision dense subtract PCIe cases passed their numerical oracles."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; equal-shape FP16 and BF16 subtract on (4,32) local tiles",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -4832,13 +4997,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; equal-shape FP16 and BF16 multiply on (4,32) local tiles",
-              "reason": "Both lower-precision dense multiply PCIe cases passed their numerical oracles."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; equal-shape FP16 and BF16 multiply on (4,32) local tiles",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -4973,13 +5138,13 @@
               "reason": "Every listed case completed its numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; equal-shape FP16 and BF16 divide on (4,32) local tiles with bounded nonzero divisor",
-              "reason": "Both lower-precision dense divide PCIe cases passed their numerical oracles."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; equal-shape FP16 and BF16 divide on (4,32) local tiles with bounded nonzero divisor",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -5108,13 +5273,13 @@
               "reason": "The output completed numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; FP32 W-broadcast add with lhs (4,32) and rhs (4,1)",
-              "reason": "The FP32 W-broadcast add PCIe case passed its numerical oracle."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; FP32 W-broadcast add with lhs (4,32) and rhs (4,1)",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -5376,13 +5541,13 @@
               "reason": "The output completed numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; FP32 W-broadcast subtract with lhs (4,32) and rhs (4,1)",
-              "reason": "The FP32 W-broadcast subtract PCIe case passed its numerical oracle."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; FP32 W-broadcast subtract with lhs (4,32) and rhs (4,1)",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -5644,13 +5809,13 @@
               "reason": "The output completed numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; FP32 W-broadcast multiply with lhs (4,32) and rhs (4,1)",
-              "reason": "The FP32 W-broadcast multiply PCIe case passed its numerical oracle."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; FP32 W-broadcast multiply with lhs (4,32) and rhs (4,1)",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -5913,13 +6078,13 @@
               "reason": "The output completed numerical comparison without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; FP32 W-broadcast divide with lhs (4,32), rhs (4,1), and bounded nonzero divisor",
-              "reason": "The FP32 W-broadcast divide PCIe case passed its numerical oracle."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; FP32 W-broadcast divide with lhs (4,32), rhs (4,1), and bounded nonzero divisor",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         },
@@ -6492,13 +6657,13 @@
               "reason": "Every listed isolated case compiled, executed, and completed without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-core-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; add-scalar and mul-scalar for FP16/BF16/FP32 on (4,32) local tiles",
-              "reason": "All six base-floating scalar PCIe cases passed their numerical oracles."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; add-scalar and mul-scalar for FP16/BF16/FP32 on (4,32) local tiles",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe core matrix passed all 54 required cases, including the exact scoped selector(s)."
             }
           }
         }
@@ -6700,13 +6865,13 @@
               "reason": "Every listed isolated case compiled, executed, and completed without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-extended-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; FP16/BF16/FP32 exp on (4,32), using the public four-buffer ABI",
-              "reason": "All three exp PCIe cases passed their dtype-specific numerical oracles."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; FP16/BF16/FP32 exp on (4,32), using the public four-buffer ABI",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe extended matrix passed all 15 required cases, including the exact scoped selector(s)."
             },
             "sdk_declared": {
               "status": "passed",
@@ -6870,13 +7035,13 @@
               "reason": "Every listed isolated case compiled, executed, and completed without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-extended-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; FP16/BF16/FP32 sigmoid on (4,32), using the public five-buffer ABI",
-              "reason": "All three sigmoid PCIe cases passed their dtype-specific numerical oracles."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; FP16/BF16/FP32 sigmoid on (4,32), using the public five-buffer ABI",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe extended matrix passed all 15 required cases, including the exact scoped selector(s)."
             },
             "sdk_declared": {
               "status": "unverified",
@@ -7007,13 +7172,13 @@
               "reason": "Every listed isolated case compiled, executed, and completed without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-extended-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; FP32 generic rsqrt on positive (4,32) input",
-              "reason": "The FP32 rsqrt PCIe case passed its numerical oracle."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; FP32 generic rsqrt on positive (4,32) input",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe extended matrix passed all 15 required cases, including the exact scoped selector(s)."
             },
             "sdk_declared": {
               "status": "passed",
@@ -7072,13 +7237,13 @@
               "scope": "shape (4,32), strictly positive input; FP16 atol/rtol 0.02, BF16 atol/rtol 0.08",
               "reason": "Both dtype results matched their numerical oracle."
             }, "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-extended-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; FP16/BF16 generic rsqrt on positive (4,32) input",
-              "reason": "Both lower-precision rsqrt PCIe cases passed their numerical oracles."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; FP16/BF16 generic rsqrt on positive (4,32) input",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe extended matrix passed all 15 required cases, including the exact scoped selector(s)."
             }, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71e"], "scope": "FP16/BF16 generic rsqrt", "reason": "Underlying SDK declaration exists."}}}
       }
     },
@@ -7199,13 +7364,13 @@
               "reason": "Every listed isolated case compiled, executed, and completed without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-reductions-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; sum/max for FP16/BF16/FP32, rows=65 and widths 15,16,17,31,32,33,47,48,49,63,64,65",
-              "reason": "All 72 reduction PCIe cases passed exact or dtype-specific numerical comparison."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; sum/max for FP16/BF16/FP32, rows=65 and widths 15,16,17,31,32,33,47,48,49,63,64,65",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe reduction matrix passed all 72 required cases, including the exact scoped selector(s)."
             }
           }
         }
@@ -7336,13 +7501,13 @@
               "reason": "Every listed isolated case compiled, executed, and completed without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-extended-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; FP16/BF16/FP32 global H gather with UINT32 indices",
-              "reason": "All three floating gather PCIe cases passed their numerical oracles."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; FP16/BF16/FP32 global H gather with UINT32 indices",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe extended matrix passed all 15 required cases, including the exact scoped selector(s)."
             },
             "sdk_declared": {
               "status": "passed",
@@ -7803,13 +7968,13 @@
               "reason": "Every listed isolated case compiled, executed, and completed without mismatch."
             },
             "pcie_numeric_passed": {
-              "status": "historical_passed",
+              "status": "passed",
               "evidence_ids": [
                 "test.tpukernel-ops-worker",
                 "artifact.pcie-sg-tpukernel-extended-final"
               ],
-              "scope": "Historical 2026-09-05 SG2260E device 0; FP16/BF16/FP32 interleaved RoPE composite",
-              "reason": "All three floating RoPE PCIe cases passed their numerical oracles."
+              "scope": "Current clean 44a6fc2 SG2260E device 0; FP16/BF16/FP32 interleaved RoPE composite",
+              "reason": "The runner-recorded clean 44a6fc2 SG2260E/TPU-Kernel PCIe extended matrix passed all 15 required cases, including the exact scoped selector(s)."
             }
           }
         }
