@@ -2,7 +2,7 @@
 
 ## 1. 范围与判定
 
-本报告汇总 2026-09-04 至 2026-09-07 的已保存实验与 source-only 回归。每个数值 case 都在独立进程中 fresh-compile、加载、单次执行并与 PyTorch/精确 oracle 比较；矩阵采用首错停止。CModel 和 PCIe 是独立证据层，未执行的层级保持 `unverified`。当前 CModel 数值基线绑定到实现提交 `596a7363a8054d5290b69bfd6f8fef0c48dad83d`；板端结果按其实际实验日期与提交层级单独陈述，不从历史结果外推到当前提交。
+本报告汇总 2026-09-04 至 2026-09-07 的已保存实验与 source-only 回归。每个数值 case 都在独立进程中 fresh-compile、加载、单次执行并与 PyTorch/精确 oracle 比较；矩阵采用首错停止。CModel 和 PCIe 是独立证据层，未执行的层级保持 `unverified`。当前 canonical CModel 数值基线绑定到实现提交 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335`；板端结果按实际实验日期与实现基线单独陈述，不从历史结果外推到当前提交。
 
 `research/artifacts/**` 已由 Git 忽略。下文只使用仓库相对路径引用实验结果；机器可读状态以 `research/tpu-op-contract/contract.json` 为准。
 
@@ -10,30 +10,33 @@
 
 | 日期 | runtime | target | 结果 | 结论 |
 | --- | --- | --- | ---: | --- |
-| 2026-09-07 | CModel | `596a736`：SG2260E/TPU-Kernel | 141/141 | region ABI 下全部适用 case 通过；`(2,3,17)` FP32 rank-3 copy 的 102 个元素精确；topk 按芯片能力未调度 |
-| 2026-09-07 | CModel | `596a736`：BM1690/TPU-Kernel | 147/147 | 与 SG 共同的 141 项及 6 个 K-sized、稳定重复键 topk 全部通过 |
-| 2026-09-07 | CModel | `596a736`：两芯片/TPU-Kernel FP8 | 76/76 | 两芯片 × 两格式 × 19 个公开 case 全部通过，每例保留 CModel raw 命令 trace |
-| 2026-09-07 | CModel profiling | `596a736`：三组合法 target 的核心矩阵 | 27/27 | 每组 9 项：四则、GEMM、FP16/FP32 local-roundtrip 与 S2S；SG2260E/RV 为 9/9；全部收集 raw，CModel 无 duration |
-| 2026-09-07 | CModel profiling | `50d8c77`：SG2260E/TPU-Kernel matmul | 1/1 | 收集 24 个 raw trace 文件、78 条 raw 命令；CModel trace 没有 duration，`timed=0` |
+| 2026-09-07 | CModel | `44a6fc2`：SG2260E/TPU-Kernel | 141/141 | region ABI 下全部适用 case 通过；`(2,3,17)` FP32 rank-3 copy 的 102 个元素精确；topk 按芯片能力未调度 |
+| 2026-09-07 | CModel | `44a6fc2`：BM1690/TPU-Kernel | 147/147 | 与 SG 共同的 141 项及 6 个 K-sized、稳定重复键 topk 全部通过 |
+| 2026-09-07 | CModel | `44a6fc2`：两芯片/TPU-Kernel FP8 | 76/76 | 两芯片 × 两格式 × 19 个公开 case 全部通过，每例保留非空 CModel raw 命令 trace |
+| 2026-09-07 | CModel profiling | `44a6fc2`：三组合法 target 的核心矩阵 | 27/27 | 每组 9 项：四则、GEMM、FP16/FP32 local-roundtrip 与 S2S；每例 raw trace 非空，但本机无兼容 decoder，因而 `timed=0` |
+| 2026-09-07 | 阶段性 CModel profiling | `50d8c77`：SG2260E/TPU-Kernel matmul | 1/1 | 收集 24 个 raw trace 文件、78 条 raw 命令；CModel trace 没有 duration，`timed=0` |
 | 2026-09-05 | CModel | 两芯片/通用 rsqrt | 6/6 | FP16/BF16/FP32 均通过 |
 | 2026-09-05 | CModel | 历史 FP8 direct `_C` 非法探针 | 0/2 | 两次 exit 139 已定位为参数违反 dtype-size predicate，不是硬件负向结果 |
-| 2026-09-07 | source-only | TPU descriptor + frontend contract | 32/32 + 40/40 | descriptor 边界与 frontend alias/region 约束分别验证，非等价 alias fail-closed |
-| 2026-09-07 | source-only | 全部 TPU/PPL 非硬件回归 | 318 passed，4 skipped | skipped 均为需显式 opt-in 的真实 CModel/PCIe profiling worker；默认测试不访问板卡 |
+| 2026-09-07 | source-only | TPU descriptor + frontend contract | 32/32 + 41/41 | descriptor 边界与 frontend alias/region 约束分别验证，非等价 alias fail-closed |
+| 2026-09-07 | source-only | 全部 TPU/PPL 非硬件回归 | 335 passed，4 skipped | skipped 均为需显式 opt-in 的真实 CModel/PCIe profiling worker；默认测试不访问板卡 |
 | 2026-09-07 | compile/link/header-only | PPL 1.7 私有 CModel/PCIe artifact | 8/8 | 7 项真实 compile/link + 1 项 SDK header/flag 检查；PCIe 只链接，不加载板卡 |
 | 2026-09-05 | 历史 PCIe | SG2260E/TPU-Kernel | 140/140 | core 53/53、extended 15/15、reductions 72/72；仅为旧实现基线的回归范围，不授权当前提交上板 |
 | 2026-09-05 | 历史 PCIe profiling | SG2260E/TPU-Kernel matmul | 1 次 launch | 数值 dispatch 成功，并采集一个含五个 profile 文件的 raw 目录；既有 trace 后续在隔离 decoder 环境离线得到 36 条有效事件。会话内缺 decoder，故原始矩阵 summary 为 `complete=false` |
 | 2026-09-04 | 历史 PCIe | SG2260E/RV | 5/5 | FP32 四则与 FP16 GEMM 数值通过；仅为旧实现核心竖切，不授权当前提交上板 |
 | 2026-09-07 | PCIe preflight | SG2260E | 跳过 | 最近一次有界 `tpu-smi --noloop --json_format` 正常退出但报告 `status=Fault`、`tpu_util=100%`；按 fail-stop 规则未启动任何当前提交板端算子 |
 
-证据摘要：
+当前 canonical 证据：
 
-- `research/artifacts/2026-09-07/tpukernel-cmodel-596a736/summary.json`
-- `research/artifacts/2026-09-07/core-cmodel-596a736/summary.json`
+- `research/artifacts/2026-09-07/tpukernel-cmodel-44a6fc2/summary.json`
+- `research/artifacts/2026-09-07/fp8-cmodel-44a6fc2/summary.json`
+- `research/artifacts/2026-09-07/core-cmodel-44a6fc2/summary.json`
+
+过程定位与历史证据：
+
 - `research/artifacts/2026-09-05/tpukernel-integer-copy-cmodel/summary.json`
 - `research/artifacts/2026-09-05/tpukernel-reduce-w63-w65-cmodel/summary.json`
 - `research/artifacts/2026-09-05/tpukernel-topk-tail-semantics-cmodel/summary.json`
 - `research/artifacts/2026-09-05/tpukernel-topk-stable-ties-cmodel/summary.json`
-- `research/artifacts/2026-09-07/fp8-cmodel-596a736/summary.json`
 - `research/artifacts/2026-09-07/tpukernel-cmodel-profile-50d8c77/summary.json`
 - `research/artifacts/2026-09-07/pcie-preflight-region-abi-50d8c77/summary.json`
 - `research/artifacts/2026-09-05/fp8-gemm-nt-accumulate-abi-cmodel/summary.json`
@@ -88,7 +91,7 @@
 
 ### 3.3 编译期 descriptor 边界
 
-`testing/python/jit/test_tpu_codegen_descriptor_contract.py` 的 32 项 source-only 正负例全部通过，确认：四种规范 local scope 都进入 copy 与 whole-buffer semantic descriptor 路径，其他 scope fail-closed；`dim4` 单维接受 65535、拒绝 0 和 65536；copy 两侧 rank 独立归一化后比较；exp/sigmoid 与 reduction 的派生 descriptor 边界被检查；全局描述符按 Var 身份而非可重复的 Buffer 名称关联。另有 `test_tpu_frontend_contract.py` 40/40，覆盖 region 的 handle dtype、BufferLoad marker、访问掩码、rank、extent、bounds、local C-axis 起点和 alias 规则。两组共同证明：`T.view/T.reshape/T.Tensor` 的 descriptor 等价 presentation alias 可作为同一表示，改变 rank/shape/dtype/scope、输出重叠或形成第二 allocation owner 的 alias 会 fail-closed。它们是编译门禁，不替代 CModel/PCIe 数值证据。
+`testing/python/jit/test_tpu_codegen_descriptor_contract.py` 的 32 项 source-only 正负例全部通过，确认：四种规范 local scope 都进入 copy 与 whole-buffer semantic descriptor 路径，其他 scope fail-closed；`dim4` 单维接受 65535、拒绝 0 和 65536；copy 两侧 rank 独立归一化后比较；exp/sigmoid 与 reduction 的派生 descriptor 边界被检查；全局描述符按 Var 身份而非可重复的 Buffer 名称关联。另有 `test_tpu_frontend_contract.py` 41/41，覆盖 region 的 handle dtype、BufferLoad marker、访问掩码、rank、extent、bounds、local C-axis 起点和 alias 规则。两组共同证明：`T.view/T.reshape/T.Tensor` 的 descriptor 等价 presentation alias 可作为同一表示，改变 rank/shape/dtype/scope、输出重叠或形成第二 allocation owner 的 alias 会 fail-closed。它们是编译门禁，不替代 CModel/PCIe 数值证据。
 
 ### 3.4 当前工作树的非硬件回归
 
@@ -100,7 +103,19 @@ pytest -q -rs testing/python/jit/test_ppl_layout.py \
   testing/python/transform/test_tilelang_transform_address_assign.py
 ```
 
-结果为 `318 passed, 4 skipped`；四个 skipped 均要求显式开启真实 profiling worker，普通单测没有静默访问 CModel 或板卡。新增测试以 SIGKILL 外层数值矩阵 runner 的方式确认 parent-death supervisor 会清理 supervisor、worker 和普通后代，并确认 PCIe 默认验收“数值+非空合法 raw”、仅在显式 `--require-decoded-timing` 时强制有限、非负、区间有序且以 ns 为单位的 timing；机器契约的 schema、revision、target/capability 证据亲和性及闭集也有负向测试。定向 SDK 测试共 `8 passed`，其中 7 项真实 compile/link、1 项检查 SG2260E RV header/flags；PCIe 用例只生成并链接私有 artifact，没有加载设备。NT accumulate 测试还确认同一公开 `T.ppl_gemm(..., transpose_B=True, accumulate=True)` 在 TPU-Kernel target 的 codegen 失败，而在 SG2260E/RV target 生成 `rvt_fmm2a_nt`；direct semantic call 不能绕过 FP32 C 约束。实现提交 `596a736` 的正式 runner 又完成 288/288 TPU-Kernel、76/76 FP8 与三组核心 27/27；所有摘要均自记该 revision，且 `implementation_worktree_dirty=false`。PCIe 仍只采用历史证据。
+结果为 `335 passed, 4 skipped`；四个 skip 均要求显式开启真实 profiling worker，普通单测不会静默访问 CModel 或板卡。其中 descriptor contract 32/32、frontend contract 41/41、core matrix 35/35。定向 SDK 测试共 `8 passed`，其中 7 项真实 compile/link、1 项检查 SG2260E RV header/flags；PCIe 用例只生成并链接私有 artifact，没有加载设备。NT accumulate 测试确认同一公开 `T.ppl_gemm(..., transpose_B=True, accumulate=True)` 在 TPU-Kernel target 的 codegen 失败，而在 SG2260E/RV target 生成 `rvt_fmm2a_nt`；direct semantic call 不能绕过 FP32 C 约束。
+
+实现提交 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335` 的正式 runner 完成 TPU-Kernel 288/288（SG2260E 141/141、BM1690 147/147）、FP8 76/76 和三组核心 profiling 27/27。三份 canonical summary 都记录该 revision，且 `implementation_worktree_dirty=false`。核心 profiling case 的 raw trace 均非空；由于本机没有兼容 decoder，验收未启用后处理，全部 `timed_instruction_count=0`。因此 27/27 只证明数值与 raw 收集，不表示已获得逐指令耗时。PCIe 仍只采用历史证据。
+
+### 3.5 远程提交前审查结论
+
+远程提交前审查发现的安全、契约与兼容性问题已修复，并纳入上述 source-only 回归：
+
+- profiling 在启动时保存 PGID，不以 supervisor leader 的 `poll()` 结果代替进程组存活检查。超时、异常和“worker 成功退出但普通后代仍存活”都执行 TERM→KILL 有界回收；后一种情况会判该 case 失败。CModel、PCIe、offline decoder 和 PerfAI parser 共用这套语义。
+- contract validator 会先检查自身支持的 schema 子集，然后核对 revision、target/capability 闭包和 runtime evidence。未知关键字、未解析引用、越界证据或不完整 artifact 均 fail-closed。
+- TPU target 选择 DLPack 时会在 lowering 之前明确拒绝，避免之后以 `AssertionError` 失败。TPU host wrapper 改用位置化 `arg_<index>` C++ 标识符，因此重复或含标点的 TIR name hint 不会破坏 host ABI。
+- Python 路径按项目声明的 3.8 下界回收了超出版本的联合类型和字符串 API。TVM Script 中的 `T.Tensor` 等注解必须保持为可求值对象，因此包含 `T.prim_func` 的源文件不能启用 `from __future__ import annotations`；AST 回归已锁定这条限制。
+- FP8 elementwise selector 只在 case 名实际以 `-broadcast` 结尾时去掉该后缀，不再损坏裸 `add/sub/mul` 名称；六种可选后缀组合的选择回归已通过。
 
 ## 4. FP8 结果
 
@@ -121,7 +136,7 @@ operation   = {
 
 FP8 copy/fill/arithmetic 使用 `(1,64)`；W broadcast 的 rhs 为 `(1,1)`。Gather 使用 `param=(17,32)`、UINT32 `index=(7,1)` 与 `output=(7,32)`，按选中 payload 的 encoded bytes 精确比较。RoPE 使用 `(4,32)`，按交错偶/奇 lane 的量化加法 oracle 比较。GEMM 使用 A=`(16,64)`、B=`(64,16)` 或 stored-B=`(16,64)`、C=`(16,16)` FP32；accumulate 从 C=1 开始。
 
-[canonical summary](../artifacts/2026-09-07/fp8-cmodel-596a736/summary.json) 记录实现基线 `596a736` 的 76/76，并为每例保留 CModel raw 命令 trace。较早的 40 项基础矩阵、S2S/broadcast、scalar/public NT、gather 和 RoPE 分组实验是同一公开集合的前置证据，不与最终结果相加；direct canonical `tl.tpu.gemm` NT accumulate 4/4 也仅用于早期 ABI 定位。
+[canonical summary](../artifacts/2026-09-07/fp8-cmodel-44a6fc2/summary.json) 记录实现基线 `44a6fc2` 的 76/76，并为每例保留非空 CModel raw 命令 trace。较早的 40 项基础矩阵、S2S/broadcast、scalar/public NT、gather 和 RoPE 分组实验是同一公开集合的前置证据，不与最终结果相加；direct canonical `tl.tpu.gemm` NT accumulate 4/4 也仅用于早期 ABI 定位。
 
 NT accumulate 的公开 helper 保留为 target-independent 语义，再由编程模型分流：TPU-Kernel 的 FP8 A/B + FP32 C 生成 `_R_trans(..., result_add=true)` 并匹配 `C + A @ B.T`；TPU-Kernel 的 FP16/BF16 因底层右转置 API 没有 `result_add` 而在 codegen 拒绝；SG2260E/RV 的 FP16/BF16 + FP32 C 已通过 `rvt_fmm2a_nt` 源码选择回归，但尚无 CModel/PCIe 数值结果。公开 helper 还允许基础浮点 overwrite 写入 FP32 C（NN/NT），该 selector 也尚未做精确源码与数值验证。
 

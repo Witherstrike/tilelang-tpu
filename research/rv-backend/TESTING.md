@@ -28,7 +28,7 @@ PCIe 矩阵是 fail-stop：一个 case 超时、加载失败、数值不符或�
 
 合计 15/15 通过。SG2260E 每个 case 的 24 个 trace 文件和 BM1690 的 48 个 trace 文件反映了各自 4/8 核 CModel 拓扑及多类 engine dump；它们不是四/八核并行计算的证明。当前 host `core_num=1`，故这些测试验证的是单核工作负载在正确芯片拓扑、指令 ABI 和数值路径下可用。
 
-当前 `596a736` 的 [canonical core summary](../artifacts/2026-09-07/core-cmodel-596a736/summary.json) 已按现行九项 registry 重跑三个合法 target，共 27/27；其中 SG2260E/RV 新增四条 copy case，local-roundtrip 覆盖 G2L→L2L→L2S，global-to-global 覆盖 S2S，FP16/FP32 均按 `(4,32)` quarter-integer 输入逐元素精确相等。该当前结果不与本节历史 15 项重复累计。
+当前 `44a6fc2` 的 [canonical core summary](../artifacts/2026-09-07/core-cmodel-44a6fc2/summary.json) 已按现行九项 registry 重跑三个合法 target，共 27/27；其中 SG2260E/RV 包含四条 copy case，local-roundtrip 覆盖 G2L→L2L→L2S，global-to-global 覆盖 S2S，FP16/FP32 均按 `(4,32)` quarter-integer 输入逐元素精确相等。每项均保留非空 raw trace；本机缺少兼容 decoder，故 `timed=0`，不得把该结果解释为逐指令耗时证据。该当前结果不与本节历史 15 项重复累计。
 
 2026-09-04 同期的静态/单元回归为 `101 passed, 4 skipped`，覆盖当时的 target capability、PPL layout、模型隔离、raw ABI 混用拒绝、copy/cast/layout 的失败闭合、生成源码隔离、PCIe compile/link（不加载硬件）、profiling 超时清理以及 AddressAssign 的 GEMM read/write effect；该数字仅是历史里程碑，不是当前总数。4 个 skip 均需要独立外部工具或显式硬件授权。
 

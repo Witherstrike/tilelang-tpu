@@ -48,7 +48,7 @@ Schema 1.1 起，`invariants` 记录跨 op 的不可绕过规则。当前 `seman
 
 ### 3.1 TPU-Kernel CModel
 
-2026-09-07 对实现基线 `596a7363a8054d5290b69bfd6f8fef0c48dad83d` 的 [canonical CModel 重跑](../artifacts/2026-09-07/tpukernel-cmodel-596a736/summary.json) 为 fail-stop、逐 case 独立进程测试，总计 288/288：
+2026-09-07 对实现基线 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335` 的 [canonical CModel 重跑](../artifacts/2026-09-07/tpukernel-cmodel-44a6fc2/summary.json) 为 fail-stop、逐 case 独立进程测试，总计 288/288：
 
 | 芯片 | 结果 | 覆盖 |
 | --- | ---: | --- |
@@ -69,11 +69,11 @@ Schema 1.1 起，`invariants` 记录跨 op 的不可绕过规则。当前 `seman
 
 所有进入 TPUv7/PPL `dim4` 的 N/C/H/W extent 都必须是编译期整数并落在闭区间 `[1,65535]`；TPU 本地 scope 的闭集为 `shared/shared.dyn/local/local.fragment`。exp/sigmoid 还要求完整 shape4 一致且 `H*W<=65535`；reduction 的 EU 对齐后 padded width 也不得超过 65535。相应正负例集中在 `testing/python/jit/test_tpu_codegen_descriptor_contract.py`。
 
-同一干净实现基线的 [核心 profiling/CModel 重跑](../artifacts/2026-09-07/core-cmodel-596a736/summary.json) 为 27/27：BM1690/TPU-Kernel、SG2260E/TPU-Kernel、SG2260E/RV 各 9 项。每组包含 FP32 add/sub/mul/div、FP16 A/B 与 FP32 累加的 NN GEMM，以及 FP16/FP32 的 local-roundtrip、global-to-global copy。SG2260E/RV 的 local case 直接覆盖 G2L→L2L→L2S，global case覆盖 S2S，输入为 `(4,32)` 可精确表示的 quarter-integer，按逐元素完全相等判定；对应 raw 命令数分别为 45 和 43。四个逐元素 case 各保留 58 条 raw 命令，GEMM 保留 78 条。CModel raw trace 不含 duration，因此全部 `timed_instruction_count=0`，不得据此声称逐指令耗时已可用。
+同一干净实现基线的 [核心 profiling/CModel 重跑](../artifacts/2026-09-07/core-cmodel-44a6fc2/summary.json) 为 27/27：BM1690/TPU-Kernel、SG2260E/TPU-Kernel、SG2260E/RV 各 9 项。每组包含 FP32 add/sub/mul/div、FP16 A/B 与 FP32 累加的 NN GEMM，以及 FP16/FP32 的 local-roundtrip、global-to-global copy。SG2260E/RV 的 local case 直接覆盖 G2L→L2L→L2S，global case 覆盖 S2S，输入为 `(4,32)` 可精确表示的 quarter-integer，按逐元素完全相等判定；对应 raw 命令数分别为 45 和 43。四个逐元素 case 各保留 58 条 raw 命令，GEMM 保留 78 条。所有 case 均生成了非空 CModel raw trace，但本机没有兼容 decoder，本轮也未启用后处理，故 `timed_instruction_count=0`。这些记录只能证明指令选择和数值结果，不能证明逐指令耗时。
 
 ### 3.2 FP8 TPU-Kernel
 
-[最终 FP8 CModel summary](../artifacts/2026-09-07/fp8-cmodel-596a736/summary.json) 同样绑定实现基线 `596a7363a8054d5290b69bfd6f8fef0c48dad83d`，结果为 76/76：`2 chips × 2 formats × 19 public cases`，每例均完成数值判定并保留 CModel raw 命令 trace。此前 40 项基础矩阵及若干增量实验仍是定位实现演进的辅助证据，能力判定以这份完整重跑为准。
+[最终 FP8 CModel summary](../artifacts/2026-09-07/fp8-cmodel-44a6fc2/summary.json) 同样绑定实现基线 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335`，结果为 76/76：`2 chips × 2 formats × 19 public cases`，每例均完成数值判定并保留非空 CModel raw 命令 trace。此前 40 项基础矩阵及若干增量实验仍是定位实现演进的辅助证据，能力判定以这份完整重跑为准。
 
 | 算子族 | 当前 TileLang TPU-Kernel 范围 | RV 状态 |
 | --- | --- | --- |
@@ -105,6 +105,14 @@ profiling 证据分两层记录：[汇总记录](../artifacts/2026-09-05/tpukern
 
 BM1690 PCIe、FP8 PCIe 及更宽的 SG2260E/RV 能力没有对应板端证据，契约保持 `unverified`。2026-09-07 最近一次有界 `tpu-smi --noloop --json_format` 虽正常退出，却报告 `status=Fault`、`tpu_util=100%`；随后未启动任何当前提交板端算子。因此契约中 `pcie_numeric_passed` 的当前 `passed` 数量为零；旧 TPU-Kernel 140/140 与 RV 5/5 只使用 `historical_passed`。
 
+### 3.4 远程提交前审查
+
+实现基线 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335` 的 source-only 最终回归为 335 passed、4 skipped，其中 descriptor contract 32/32、frontend contract 41/41、core matrix 35/35。四个 skip 均为需要显式启用的真实 profiling worker，默认回归不会访问 CModel 或板卡。
+
+本轮审查闭合了以下提交风险：profiling 以保存的 PGID 检查 supervisor 正常退出后的残留后代，并按 TERM→KILL 执行有界清理；CModel、PCIe、offline decoder 和 PerfAI parser 共用这一语义。契约校验器对不支持的 schema 结构、未闭合引用及不匹配当前 revision/target/capability 的 runtime evidence 均 fail-closed。TPU target 若选择 DLPack，会在 lowering 前拒绝；生成的 host 参数使用位置化 `arg_<index>` 标识，不再信任可能重复或不符合 C++ 标识符规则的 TIR name hint。
+
+Python 兼容性按项目声明的 3.8 下界收紧。包含 `T.prim_func` 的 TVM Script 源文件不能启用 `from __future__ import annotations`，否则 `T.Tensor` 等注解会变成字符串，TVM 无法取得实时类型对象；专门的 AST 回归对此设门禁。FP8 elementwise selector 也改为只在确有 `-broadcast` 后缀时剥离后缀，裸 `add/sub/mul` 名称保持不变，六种带/不带后缀的 case 均由 source-only 回归覆盖。
+
 ## 4. 特殊失败的解释
 
 - SG2260E topk：`tpub_7_1_e` 头文件存在 HAU symbol，但运行库明确拒绝该原语。当前实现据此在 codegen 失败；历史 pre-guard CModel assertion 仅作为 guard 的依据，当前 CModel/PCIe 阶段均为 `not_applicable`。
@@ -132,6 +140,8 @@ Agent 或生成器使用时还必须遵守以下规则：
 - `sdk_declared` 只能用于排定后续实现候选，不能作为调度门禁。
 
 `research/artifacts/**` 被 Git 忽略，适合保留本机完整结果；因此克隆仓库后工件可能不存在。可移植结论由本目录契约和 `research/tpu-backend-design/test-report.md` 汇总，工件路径只是证据定位符。
+
+当前自动校验还有一个刻意保留的边界：核心 27 项 evidence 列出了完整 `required_case_ids`，而 TPU-Kernel 288 项与 FP8 76 项 evidence 目前只锁定总数、target 分布和全量通过，尚未把 capability 与直接或复合覆盖它的具体 case id 建成机器可检验的明确映射。本轮已人工比较新旧 case 集合一致；后续若允许 Agent 自动提升 capability，必须先增加稳定 case manifest 或 `claims_by_target` 映射，不能仅凭数量相同自动升级。
 
 ## 6. 校验
 

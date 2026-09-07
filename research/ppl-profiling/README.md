@@ -10,13 +10,14 @@ CModel/PCIe 实现、使用方式、安全边界，以及 2026-09-04 至 2026-09
 
 | 路径 | 已实现 | 本机证据 | 仍有限制 |
 | --- | --- | --- | --- |
-| SG2260E + TPU-Kernel + CModel | `FILE_DUMP_CMD`、四核拓扑设置、raw/.txt 解析、可选 PerfAI | `596a736` 非 FP8 141/141、FP8 38/38；核心 profiling 9/9，含四条 copy case（FP16/FP32 × local-roundtrip/S2S）、四则与 GEMM | 本机 SDK 未附 CModel PerfAI，因此没有 CModel 真实逐指令时间 |
-| SG2260E + RV + CModel | 同一隔离收集框架 | `596a736` 核心 9/9；FP16/FP32 的 G2L→L2L→L2S 与 S2S、FP32 四则、FP16 GEMM 均有独立数值 oracle 和 raw | CModel raw 只有命令文本，不提供真实 duration |
-| SG2260E + TPU-Kernel + PCIe | TPUDNN recorder、单次 dispatch、raw 收集、结构化 `bigTpuProfile` JSON 投影 | 历史非 FP8 数值矩阵 140/140；2026-09-05 matmul 收集一个 raw 目录并离线解码 36 条 ns 事件 | 受监管运行时未安装 decoder；`50d8c77` 一次性前置探针报告 `Fault`，本轮未发射算子 |
-| SG2260E + RV + PCIe | 与 TPU-Kernel 共用 TPUDNN host 路径 | 历史固定 shape/dtype 核心五项数值通过；2026-09-04 工件保留了当时的解码行 | 当前结构化 decoder 契约尚未对 RV trace 重跑；`50d8c77` 本轮未发射算子 |
+| SG2260E + TPU-Kernel + CModel | `FILE_DUMP_CMD`、四核拓扑设置、raw/.txt 解析、可选 PerfAI | `44a6fc2` 非 FP8 141/141、FP8 38/38；核心 profiling 9/9，含四条 copy case（FP16/FP32 × local-roundtrip/S2S）、四则与 GEMM | 本机 SDK 未附兼容的 CModel PerfAI，因此没有 CModel 真实逐指令时间 |
+| SG2260E + RV + CModel | 同一隔离收集框架 | `44a6fc2` 核心 9/9；FP16/FP32 的 G2L→L2L→L2S 与 S2S、FP32 四则、FP16 GEMM 均有独立数值 oracle 和非空 raw | CModel raw 只有命令文本，不提供真实 duration |
+| SG2260E + TPU-Kernel + PCIe | TPUDNN recorder、单次 dispatch、raw 收集、结构化 `bigTpuProfile` JSON 投影 | 历史非 FP8 数值矩阵 140/140；2026-09-05 matmul 收集一个 raw 目录并离线解码 36 条 ns 事件 | 受监管运行时未安装 decoder；最终验收前置检查报告 `Fault` 且 `tpu_util=100%`，本轮未发射算子 |
+| SG2260E + RV + PCIe | 与 TPU-Kernel 共用 TPUDNN host 路径 | 历史固定 shape/dtype 核心五项数值通过；2026-09-04 工件保留了当时的解码行 | 当前结构化 decoder 契约尚未对 RV trace 重跑；同一前置检查未通过，本轮未发射算子 |
 
-因此，CModel 的 raw 命令收集与 PCIe 的 recorder 路径均已发挥作用。当前结构化逐指令解码的
-canonical 证据是历史 SG2260E/TPU-Kernel matmul 的 36 条事件；RV 板端已有历史数值与 raw 收集证据，但解码器契约需单独重跑。单次 recorder 结果只用于诊断，不用于宣称统计性能。
+因此，CModel 的 raw 命令收集与 PCIe 的 recorder 路径均已发挥作用。`44a6fc2` 的核心 CModel profiling 矩阵是 27/27，每例 raw trace 非空；本机没有兼容 decoder，本轮未启用后处理，所有 case 的 `timed_instruction_count` 仍为 0。这份证据只能回答“生成了哪些命令”，不能回答“每条命令运行了多久”。
+
+当前结构化逐指令解码的 canonical 证据仍是历史 SG2260E/TPU-Kernel matmul 的 36 条事件；RV 板端已有历史数值与 raw 收集证据，但解码器契约需单独重跑。单次 recorder 结果只用于诊断，不用于宣称统计性能。
 
 ## 2. 为什么不能直接给 JIT 加 `--profiling`
 
@@ -244,12 +245,9 @@ kernel = tilelang.compile(
                  └─ compiler / runtime / parser 子孙
 ```
 
-内部 `timeout_s` 是 worker、CModel PerfAI 锁等待、AutoRunner 或 PCIe decoder 共用的绝对
-wall-clock deadline，不为每阶段重新计时。超时、KeyboardInterrupt 或父进程死亡时，
-supervisor 终止自己的整个进程组；SIGTERM、SIGKILL、最终 reap 和日志 pipe drain 各有硬
-上限，即使驱动调用处于不可中断状态也不会再落入无期限 `communicate()`。profiling worker
-与 TPU-Kernel 数值矩阵 worker 都走该 supervisor；即使外层 runner 被 SIGKILL，Linux
-`PR_SET_PDEATHSIG` 仍会触发 supervisor 清理 worker 及其普通后代。opt-in 硬件矩阵在第一项失败后停止，不继续下一项。
+内部 `timeout_s` 是 worker、CModel PerfAI 锁等待、AutoRunner 或 PCIe decoder 共用的绝对 wall-clock deadline，不为每阶段重新计时。profiler 在启动 supervisor 时保存 PGID，后续判断进程组是否清空，不依赖 leader 的 `poll()` 状态。worker 即使以 0 退出，只要同 PGID 下还有普通后代，profiler 就会回收整个进程组并判该 case 失败。
+
+超时、KeyboardInterrupt 或父进程死亡时，supervisor 终止自己的整个进程组。TERM→KILL、最终 reap 和日志 pipe drain 都有硬上限，即使驱动调用处于不可中断状态，也不会落入无期限 `communicate()`。CModel worker、PCIe worker、offline decoder 和 PerfAI parser 共用这套语义。profiling worker 与 TPU-Kernel 数值矩阵 worker 都经过该 supervisor；即使外层 runner 被 SIGKILL，Linux `PR_SET_PDEATHSIG` 仍会触发 supervisor 清理 worker 及其普通后代。opt-in 硬件矩阵在第一项失败后停止，不继续下一项。
 
 CModel PerfAI 的 `auto_build` 是共享可变目录。TileLang 用按 PerfAI root 命名的 Linux 抽象
 Unix socket 串行化自身会话；socket 随进程退出自动释放，不产生旧版 `/tmp/*.lock` 残留。
@@ -293,14 +291,13 @@ host 打印的单次时间约 8 ms，包含 runtime 调用和 profiling 开销�
 - 初次 PCIe matmul 数值失败实际触发 fail-stop，RV 未继续运行；修复、重过 CModel 和单项
   canary 后才启动 RV。全部完成后无 profiler、runner、vendor worker 或 JIT scratch 残留。
 
-### 7.4 2026-09-07 region ABI 重验证
+### 7.4 2026-09-07 canonical 重验证与提交前审查
 
-- `50d8c77` 上 SG2260E/TPU-Kernel matmul profiling 冒烟通过，保留 24 个 raw trace 文件和 78 条 raw 命令；`timed=0` 如实反映 CModel trace 没有 duration。
-- 编译器基线不变，在验收拆分后的 `55c1c6d` 上 [SG2260E/RV add/sub/mul/div/matmul](../artifacts/2026-09-07/rv-core-cmodel-acceptance-55c1c6d/summary.json) 再次为 5/5；逐元素各 58 条、matmul 78 条 raw 命令，证明 profiling 收集没有因严格 `tl.region` ABI 或分层验收失效。
-- 最终实现基线 `596a736` 的 [三组核心矩阵](../artifacts/2026-09-07/core-cmodel-596a736/summary.json) 为 27/27：BM1690/TPU-Kernel、SG2260E/TPU-Kernel、SG2260E/RV 各 9/9。每组新增 FP16/FP32 local-roundtrip 与 S2S；SG2260E/RV local case 分别收集 45 条 raw 命令，S2S 分别为 43 条，逐元素各 58 条，GEMM 78 条，全部 `timed=0`。
-- 当前 source-only 总回归为 318 passed、4 skipped；新增门禁覆盖 raw 目录语义、严格 timing 的数值/有限性/单位/区间、外层 runner 死亡后的进程树清理，以及 runtime evidence 的 target/capability 绑定与闭集。
-- 当前环境没有兼容 `bigTpuProfile`。RV PCIe runner 已把 numeric/raw 与 decoded-timing 解耦：默认可以独立验收数值与 recorder raw；显式 `--require-decoded-timing` 才会在 decoder 缺失时失败。两种模式均把 `acceptance`、`decoded_timing_required` 和每 case 的实际解析状态写入 summary。
-- 板端前置检查识别到 PCIe 设备、驱动与 device node。首次无参数 `tpu-smi` 因默认 `--loop` 持续运行，完整进程组已被 TERM 且无残留；改用带 10 秒硬上限的一次性 `--noloop --json_format` 后正常退出，但报告 `status=Fault`、`tpu_util=100%`。依照首错停止策略，随后跳过所有 `50d8c77` PCIe case。
+- 实现基线 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335` 的 [TPU-Kernel 数值矩阵](../artifacts/2026-09-07/tpukernel-cmodel-44a6fc2/summary.json) 为 288/288（SG2260E 141/141、BM1690 147/147），[FP8 profiling 矩阵](../artifacts/2026-09-07/fp8-cmodel-44a6fc2/summary.json) 为 76/76。前者是 CModel 数值证据；后者同时完成数值判定并为每例保留非空 raw trace。
+- 同一基线的 [三组核心 profiling 矩阵](../artifacts/2026-09-07/core-cmodel-44a6fc2/summary.json) 为 27/27：BM1690/TPU-Kernel、SG2260E/TPU-Kernel、SG2260E/RV 各 9/9。每组含 FP16/FP32 local-roundtrip 与 S2S；SG2260E/RV local case 分别收集 45 条 raw 命令，S2S 分别为 43 条，逐元素各 58 条，GEMM 78 条。每例 raw trace 非空，但本机无兼容 decoder，后处理未启用，因而全部 `timed=0`。
+- source-only 最终回归为 335 passed、4 skipped；其中 descriptor contract 32/32、frontend contract 41/41、core matrix 35/35。四个 skip 均需显式开启真实 profiling worker。
+- 远程提交前审查完成了 profiling 残留进程树的 TERM→KILL 有界回收，并将 contract schema/evidence 改为 fail-closed。TPU DLPack 在 lowering 前拒绝，host 参数改用位置化名称，Python 代码恢复 3.8 兼容。包含 `T.prim_func` 的 TVM Script 不能启用 `from __future__ import annotations`，因为延迟注解会使 TVM 无法取得实时 `T.Tensor` 对象；AST 门禁已锁定该约束。FP8 selector 只在存在 `-broadcast` 可选后缀时剥离它，裸 `add/sub/mul` 不再被误截断，六种名称组合已回归。
+- PCIe numeric/raw 与 decoded timing 已解耦：默认验收要求数值正确且 recorder 目录内存在规范命名的非空 profile 文件；只有显式 `--require-decoded-timing` 才要求合法 ns interval。当前前置检查仍报告 `status=Fault`、`tpu_util=100%`，因而继续跳过所有板端 case，没有产生当前基线的 PCIe 数值或 timing 证据。
 
 ## 8. 尚未完成的工作
 

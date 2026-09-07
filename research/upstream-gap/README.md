@@ -11,13 +11,13 @@
 - target pass、残余 IR verifier、AddressAssign、codegen 与 PPL 1.7 toolchain 均按同一完整 target 工作；
 - 未建模的 vector、同步、dtype、shape、ABI 或芯片能力在编译期失败。
 
-数值证据已经从“核心示例可运行”扩展到完整的非 FP8 TPU-Kernel 基线、独立 FP8 矩阵和 RV 核心竖切。当前 canonical CModel 基线统一绑定实现提交 `596a7363a8054d5290b69bfd6f8fef0c48dad83d`：[TPU-Kernel 288/288](../artifacts/2026-09-07/tpukernel-cmodel-596a736/summary.json)、[FP8 76/76](../artifacts/2026-09-07/fp8-cmodel-596a736/summary.json) 和 [三组核心矩阵 27/27](../artifacts/2026-09-07/core-cmodel-596a736/summary.json)。最后一项对三个合法 target 各跑 9 项，其中 SG2260E/RV 包含 FP32 四则、FP16 GEMM 以及 FP16/FP32 的 local-roundtrip、global-to-global copy，共 9/9。三个 runner 都自行记录该 revision，且确认实现工作区干净。
+数值证据已经从“核心示例可运行”扩展到完整的非 FP8 TPU-Kernel 基线、独立 FP8 矩阵和 RV 核心竖切。当前 canonical CModel 基线统一绑定实现提交 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335`：[TPU-Kernel 288/288](../artifacts/2026-09-07/tpukernel-cmodel-44a6fc2/summary.json)、[FP8 76/76](../artifacts/2026-09-07/fp8-cmodel-44a6fc2/summary.json) 和 [三组核心矩阵 27/27](../artifacts/2026-09-07/core-cmodel-44a6fc2/summary.json)。最后一项对三个合法 target 各跑 9 项，其中 SG2260E/RV 包含 FP32 四则、FP16 GEMM 以及 FP16/FP32 的 local-roundtrip、global-to-global copy，共 9/9。三个 runner 都自行记录该 revision，且确认实现工作区干净。
 
 | 组合 | CModel | PCIe |
 | --- | --- | --- |
-| BM1690 / TPU-Kernel | `596a736` 基础矩阵 147/147；FP8 38/38；核心 9/9 | 未验证 |
-| SG2260E / TPU-Kernel | `596a736` 基础矩阵 141/141；FP8 38/38；核心 9/9 | 历史基础矩阵 140/140；当前提交未验证 |
-| SG2260E / RV | `596a736` 核心 9/9，含四则、GEMM，以及 FP16/FP32 × {local-roundtrip、S2S} 四条 copy case；local 覆盖 G2L/L2L/L2S | 历史核心五项；当前提交未验证 |
+| BM1690 / TPU-Kernel | `44a6fc2` 基础矩阵 147/147；FP8 38/38；核心 9/9 | 未验证 |
+| SG2260E / TPU-Kernel | `44a6fc2` 基础矩阵 141/141；FP8 38/38；核心 9/9 | 历史基础矩阵 140/140；当前提交未验证 |
+| SG2260E / RV | `44a6fc2` 核心 9/9，含四则、GEMM，以及 FP16/FP32 × {local-roundtrip、S2S} 四条 copy case；local 覆盖 G2L/L2L/L2S | 历史核心五项；当前提交未验证 |
 
 SG2260E/TPU-Kernel 的历史板端 final 按 core 53、extended 15、reductions 72 三批执行，均首错停止且没有 timeout、retry 或 device fault。profiling 的单次 dispatch 与 recorder/raw 采集子阶段已验证；会话内因缺 decoder 以 `complete=false` 结束，随后仅对既有 trace 在隔离的 `bigTpuProfile==0.3.5` 环境解码出 36 条有效事件。最近一次有界 `tpu-smi --noloop --json_format` 前置检查返回 `status=Fault`、`tpu_util=100%`，因此没有启动当前实现的板端算子。契约把旧板端范围标为不具授权作用的 `historical_passed`，当前没有任何 PCIe stage 为 `passed`；生产环境也不会自动安装 decoder。
 
@@ -85,7 +85,7 @@ FP8 的“手册/头文件声明、公开 frontend、TileLang codegen、CModel�
 
 RV 的 cross-dtype copy 也必须按方向管理：当前 FP16→BF16 只有 `rvt_cvt_f2f` 生成源码证据，数值层仍为 `unverified`；BF16→FP16 尚无精确 codegen 证据。两者不能因共用一个 emitter 类型分支而合并提升。
 
-SG2260E/TPU-Kernel 的非 FP8 列表曾在真实芯片按同一 case registry 通过 140/140，其中包括基础浮点 scalar、exp/sigmoid/rsqrt、gather/rope、FP32 W broadcast 及十二个 reduction 边界 width。由于当前实现此后修改了 region ABI、copy lowering、runner/profiling 监管和证据契约，这批结果仅用于确定回归范围，不能关闭 `596a736` 的板端门禁；BM 板端、FP8 板端和更宽 RV selector 同样未验证。
+SG2260E/TPU-Kernel 的非 FP8 列表曾在真实芯片按同一 case registry 通过 140/140，其中包括基础浮点 scalar、exp/sigmoid/rsqrt、gather/rope、FP32 W broadcast 及十二个 reduction 边界 width。由于当前实现此后修改了 region ABI、copy lowering、runner/profiling 监管和证据契约，这批结果仅用于确定回归范围，不能关闭 `44a6fc2` 的板端门禁；BM 板端、FP8 板端和更宽 RV selector 同样未验证。
 
 ## 3. 差距排序原则
 

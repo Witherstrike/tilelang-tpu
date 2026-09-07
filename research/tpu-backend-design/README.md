@@ -144,7 +144,7 @@ FP8 div 明确不支持；非零 fill、其他 cast、FP8 output GEMM 以及 exp
 
 FP8 scalar 采用 PPL 1.7 的 canonical same-format 路径：FP32 常量先 `tpu_cast(..., RM_HALF_TO_EVEN)` 到目标格式，再调用通用 `tpu_bdc_fp_add_C/fp_mul_C`。moderate 输入与公开生产路径均通过。历史 direct `tpu_bdc_fp8_*_C` exit 139 是 FP8 dst/src + FP32 `C_dtype` 的非法参数探针，不是硬件负向证据。边界实验证实当前为非饱和语义：E4M3 overflow 产生 NaN，E5M2 产生 infinity；可选 saturation 仍不得暴露。
 
-机器可读的逐 selector 事实位于 `research/tpu-op-contract/contract.json`。实现基线 `596a7363a8054d5290b69bfd6f8fef0c48dad83d` 的 [TPU-Kernel CModel 288/288](../artifacts/2026-09-07/tpukernel-cmodel-596a736/summary.json) 中，SG2260E 为 141/141、BM1690 为 147/147，已纳入 FP16/BF16/FP32 通用 rsqrt、BM1690 稳定重复键 topk，以及两芯片精确通过的 `(2,3,17)` FP32 rank-3 copy。同一干净实现基线的 [FP8 CModel 76/76](../artifacts/2026-09-07/fp8-cmodel-596a736/summary.json) 覆盖两芯片、两格式各 19 个公开 case；[核心 profiling/CModel 矩阵 27/27](../artifacts/2026-09-07/core-cmodel-596a736/summary.json) 则覆盖三个合法 target 各 9 项，其中 SG2260E/RV 为 FP32 四则、FP16 GEMM，以及 FP16/FP32 × {local-roundtrip、S2S} 四条 copy case；local case 各自覆盖 G2L→L2L→L2S。三份 runner 摘要均自记 revision，并确认 `implementation_worktree_dirty=false`。较早的 `*-final` 和分组实验只作为实现演进与定位证据，不重复累计。
+机器可读的逐 selector 事实位于 `research/tpu-op-contract/contract.json`。实现基线 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335` 的 [TPU-Kernel CModel 288/288](../artifacts/2026-09-07/tpukernel-cmodel-44a6fc2/summary.json) 中，SG2260E 为 141/141、BM1690 为 147/147，已纳入 FP16/BF16/FP32 通用 rsqrt、BM1690 稳定重复键 topk，以及两芯片精确通过的 `(2,3,17)` FP32 rank-3 copy。同一干净实现基线的 [FP8 CModel 76/76](../artifacts/2026-09-07/fp8-cmodel-44a6fc2/summary.json) 覆盖两芯片、两格式各 19 个公开 case；[核心 profiling/CModel 矩阵 27/27](../artifacts/2026-09-07/core-cmodel-44a6fc2/summary.json) 则覆盖三个合法 target 各 9 项，其中 SG2260E/RV 为 FP32 四则、FP16 GEMM，以及 FP16/FP32 × {local-roundtrip、S2S} 四条 copy case；local case 各自覆盖 G2L→L2L→L2S。三份 runner 摘要均自记 revision，并确认 `implementation_worktree_dirty=false`。较早的 `*-final` 和分组实验只作为实现演进与定位证据，不重复累计。
 
 ## 7. 地址、effect 与失败策略
 
@@ -177,7 +177,7 @@ profiling 复用 PPL 的运行记录协议，而非把 `ppl_compile.py --profili
 
 数值验证与 profiling 分开判定。SG2260E/TPU-Kernel 的历史板端数值记录为 [core 53/53](../artifacts/2026-09-05/tpukernel-sg2260e-pcie-final/core/summary.json)、[extended 15/15](../artifacts/2026-09-05/tpukernel-sg2260e-pcie-final/extended/summary.json) 和 [reductions 72/72](../artifacts/2026-09-05/tpukernel-sg2260e-pcie-final/reductions/summary.json)，合计 140/140。它们用于界定回归范围，在当前契约中仅为 `historical_passed`，不授权当前实现加载板卡。现有板端 worker 使用 fresh process、显式 device id 和双授权，并统一经 parent-death supervisor 启动；超时、外层 runner 死亡、成功 worker 遗留同进程组后代或首错都会清理整个进程组并停止剩余 case。单次 instruction duration 用于确认映射与定位瓶颈，不是稳定性能结论。
 
-当前 [CModel 核心 profiling 矩阵](../artifacts/2026-09-07/core-cmodel-596a736/summary.json) 已在三组合法 target 上全部 27/27 收集 raw trace；CModel 格式不携带 duration，因此结果严格记录为 `timed=0`。较早的单项 [TPU-Kernel matmul 冒烟](../artifacts/2026-09-07/tpukernel-cmodel-profile-50d8c77/summary.json) 仍保留 24 个文件、78 条命令作为演进证据。最近一次一次性 `tpu-smi --noloop --json_format` PCIe 前置检查虽正常退出，却报告 `status=Fault`、`tpu_util=100%`；随后按 fail-stop 策略跳过所有当前提交板端 case。故历史 TPU-Kernel 140/140 和 RV 5/5 都不升级为当前 PCIe `passed`。
+当前 [CModel 核心 profiling 矩阵](../artifacts/2026-09-07/core-cmodel-44a6fc2/summary.json) 已在三组合法 target 上全部 27/27 收集非空 raw trace；本机没有与该 raw schema 兼容的 decoder，因此结果严格记录为 `timed=0`，不能据此声称逐指令耗时可用。较早的单项 [TPU-Kernel matmul 冒烟](../artifacts/2026-09-07/tpukernel-cmodel-profile-50d8c77/summary.json) 仍保留 24 个文件、78 条命令作为演进证据。最近一次一次性 `tpu-smi --noloop --json_format` PCIe 前置检查虽正常退出，却报告 `status=Fault`、`tpu_util=100%`；随后按 fail-stop 策略跳过所有当前提交板端 case。故历史 TPU-Kernel 140/140 和 RV 5/5 都不升级为当前 PCIe `passed`。
 
 ## 9. 扩展规则
 
