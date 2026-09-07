@@ -18,7 +18,6 @@ import torch
 import tilelang
 import tilelang.language as T
 
-
 _COPY_CASES = {
     "copy-fp32-local-roundtrip": ("float32", "local"),
     "copy-fp32-global-to-global": ("float32", "global"),
@@ -40,18 +39,14 @@ def _profile_selection():
     if os.environ.get("TILELANG_TPU_BENCHMARK_RUNS") != "0":
         raise RuntimeError("instruction profiling requires exactly one TileLang launch.")
     if runtime_mode == "cmodel":
-        for name in (
-                "TILELANG_TPU_ALLOW_PCIE_LOAD",
-                "TILELANG_TPU_ALLOW_PCIE_PROFILE",
-                "TILELANG_TPU_DEVICE_ID"):
+        for name in ("TILELANG_TPU_ALLOW_PCIE_LOAD", "TILELANG_TPU_ALLOW_PCIE_PROFILE",
+                     "TILELANG_TPU_DEVICE_ID"):
             if name in os.environ:
                 raise RuntimeError(
                     f"CModel profile worker inherited forbidden PCIe setting {name}.")
     else:
-        for name in (
-                "TILELANG_TPU_ALLOW_PCIE_LOAD",
-                "TILELANG_TPU_ALLOW_PCIE_PROFILE",
-                "BMLIB_ENABLE_ALL_PROFILE"):
+        for name in ("TILELANG_TPU_ALLOW_PCIE_LOAD", "TILELANG_TPU_ALLOW_PCIE_PROFILE",
+                     "BMLIB_ENABLE_ALL_PROFILE"):
             if os.environ.get(name) != "1":
                 raise RuntimeError(f"PCIe profile worker is missing safety gate {name}=1.")
         device_id = os.environ.get("TILELANG_TPU_DEVICE_ID", "")
@@ -113,6 +108,7 @@ _COPY_PROGRAMS = {
 
 
 def _matmul(chip: str, programming_model: str, runtime_mode: str) -> None:
+
     @T.prim_func
     def matmul(
             A: T.Tensor((64, 64), "float16"),
@@ -151,12 +147,11 @@ def _matmul(chip: str, programming_model: str, runtime_mode: str) -> None:
     reference = torch.matmul(a, b).half()
     if not torch.allclose(c, reference, atol=1e-2, rtol=1e-2):
         difference = float(torch.max(torch.abs(reference - c)))
-        raise RuntimeError(
-            f"{programming_model} matmul mismatch; max abs difference={difference}")
+        raise RuntimeError(f"{programming_model} matmul mismatch; max abs difference={difference}")
 
 
-def _elementwise(operation: str, chip: str, programming_model: str,
-                 runtime_mode: str) -> None:
+def _elementwise(operation: str, chip: str, programming_model: str, runtime_mode: str) -> None:
+
     @T.prim_func
     def elementwise(
             A: T.Tensor((64, 64), "float32"),
@@ -205,20 +200,17 @@ def _elementwise(operation: str, chip: str, programming_model: str,
     atol, rtol = ((1e-2, 1e-2) if operation == "div" else (1e-5, 1e-5))
     if not torch.allclose(c, reference, atol=atol, rtol=rtol):
         difference = float(torch.max(torch.abs(reference - c)))
-        raise RuntimeError(
-            f"{programming_model} elementwise-{operation} mismatch; "
-            f"max abs difference={difference}")
+        raise RuntimeError(f"{programming_model} elementwise-{operation} mismatch; "
+                           f"max abs difference={difference}")
 
 
-def _copy(dtype: str, transfer: str, chip: str, programming_model: str,
-          runtime_mode: str) -> None:
+def _copy(dtype: str, transfer: str, chip: str, programming_model: str, runtime_mode: str) -> None:
     shape = (4, 32)
     try:
         copy_kernel = _COPY_PROGRAMS[(dtype, transfer)]
     except KeyError as exc:
         raise ValueError(
-            f"unsupported copy combination dtype={dtype!r}, transfer={transfer!r}"
-        ) from exc
+            f"unsupported copy combination dtype={dtype!r}, transfer={transfer!r}") from exc
 
     torch_dtype = {
         "float16": torch.float16,
@@ -227,8 +219,7 @@ def _copy(dtype: str, transfer: str, chip: str, programming_model: str,
     # Quarter-integers in this range have exact FP16 and FP32 encodings.  An
     # exact comparison therefore checks copy semantics without introducing a
     # numerical tolerance that could conceal a missing or partial transfer.
-    source = (torch.arange(128, dtype=torch.float32).reshape(shape) * 0.25 -
-              16.0).to(torch_dtype)
+    source = (torch.arange(128, dtype=torch.float32).reshape(shape) * 0.25 - 16.0).to(torch_dtype)
     destination = torch.full(shape, 113.0, dtype=torch_dtype)
     kernel = tilelang.compile(
         copy_kernel,
@@ -240,9 +231,8 @@ def _copy(dtype: str, transfer: str, chip: str, programming_model: str,
     kernel(source, destination)
     if not torch.equal(destination, source):
         mismatches = int(torch.count_nonzero(destination != source))
-        raise RuntimeError(
-            f"{programming_model} {transfer}-to-{transfer} {dtype} copy "
-            f"mismatch; unequal elements={mismatches}")
+        raise RuntimeError(f"{programming_model} {transfer}-to-{transfer} {dtype} copy "
+                           f"mismatch; unequal elements={mismatches}")
 
 
 def _rv_control(chip: str, programming_model: str, runtime_mode: str) -> None:
@@ -286,8 +276,7 @@ def main() -> None:
     if args.case in ("matmul", "tpukernel-matmul"):
         _matmul(chip, programming_model, runtime_mode)
     elif args.case.startswith("elementwise-"):
-        _elementwise(args.case.removeprefix("elementwise-"), chip, programming_model,
-                     runtime_mode)
+        _elementwise(args.case[len("elementwise-"):], chip, programming_model, runtime_mode)
     elif args.case in _COPY_CASES:
         dtype, transfer = _COPY_CASES[args.case]
         _copy(dtype, transfer, chip, programming_model, runtime_mode)

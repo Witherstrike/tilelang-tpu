@@ -34,18 +34,16 @@ void ValidateExpFamilyShape(const std::vector<int> &shape4,
       static_cast<int64_t>(shape4[2]) * static_cast<int64_t>(shape4[3]);
   ICHECK_LE(hw, tl::tpuv7::kDescriptorDimMax)
       << op_name << " requires h*w <= " << tl::tpuv7::kDescriptorDimMax
-      << " for tpu_bdc_fp_exp, got " << shape4[2] << "*" << shape4[3]
-      << "=" << hw;
+      << " for tpu_bdc_fp_exp, got " << shape4[2] << "*" << shape4[3] << "="
+      << hw;
 }
 
 void ValidateReductionAlignedWidth(int64_t aligned_width,
                                    const std::string &op_name) {
-  ICHECK_GT(aligned_width, 0)
-      << op_name << " aligned width must be positive";
+  ICHECK_GT(aligned_width, 0) << op_name << " aligned width must be positive";
   ICHECK_LE(aligned_width, tl::tpuv7::kDescriptorDimMax)
       << op_name << " aligned width " << aligned_width
-      << " exceeds the TPUv7/PPL dim4 limit "
-      << tl::tpuv7::kDescriptorDimMax
+      << " exceeds the TPUv7/PPL dim4 limit " << tl::tpuv7::kDescriptorDimMax
       << "; the reduction lowering materializes this width in padded dim4 "
          "descriptors";
 }
@@ -118,14 +116,14 @@ void CodeGenTileLangTPU::EmitTPUKernelCopy(
   } else {
     instruction = "tpu_bdc_cpy";
   }
-  stream << instruction << "(" << dst << ".addr, " << src << ".addr, &"
-         << dst << ".shape, (" << dst << ".default_stride ? NULL : &" << dst
+  stream << instruction << "(" << dst << ".addr, " << src << ".addr, &" << dst
+         << ".shape, (" << dst << ".default_stride ? NULL : &" << dst
          << ".stride), (" << src << ".default_stride ? NULL : &" << src
          << ".stride), " << src_dtype << ");\n";
 }
 
 void CodeGenTileLangTPU::EmitTPUKernelFill(const std::string &dst,
-                                            DataType dtype, double value) {
+                                           DataType dtype, double value) {
   const char *scalar_field = nullptr;
   const bool is_fp8 = dtype.is_e4m3_float8() || dtype.is_e5m2_float8();
   if (dtype == DataType::Float(16)) {
@@ -188,16 +186,14 @@ void CodeGenTileLangTPU::EmitTPUKernelGemm(
     const char *input_dtype = TPUKernelDTypeName(a_dtype);
     const char *output_dtype = TPUKernelDTypeName(c_dtype);
     PrintIndent();
-    stream << (transpose_b ? "tpu_bdc_fp8_mm_R_trans(" : "tpu_bdc_fp8_mm(")
-           << c << ".addr, " << a << ".addr, " << b << ".addr, " << m
-           << ", " << k << ", " << n << ", " << output_dtype << ", "
-           << input_dtype << ", " << input_dtype << ", "
-           << (accumulate ? "true" : "false")
+    stream << (transpose_b ? "tpu_bdc_fp8_mm_R_trans(" : "tpu_bdc_fp8_mm(") << c
+           << ".addr, " << a << ".addr, " << b << ".addr, " << m << ", " << k
+           << ", " << n << ", " << output_dtype << ", " << input_dtype << ", "
+           << input_dtype << ", " << (accumulate ? "true" : "false")
            << ", false, false, (var_context_t){0});\n";
     return;
   }
-  ICHECK(c_dtype == DataType::Float(32) ||
-         (!accumulate && c_dtype == a_dtype))
+  ICHECK(c_dtype == DataType::Float(32) || (!accumulate && c_dtype == a_dtype))
       << "TPU-Kernel NN accumulation requires an FP32 C tile; "
          "non-accumulating forms additionally support C matching A/B";
   ICHECK(!transpose_b || !accumulate)
@@ -209,21 +205,20 @@ void CodeGenTileLangTPU::EmitTPUKernelGemm(
   PrintIndent();
   if (!transpose_b) {
     stream << "tpu_bdc_fp_mm(" << c << ".addr, " << a << ".addr, " << b
-           << ".addr, " << m << ", " << k << ", " << n << ", "
-           << output_dtype << ", " << input_dtype << ", "
-           << (accumulate ? "true" : "false") << ");\n";
+           << ".addr, " << m << ", " << k << ", " << n << ", " << output_dtype
+           << ", " << input_dtype << ", " << (accumulate ? "true" : "false")
+           << ");\n";
   } else {
-    stream << "tpu_bdc_fp_mm_R_trans(" << c << ".addr, " << a << ".addr, "
-           << b << ".addr, " << m << ", " << k << ", " << n << ", "
-           << output_dtype << ", " << input_dtype << ");\n";
+    stream << "tpu_bdc_fp_mm_R_trans(" << c << ".addr, " << a << ".addr, " << b
+           << ".addr, " << m << ", " << k << ", " << n << ", " << output_dtype
+           << ", " << input_dtype << ");\n";
   }
 }
 
 void CodeGenTileLangTPU::EmitTPUKernelElementwise(
     const std::string &operation, const std::string &dst,
     const std::string &src0, const std::string &src1, DataType dtype,
-    const std::vector<int> &src0_shape,
-    const std::vector<int> &src1_shape) {
+    const std::vector<int> &src0_shape, const std::vector<int> &src1_shape) {
   ICHECK(operation == "add" || operation == "sub" || operation == "mul" ||
          operation == "div")
       << "Unsupported TPU-Kernel elementwise operation " << operation;
@@ -241,21 +236,21 @@ void CodeGenTileLangTPU::EmitTPUKernelElementwise(
     src1_stride = "&" + stride_var + ", ";
   } else {
     ICHECK_EQ(src1_shape[1], src0_shape[1]);
-    src1_stride = "(" + src1 + ".default_stride ? NULL : &" + src1 +
-                  ".stride), ";
+    src1_stride =
+        "(" + src1 + ".default_stride ? NULL : &" + src1 + ".stride), ";
   }
   PrintIndent();
   stream << "tpu_bdc_fp_" << operation << "(" << dst << ".addr, " << src0
-         << ".addr, "
-         << src1 << ".addr, &" << dst << ".shape, (" << dst
+         << ".addr, " << src1 << ".addr, &" << dst << ".shape, (" << dst
          << ".default_stride ? NULL : &" << dst << ".stride), (" << src0
-         << ".default_stride ? NULL : &" << src0 << ".stride), "
-         << src1_stride << dtype_name << ");\n";
+         << ".default_stride ? NULL : &" << src0 << ".stride), " << src1_stride
+         << dtype_name << ");\n";
 }
 
-void CodeGenTileLangTPU::EmitTPUKernelScalar(
-    const std::string &operation, const std::string &dst,
-    const std::string &src, DataType dtype, double value) {
+void CodeGenTileLangTPU::EmitTPUKernelScalar(const std::string &operation,
+                                             const std::string &dst,
+                                             const std::string &src,
+                                             DataType dtype, double value) {
   ICHECK(operation == "add" || operation == "mul")
       << "Unsupported TPU-Kernel scalar operation " << operation;
   ICHECK(dtype == DataType::Float(16) || dtype == DataType::BFloat(16) ||
@@ -282,22 +277,22 @@ void CodeGenTileLangTPU::EmitTPUKernelScalar(
   stream << "tpu_bdc_fp_" << operation << "_C(" << dst << ".addr, " << src
          << ".addr, " << scalar << ", &" << dst << ".shape, (" << dst
          << ".default_stride ? NULL : &" << dst << ".stride), (" << src
-         << ".default_stride ? NULL : &" << src << ".stride), "
-         << dtype_name << ");\n";
+         << ".default_stride ? NULL : &" << src << ".stride), " << dtype_name
+         << ");\n";
   PrintIndent();
   stream << "}\n";
 }
 
-bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
-    const CallNode *op, const std::string &op_name) {
+bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
+                                                  const std::string &op_name) {
   auto handle_elementwise_const = [&, this](const std::string &semantic_name,
-                                             const std::string &operation) {
+                                            const std::string &operation) {
     ICHECK_EQ(op->args.size(), 4U)
         << semantic_name << " expects dst, src, and one floating literal";
-    auto dst_operand = ParseWholeBufferRegion(
-        op->args[1], semantic_name + " dst", 2);
-    auto src_operand = ParseWholeBufferRegion(
-        op->args[2], semantic_name + " src", 1);
+    auto dst_operand =
+        ParseWholeBufferRegion(op->args[1], semantic_name + " dst", 2);
+    auto src_operand =
+        ParseWholeBufferRegion(op->args[2], semantic_name + " src", 1);
     ICHECK(dst_operand.is_local && src_operand.is_local)
         << semantic_name << " operands must reside in local memory";
     const std::string &dst = dst_operand.descriptor;
@@ -308,8 +303,8 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
         << semantic_name << " requires matching dst/src dtypes";
     ICHECK(dst_dtype == DataType::Float(16) ||
            dst_dtype == DataType::BFloat(16) ||
-           dst_dtype == DataType::Float(32) ||
-           dst_dtype.is_e4m3_float8() || dst_dtype.is_e5m2_float8())
+           dst_dtype == DataType::Float(32) || dst_dtype.is_e4m3_float8() ||
+           dst_dtype.is_e5m2_float8())
         << semantic_name << " supports only FP8, FP16, BF16, and FP32, got "
         << dst_dtype;
     ICHECK_EQ(dst_operand.rank, src_operand.rank)
@@ -317,8 +312,8 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     ICHECK(dst_operand.shape4 == src_operand.shape4)
         << semantic_name << " requires matching dst/src shapes";
     const auto *value_node = op->args[3].as<FloatImmNode>();
-    ICHECK(value_node)
-        << semantic_name << " currently requires a floating literal";
+    ICHECK(value_node) << semantic_name
+                       << " currently requires a floating literal";
     double value = value_node->value;
     ICHECK(std::isfinite(value))
         << semantic_name << " requires a finite scalar literal";
@@ -370,10 +365,10 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     this->stream << "tpu_bdc_load_fp_exp_coeff(" << tensors[3] << ".addr, "
                  << dtype_name << ");\n";
     this->PrintIndent();
-    this->stream << "tpu_bdc_fp_exp(" << tensors[0] << ".addr, "
-                 << tensors[0] << ".addr, " << tensors[1] << ".addr, "
-                 << tensors[2] << ".addr, " << tensors[3] << ".addr, &"
-                 << tensors[0] << ".shape, " << dtype_name << ");\n";
+    this->stream << "tpu_bdc_fp_exp(" << tensors[0] << ".addr, " << tensors[0]
+                 << ".addr, " << tensors[1] << ".addr, " << tensors[2]
+                 << ".addr, " << tensors[3] << ".addr, &" << tensors[0]
+                 << ".shape, " << dtype_name << ");\n";
   } else if (op_name == "tl.tpukernel.sigmoid") {
     ICHECK_EQ(op->args.size(), 6U)
         << op_name << " expects dst, src, work0, work1, and coeff";
@@ -390,11 +385,9 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
       DataType operand_dtype = operands[i].dtype;
       if (i == 0) {
         dtype = operand_dtype;
-        ICHECK(dtype == DataType::Float(16) ||
-               dtype == DataType::BFloat(16) ||
+        ICHECK(dtype == DataType::Float(16) || dtype == DataType::BFloat(16) ||
                dtype == DataType::Float(32))
-            << op_name << " supports only FP16, BF16, and FP32, got "
-            << dtype;
+            << op_name << " supports only FP16, BF16, and FP32, got " << dtype;
       } else {
         ICHECK_EQ(operand_dtype, dtype)
             << op_name << " requires matching operand dtypes";
@@ -433,10 +426,9 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     this->stream << "tpu_bdc_load_fp_exp_coeff(" << coeff << ".addr, "
                  << dtype_name << ");\n";
     this->PrintIndent();
-    this->stream << "tpu_bdc_fp_exp(" << work0 << ".addr, " << src
-                 << ".addr, " << dst << ".addr, " << work1 << ".addr, "
-                 << coeff << ".addr, &" << src << ".shape, " << dtype_name
-                 << ");\n";
+    this->stream << "tpu_bdc_fp_exp(" << work0 << ".addr, " << src << ".addr, "
+                 << dst << ".addr, " << work1 << ".addr, " << coeff
+                 << ".addr, &" << src << ".shape, " << dtype_name << ");\n";
     this->PrintIndent();
     this->stream << "{\n";
     this->PrintIndent();
@@ -447,15 +439,14 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
                    << ", DT_FP32, RM_HALF_TO_EVEN);\n";
     }
     auto emit_scalar = [&, this](const char *instruction,
-                                  const std::string &out,
-                                  const std::string &input) {
+                                 const std::string &out,
+                                 const std::string &input) {
       this->PrintIndent();
       this->stream << instruction << "(" << out << ".addr, " << input
-                   << ".addr, " << one << ", &" << out << ".shape, ("
-                   << out << ".default_stride ? NULL : &" << out
-                   << ".stride), (" << input
-                   << ".default_stride ? NULL : &" << input << ".stride), "
-                   << dtype_name;
+                   << ".addr, " << one << ", &" << out << ".shape, (" << out
+                   << ".default_stride ? NULL : &" << out << ".stride), ("
+                   << input << ".default_stride ? NULL : &" << input
+                   << ".stride), " << dtype_name;
     };
     emit_scalar("tpu_bdc_fp_tunable_C_div", work1, work0);
     this->stream << ", 3);\n";
@@ -467,7 +458,8 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     this->stream << "}\n";
   } else if (op_name == "tl.tpukernel.reduce_max") {
     ICHECK_EQ(op->args.size(), 7U)
-        << op_name << " expects input, output, scratch, eu_num, align_w, and stride";
+        << op_name
+        << " expects input, output, scratch, eu_num, align_w, and stride";
     std::array<SemanticTensorOperand, 3> operands{};
     constexpr std::array<int, 3> kAccessMasks = {3, 2, 3};
     for (size_t i = 0; i < operands.size(); ++i) {
@@ -522,13 +514,11 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
                                         operands[2].shape4[3]};
     ICHECK_GT(input_shape[0], 0);
     ICHECK_GT(input_shape[1], 0);
-    int64_t expected_eu =
-        tl::tpuv7::kEuBytes / (dtype_.bits() / 8);
+    int64_t expected_eu = tl::tpuv7::kEuBytes / (dtype_.bits() / 8);
     int64_t expected_align_w =
         ((input_shape[1] + expected_eu - 1) / expected_eu) * expected_eu;
     int64_t expected_stride_n =
-        ((input_shape[0] + tl::tpuv7::kLaneNum - 1) /
-         tl::tpuv7::kLaneNum) *
+        ((input_shape[0] + tl::tpuv7::kLaneNum - 1) / tl::tpuv7::kLaneNum) *
         expected_align_w;
     ICHECK_EQ(eu_num, expected_eu)
         << op_name << " eu_num must be derived from the 64-byte TPUv7 EU";
@@ -604,21 +594,23 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
                  << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
                  << ".unsigned_flag = 0, .default_stride = false};\n";
     this->PrintIndent();
-    this->stream << "  __tilelang_tpu_tensor_info input_copy = {.shape = copy_shape, "
-                 << ".stride = {0}, .addr = " << input_tensor
-                 << ".addr, .dtype = " << dtype
-                 << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = true};\n";
+    this->stream
+        << "  __tilelang_tpu_tensor_info input_copy = {.shape = copy_shape, "
+        << ".stride = {0}, .addr = " << input_tensor
+        << ".addr, .dtype = " << dtype
+        << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+        << ".unsigned_flag = 0, .default_stride = true};\n";
     this->PrintIndent();
-    this->stream << "  __tilelang_tpu_tensor_info padded_input_copy = {.shape = "
-                 << "copy_shape, .stride = padded_stride, .addr = "
-                 << tmp_tensor << ".addr, .dtype = " << dtype
-                 << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = false};\n";
+    this->stream
+        << "  __tilelang_tpu_tensor_info padded_input_copy = {.shape = "
+        << "copy_shape, .stride = padded_stride, .addr = " << tmp_tensor
+        << ".addr, .dtype = " << dtype
+        << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+        << ".unsigned_flag = 0, .default_stride = false};\n";
     this->PrintIndent();
     this->stream << "  __tilelang_tpu_tensor_info output_view = {.shape = "
-                 << "out_reduce_w, .stride = {0}, .addr = "
-                 << output_tensor << ".addr, .dtype = " << dtype
+                 << "out_reduce_w, .stride = {0}, .addr = " << output_tensor
+                 << ".addr, .dtype = " << dtype
                  << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
                  << ".unsigned_flag = 0, .default_stride = true};\n";
     this->PrintIndent();
@@ -648,7 +640,8 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
                  << ".shape.w};\n";
     this->PrintIndent();
     int elem_size =
-        (dtype_ == DataType::Float(16) || dtype_ == DataType::BFloat(16)) ? 2 : 4;
+        (dtype_ == DataType::Float(16) || dtype_ == DataType::BFloat(16)) ? 2
+                                                                          : 4;
     this->stream << "    int elem_size = " << elem_size << ";\n";
     this->PrintIndent();
     this->stream << "    int offset = " << input_tensor
@@ -657,13 +650,13 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     this->stream << "    dim4 fill_tensor_stride = {" << stride_n
                  << ", align_w, " << input_tensor << ".shape.w, 1};\n";
     this->PrintIndent();
-    this->stream
-        << "    __tilelang_tpu_tensor_info fill_tensor = {.shape = fill_shape, .stride "
-           "= fill_tensor_stride, "
-        << ".addr = " << input_tensor << ".addr + offset, .dtype = " << dtype
-        << ", "
-        << ".mode = 0, .align_mode = 4, .size = 1, .offset = offset, "
-        << ".unsigned_flag = 0, .default_stride = false};\n";
+    this->stream << "    __tilelang_tpu_tensor_info fill_tensor = {.shape = "
+                    "fill_shape, .stride "
+                    "= fill_tensor_stride, "
+                 << ".addr = " << input_tensor
+                 << ".addr + offset, .dtype = " << dtype << ", "
+                 << ".mode = 0, .align_mode = 4, .size = 1, .offset = offset, "
+                 << ".unsigned_flag = 0, .default_stride = false};\n";
     this->PrintIndent();
     this->stream
         << "    tpu_bdc_set_C(fill_tensor.addr, pad_val, &fill_shape, "
@@ -673,20 +666,20 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     this->stream << "  }\n";
 
     this->PrintIndent();
-    this->stream << "  __tilelang_tpu_tensor_info input_view = {.shape = in_reduce_h, "
-                    ".stride = {0}, "
-                 << ".addr = " << input_tensor << ".addr, .dtype = " << dtype
-                 << ", "
-                 << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = true};\n";
+    this->stream
+        << "  __tilelang_tpu_tensor_info input_view = {.shape = in_reduce_h, "
+           ".stride = {0}, "
+        << ".addr = " << input_tensor << ".addr, .dtype = " << dtype << ", "
+        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+        << ".unsigned_flag = 0, .default_stride = true};\n";
 
     this->PrintIndent();
-    this->stream << "  __tilelang_tpu_tensor_info tmp_view = {.shape = out_reduce_h, "
-                    ".stride = {0}, "
-                 << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
-                 << ", "
-                 << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = true};\n";
+    this->stream
+        << "  __tilelang_tpu_tensor_info tmp_view = {.shape = out_reduce_h, "
+           ".stride = {0}, "
+        << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype << ", "
+        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+        << ".unsigned_flag = 0, .default_stride = true};\n";
 
     this->PrintIndent();
     this->stream << "  tpu_bdc_fp_max_pool2d(tmp_view.addr, input_view.addr, "
@@ -696,19 +689,19 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     this->PrintIndent();
     this->stream << "  dim2 kernel2 = {1, eu_num};\n";
     this->PrintIndent();
-    this->stream << "  __tilelang_tpu_tensor_info output_view = {.shape = out_reduce_w, "
-                    ".stride = {0}, "
-                 << ".addr = " << output_tensor << ".addr, .dtype = " << dtype
-                 << ", "
-                 << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = true};\n";
+    this->stream
+        << "  __tilelang_tpu_tensor_info output_view = {.shape = out_reduce_w, "
+           ".stride = {0}, "
+        << ".addr = " << output_tensor << ".addr, .dtype = " << dtype << ", "
+        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+        << ".unsigned_flag = 0, .default_stride = true};\n";
     this->PrintIndent();
-    this->stream << "  __tilelang_tpu_tensor_info tmp_view2 = {.shape = in_reduce_w, "
-                    ".stride = {0}, "
-                 << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
-                 << ", "
-                 << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = true};\n";
+    this->stream
+        << "  __tilelang_tpu_tensor_info tmp_view2 = {.shape = in_reduce_w, "
+           ".stride = {0}, "
+        << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype << ", "
+        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+        << ".unsigned_flag = 0, .default_stride = true};\n";
     this->PrintIndent();
     this->stream << "  pad_val.u32 = FP_NEG_MAX(" << dtype << ");\n";
     this->PrintIndent();
@@ -725,7 +718,8 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     this->stream << "}\n";
   } else if (op_name == "tl.tpukernel.reduce_sum") {
     ICHECK_EQ(op->args.size(), 7U)
-        << op_name << " expects input, output, scratch, eu_num, align_w, and stride";
+        << op_name
+        << " expects input, output, scratch, eu_num, align_w, and stride";
     std::array<SemanticTensorOperand, 3> operands{};
     constexpr std::array<int, 3> kAccessMasks = {3, 2, 3};
     for (size_t i = 0; i < operands.size(); ++i) {
@@ -787,13 +781,11 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
                                         operands[2].shape4[3]};
     ICHECK_GT(input_shape[0], 0);
     ICHECK_GT(input_shape[1], 0);
-    int64_t expected_eu =
-        tl::tpuv7::kEuBytes / (dtype_.bits() / 8);
+    int64_t expected_eu = tl::tpuv7::kEuBytes / (dtype_.bits() / 8);
     int64_t expected_align_w =
         ((input_shape[1] + expected_eu - 1) / expected_eu) * expected_eu;
     int64_t expected_stride_n =
-        ((input_shape[0] + tl::tpuv7::kLaneNum - 1) /
-         tl::tpuv7::kLaneNum) *
+        ((input_shape[0] + tl::tpuv7::kLaneNum - 1) / tl::tpuv7::kLaneNum) *
         expected_align_w;
     ICHECK_EQ(eu_num, expected_eu)
         << op_name << " eu_num must be derived from the 64-byte TPUv7 EU";
@@ -873,21 +865,23 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
                  << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
                  << ".unsigned_flag = 0, .default_stride = false};\n";
     this->PrintIndent();
-    this->stream << "  __tilelang_tpu_tensor_info input_copy = {.shape = copy_shape, "
-                 << ".stride = {0}, .addr = " << input_tensor
-                 << ".addr, .dtype = " << dtype
-                 << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = true};\n";
+    this->stream
+        << "  __tilelang_tpu_tensor_info input_copy = {.shape = copy_shape, "
+        << ".stride = {0}, .addr = " << input_tensor
+        << ".addr, .dtype = " << dtype
+        << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+        << ".unsigned_flag = 0, .default_stride = true};\n";
     this->PrintIndent();
-    this->stream << "  __tilelang_tpu_tensor_info padded_input_copy = {.shape = "
-                 << "copy_shape, .stride = padded_stride, .addr = "
-                 << tmp_tensor << ".addr, .dtype = " << dtype
-                 << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = false};\n";
+    this->stream
+        << "  __tilelang_tpu_tensor_info padded_input_copy = {.shape = "
+        << "copy_shape, .stride = padded_stride, .addr = " << tmp_tensor
+        << ".addr, .dtype = " << dtype
+        << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+        << ".unsigned_flag = 0, .default_stride = false};\n";
     this->PrintIndent();
     this->stream << "  __tilelang_tpu_tensor_info output_view = {.shape = "
-                 << "out_reduce_w, .stride = {0}, .addr = "
-                 << output_tensor << ".addr, .dtype = " << dtype
+                 << "out_reduce_w, .stride = {0}, .addr = " << output_tensor
+                 << ".addr, .dtype = " << dtype
                  << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
                  << ".unsigned_flag = 0, .default_stride = true};\n";
     this->PrintIndent();
@@ -922,13 +916,13 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     this->stream << "    dim4 fill_tensor_stride = {" << stride_n
                  << ", align_w, " << input_tensor << ".shape.w, 1};\n";
     this->PrintIndent();
-    this->stream
-        << "    __tilelang_tpu_tensor_info fill_tensor = {.shape = fill_shape, .stride "
-           "= fill_tensor_stride, "
-        << ".addr = " << input_tensor << ".addr + offset, .dtype = " << dtype
-        << ", "
-        << ".mode = 0, .align_mode = 4, .size = 1, .offset = offset, "
-        << ".unsigned_flag = 0, .default_stride = false};\n";
+    this->stream << "    __tilelang_tpu_tensor_info fill_tensor = {.shape = "
+                    "fill_shape, .stride "
+                    "= fill_tensor_stride, "
+                 << ".addr = " << input_tensor
+                 << ".addr + offset, .dtype = " << dtype << ", "
+                 << ".mode = 0, .align_mode = 4, .size = 1, .offset = offset, "
+                 << ".unsigned_flag = 0, .default_stride = false};\n";
     this->PrintIndent();
     this->stream
         << "    tpu_bdc_set_C(fill_tensor.addr, pad_val, &fill_shape, "
@@ -938,19 +932,19 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     this->stream << "  }\n";
 
     this->PrintIndent();
-    this->stream << "  __tilelang_tpu_tensor_info input_view = {.shape = in_reduce_h, "
-                    ".stride = {0}, "
-                 << ".addr = " << input_tensor << ".addr, .dtype = " << dtype
-                 << ", "
-                 << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = true};\n";
+    this->stream
+        << "  __tilelang_tpu_tensor_info input_view = {.shape = in_reduce_h, "
+           ".stride = {0}, "
+        << ".addr = " << input_tensor << ".addr, .dtype = " << dtype << ", "
+        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+        << ".unsigned_flag = 0, .default_stride = true};\n";
     this->PrintIndent();
-    this->stream << "  __tilelang_tpu_tensor_info tmp_view = {.shape = out_reduce_h, "
-                    ".stride = {0}, "
-                 << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
-                 << ", "
-                 << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = true};\n";
+    this->stream
+        << "  __tilelang_tpu_tensor_info tmp_view = {.shape = out_reduce_h, "
+           ".stride = {0}, "
+        << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype << ", "
+        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+        << ".unsigned_flag = 0, .default_stride = true};\n";
     this->PrintIndent();
     this->stream << "  tpu_bdc_fp_avg_pool2d(tmp_view.addr, input_view.addr, "
                     "&input_view.shape, "
@@ -959,19 +953,19 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     this->PrintIndent();
     this->stream << "  dim2 kernel2 = {1, eu_num};\n";
     this->PrintIndent();
-    this->stream << "  __tilelang_tpu_tensor_info output_view = {.shape = out_reduce_w, "
-                    ".stride = {0}, "
-                 << ".addr = " << output_tensor << ".addr, .dtype = " << dtype
-                 << ", "
-                 << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = true};\n";
+    this->stream
+        << "  __tilelang_tpu_tensor_info output_view = {.shape = out_reduce_w, "
+           ".stride = {0}, "
+        << ".addr = " << output_tensor << ".addr, .dtype = " << dtype << ", "
+        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+        << ".unsigned_flag = 0, .default_stride = true};\n";
     this->PrintIndent();
-    this->stream << "  __tilelang_tpu_tensor_info tmp_view2 = {.shape = in_reduce_w, "
-                    ".stride = {0}, "
-                 << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
-                 << ", "
-                 << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = true};\n";
+    this->stream
+        << "  __tilelang_tpu_tensor_info tmp_view2 = {.shape = in_reduce_w, "
+           ".stride = {0}, "
+        << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype << ", "
+        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+        << ".unsigned_flag = 0, .default_stride = true};\n";
     this->PrintIndent();
     this->stream << "  tpu_bdc_fp_avg_pool2d(output_view.addr, tmp_view2.addr, "
                     "&tmp_view2.shape, "
@@ -985,12 +979,9 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     this->PrintIndent();
     this->stream << "}\n";
   } else if (op_name == "tl.tpukernel.rsqrt") {
-    ICHECK_EQ(op->args.size(), 3U)
-        << op_name << " expects dst and src";
-    auto dst_operand =
-        ParseWholeBufferRegion(op->args[1], op_name + " dst", 2);
-    auto src_operand =
-        ParseWholeBufferRegion(op->args[2], op_name + " src", 1);
+    ICHECK_EQ(op->args.size(), 3U) << op_name << " expects dst and src";
+    auto dst_operand = ParseWholeBufferRegion(op->args[1], op_name + " dst", 2);
+    auto src_operand = ParseWholeBufferRegion(op->args[2], op_name + " src", 1);
     ICHECK(dst_operand.is_local && src_operand.is_local)
         << op_name << " operands must reside in local memory";
     auto dst_dtype = dst_operand.dtype;
@@ -1000,8 +991,7 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     ICHECK(dst_dtype == DataType::Float(16) ||
            dst_dtype == DataType::BFloat(16) ||
            dst_dtype == DataType::Float(32))
-        << op_name << " supports only FP16, BF16, and FP32, got "
-        << dst_dtype;
+        << op_name << " supports only FP16, BF16, and FP32, got " << dst_dtype;
     const auto &dst = dst_operand.descriptor;
     const auto &src0 = src_operand.descriptor;
     ICHECK_EQ(dst_operand.rank, src_operand.rank)
@@ -1025,8 +1015,7 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
       ICHECK(operands[i].is_local)
           << op_name << " operands must all reside in local memory";
       tensors[i] = operands[i].descriptor;
-      ICHECK_EQ(operands[i].rank, 2U)
-          << op_name << " requires rank-2 operands";
+      ICHECK_EQ(operands[i].rank, 2U) << op_name << " requires rank-2 operands";
     }
     auto dtype_ = operands[0].dtype;
     for (size_t i = 1; i < operands.size(); ++i) {
@@ -1061,8 +1050,7 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
       dtype = TPUKernelDTypeName(dtype_);
       bytes_size = 1;
     } else {
-      LOG(FATAL) << op_name
-                 << " supports only FP8, FP16, BF16, and FP32, got "
+      LOG(FATAL) << op_name << " supports only FP8, FP16, BF16, and FP32, got "
                  << dtype_;
     }
     this->PrintIndent();
@@ -1070,8 +1058,8 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     this->PrintIndent();
     this->stream << "dim4 half_stride;\n";
     this->PrintIndent();
-    this->stream << "tpu_aligned_stride(&half_stride, 0, &" << dst
-                 << ".shape, " << dtype << ");\n";
+    this->stream << "tpu_aligned_stride(&half_stride, 0, &" << dst << ".shape, "
+                 << dtype << ");\n";
     this->PrintIndent();
     this->stream << "half_stride.w *= 2;\n";
     this->PrintIndent();
@@ -1086,9 +1074,8 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
                  << ", &half_shape, &half_stride, &half_stride, &half_stride, "
                  << dtype << ");\n";
     this->PrintIndent();
-    this->stream << "tpu_bdc_fp_add(" << dst << ".addr + " << bytes_size
-                 << ", " << odd_src0 << ".addr + " << bytes_size << ", "
-                 << odd_src1
+    this->stream << "tpu_bdc_fp_add(" << dst << ".addr + " << bytes_size << ", "
+                 << odd_src0 << ".addr + " << bytes_size << ", " << odd_src1
                  << ".addr, &half_shape, &half_stride, &half_stride, "
                     "&half_stride, "
                  << dtype << ");\n";
@@ -1152,22 +1139,24 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     this->PrintIndent();
     this->stream << "{\n";
     this->PrintIndent();
-    this->stream << "dim4 __gather_shape = {1, 1, " << dst
-                 << ".shape.c, " << dst << ".shape.w};\n";
+    this->stream << "dim4 __gather_shape = {1, 1, " << dst << ".shape.c, "
+                 << dst << ".shape.w};\n";
     this->PrintIndent();
-    this->stream << "tpu_gdma_h_gather_S2S("
-                 << dst << ".addr, " << param << ".addr, " << index << ".addr, "
-                 << "false, (scalar_t){.u32 = 0}, &__gather_shape, "
-                 << param_h << ", "
+    this->stream << "tpu_gdma_h_gather_S2S(" << dst << ".addr, " << param
+                 << ".addr, " << index << ".addr, "
+                 << "false, (scalar_t){.u32 = 0}, &__gather_shape, " << param_h
+                 << ", "
                  << "NULL, NULL, NULL, " << dtype << ");\n";
     this->PrintIndent();
     this->stream << "}\n";
   } else if (op_name == "tl.tpukernel.topk") {
     ICHECK_NE(target_chip_, "sg2260e")
-        << op_name << " is unavailable on SG2260E: the PPL 1.7 "
+        << op_name
+        << " is unavailable on SG2260E: the PPL 1.7 "
            "tpub_7_1_e runtime rejects tpu_hau_sort_natural_index";
     ICHECK_EQ(op->args.size(), 7U)
-        << op_name << " expects dst_data, dst_idx, src, K, descended, and length";
+        << op_name
+        << " expects dst_data, dst_idx, src, K, descended, and length";
     std::array<SemanticTensorOperand, 3> operands{};
     constexpr std::array<int, 3> kAccessMasks = {2, 2, 1};
     std::array<std::string, 3> tensors{};
@@ -1176,7 +1165,8 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
           op->args[i + 1], op_name + " operand " + std::to_string(i),
           kAccessMasks[i]);
       ICHECK(!operands[i].is_local)
-          << op_name << " uses the HAU system-memory API and requires global operands";
+          << op_name
+          << " uses the HAU system-memory API and requires global operands";
       tensors[i] = operands[i].descriptor;
       ICHECK_EQ(operands[i].rank, 1U)
           << op_name << " requires rank-1 dst_data, dst_idx, and src buffers";
@@ -1225,7 +1215,8 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
       ICHECK_EQ(shape[1], 1) << op_name << " " << operand << " must be rank 1";
       ICHECK_EQ(shape[2], 1) << op_name << " " << operand << " must be rank 1";
       ICHECK_EQ(shape[3], expected)
-          << op_name << " " << operand << " extent disagrees with its scalar contract";
+          << op_name << " " << operand
+          << " extent disagrees with its scalar contract";
     };
     require_vector_shape(src_shape, length_val, "src");
     // Sentinel experiments on BM1690 CModel confirm that HAU writes exactly K
@@ -1241,9 +1232,8 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(
     this->PrintIndent();
     this->stream << "tpu_hau_sort_natural_index(" << dst_data << ".addr, "
                  << dst_idx << ".addr, " << src << ".addr, " << length_val
-                 << ", " << K_val << ", "
-                 << (descended_val ? "true" : "false") << ", " << dtype
-                 << ");\n";
+                 << ", " << K_val << ", " << (descended_val ? "true" : "false")
+                 << ", " << dtype << ");\n";
   } else {
     return false;
   }

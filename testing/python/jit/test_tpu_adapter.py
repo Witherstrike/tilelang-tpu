@@ -56,13 +56,11 @@ _TEST_SDK_IDENTITY = ("/test/ppl", "/test/ppl/runtime", "/test/ppl/backend")
 
 
 def _tpu_target(chip="sg2260e", programming_model="tpukernel"):
-    return tvm.target.Target(
-        f"tpu -mcpu={chip} "
-        f"-tpu-programming-model={programming_model}")
+    return tvm.target.Target(f"tpu -mcpu={chip} "
+                             f"-tpu-programming-model={programming_model}")
 
 
-def _library_generator(
-        chip="sg2260e", programming_model="tpukernel", runtime_mode="cmodel"):
+def _library_generator(chip="sg2260e", programming_model="tpukernel", runtime_mode="cmodel"):
     return LibraryGenerator(
         _tpu_target(chip, programming_model),
         tpu_target=TPUTargetSpec(chip, programming_model),
@@ -70,7 +68,8 @@ def _library_generator(
     )
 
 
-def _mark_verified_tpu_artifact(generator, lib_path="/tmp/not-loaded.so",
+def _mark_verified_tpu_artifact(generator,
+                                lib_path="/tmp/not-loaded.so",
                                 sdk_identity=_TEST_SDK_IDENTITY):
     """Model a private artifact emitted by ``LibraryGenerator.compile_lib``.
 
@@ -93,8 +92,8 @@ def _two_tensor_params():
 
 @T.prim_func
 def _two_buffer_wrapper_primfunc(
-    A: T.Tensor((1,), "float32"),
-    B: T.Tensor((1,), "float32"),
+        A: T.Tensor((1,), "float32"),
+        B: T.Tensor((1,), "float32"),
 ):
     T.func_attr({"global_symbol": "opaque_rvt", "tir.noalias": T.bool(True)})
     B[0] = A[0]
@@ -146,16 +145,48 @@ def test_raw_rvt_wrapper_copies_all_buffers_even_with_result_idx(tmp_path):
     """Raw RVT pointer effects are opaque to TIR's result-index analysis."""
     TLTPUSourceWrapper(
         scheduled_ir_module=tvm.IRModule({"opaque_rvt": _two_buffer_wrapper_primfunc}),
-        source=(
-            "#define TILELANG_TPU_OPAQUE_RAW_RVT_ABI 1\n"
-            "void opaque_rvt(void) { rvt_kernel_start(); }"
-        ),
+        source=("#define TILELANG_TPU_OPAQUE_RAW_RVT_ABI 1\n"
+                "void opaque_rvt(void) { rvt_kernel_start(); }"),
         target=_tpu_target("sg2260e", "rv"),
         output_indices=[1],
         output_dir=str(tmp_path),
     )
     main_source = (tmp_path / "main.cpp").read_text(encoding="utf-8")
     assert main_source.count("tpuRtMemcpyD2S(") == 2
+
+
+def test_tpu_host_wrapper_uses_positional_cpp_identifiers(tmp_path):
+    """Duplicate or punctuation-bearing TIR hints cannot corrupt the host ABI."""
+
+    first = tvm.tir.decl_buffer((1,), "float32", name="same-name")
+    second = tvm.tir.decl_buffer((1,), "float32", name="same-name")
+    prim_func = tvm.tir.PrimFunc(
+        [first.data, second.data],
+        tvm.tir.Evaluate(0),
+        buffer_map={
+            first.data: first,
+            second.data: second
+        },
+    ).with_attr("global_symbol", "main_kernel")
+
+    TLTPUSourceWrapper(
+        scheduled_ir_module=tvm.IRModule({"main_kernel": prim_func}),
+        source="void main_kernel(void) {}",
+        target=_tpu_target(),
+        output_dir=str(tmp_path),
+    )
+
+    main_source = (tmp_path / "main.cpp").read_text(encoding="utf-8")
+    kernel_source = (tmp_path / "kernel.cpp").read_text(encoding="utf-8")
+    assert "same-name" not in main_source
+    assert "char* arg_0 = static_cast<char*>(args[0]);" in main_source
+    assert "char* arg_1 = static_cast<char*>(args[1]);" in main_source
+    assert "void *dev_arg_0 = nullptr;" in main_source
+    assert "void *dev_arg_1 = nullptr;" in main_source
+    assert (main_source.index("auto start =") < main_source.index("int rst = main_kernel(") <
+            main_source.index("auto end ="))
+    assert (kernel_source.index("tpuRtKernelLaunch(")
+            < kernel_source.index("tpuRtStreamSynchronize(stream)"))
 
 
 def test_tpu_workspace_is_private_per_generator():
@@ -194,7 +225,7 @@ def test_loaded_tpu_library_retains_its_private_workspace(monkeypatch):
 
     library = FakeLibrary()
     library.tilelang_tpu_bind_device = lambda _device_id: 0
-    monkeypatch.setattr(ctypes, "CDLL", lambda _path: library)
+    monkeypatch.setattr(ctypes, "CDLL", lambda _path, loaded_library=library: loaded_library)
 
     loaded = generator.load_lib(lib_path)
     generator_ref = weakref.ref(generator)
@@ -231,16 +262,13 @@ def test_library_generator_close_is_idempotent():
     ("TILELANG_TPU_PROFILE_PROGRAMMING_MODEL", "rv"),
     ("TILELANG_TPU_PROFILE_RUNTIME_MODE", "pcie"),
 ])
-def test_profile_build_session_validates_all_selection_axes(
-        monkeypatch, variable, wrong_value):
+def test_profile_build_session_validates_all_selection_axes(monkeypatch, variable, wrong_value):
     target = TPUTargetSpec("sg2260e", "tpukernel")
     runtime = TPURuntimeConfig("cmodel")
     monkeypatch.setenv("TILELANG_TPU_PROFILE_SESSION", "1")
     monkeypatch.setenv("TILELANG_TPU_PROFILE_CHIP", target.chip)
-    monkeypatch.setenv(
-        "TILELANG_TPU_PROFILE_PROGRAMMING_MODEL", target.programming_model)
-    monkeypatch.setenv(
-        "TILELANG_TPU_PROFILE_RUNTIME_MODE", runtime.runtime_mode)
+    monkeypatch.setenv("TILELANG_TPU_PROFILE_PROGRAMMING_MODEL", target.programming_model)
+    monkeypatch.setenv("TILELANG_TPU_PROFILE_RUNTIME_MODE", runtime.runtime_mode)
 
     assert LibraryGenerator._tpu_profile_session(target, runtime)
 
@@ -264,11 +292,12 @@ def test_tpu_runtime_profile_is_single_process_identity(monkeypatch):
             bm, cmodel, device_id=0, sdk_identity=_TEST_SDK_IDENTITY)
     with pytest.raises(RuntimeError, match="fresh process"):
         tpu_adapter.reserve_tpu_runtime_profile(
-            sg, TPURuntimeConfig("pcie"), device_id=0,
-            sdk_identity=_TEST_SDK_IDENTITY)
+            sg, TPURuntimeConfig("pcie"), device_id=0, sdk_identity=_TEST_SDK_IDENTITY)
     with pytest.raises(RuntimeError, match="fresh process"):
         tpu_adapter.reserve_tpu_runtime_profile(
-            sg, cmodel, device_id=0,
+            sg,
+            cmodel,
+            device_id=0,
             sdk_identity=("/test/another-ppl", "/test/another/runtime", "/test/another/backend"))
 
 
@@ -358,6 +387,7 @@ def test_tpu_load_rejects_a_host_library_that_rejects_device_binding(monkeypatch
     generator = _library_generator()
     try:
         _mark_verified_tpu_artifact(generator)
+
         class FakeLibrary:
             pass
 
@@ -373,7 +403,8 @@ def test_tpu_load_rejects_a_host_library_that_rejects_device_binding(monkeypatch
 def test_pcie_load_rejects_a_cmodel_runtime_profile_before_dlopen(monkeypatch):
     monkeypatch.setattr(tpu_adapter, "_TPU_RUNTIME_PROFILE", None)
     tpu_adapter.reserve_tpu_runtime_profile(
-        TPUTargetSpec("sg2260e", "tpukernel"), TPURuntimeConfig("cmodel"),
+        TPUTargetSpec("sg2260e", "tpukernel"),
+        TPURuntimeConfig("cmodel"),
         device_id=0,
         sdk_identity=_TEST_SDK_IDENTITY)
     generator = _library_generator(runtime_mode="pcie")
@@ -393,7 +424,8 @@ def test_pcie_load_rejects_a_cmodel_runtime_profile_before_dlopen(monkeypatch):
 def test_cmodel_load_rejects_a_pcie_runtime_profile_before_dlopen(monkeypatch):
     monkeypatch.setattr(tpu_adapter, "_TPU_RUNTIME_PROFILE", None)
     tpu_adapter.reserve_tpu_runtime_profile(
-        TPUTargetSpec("sg2260e", "tpukernel"), TPURuntimeConfig("pcie"),
+        TPUTargetSpec("sg2260e", "tpukernel"),
+        TPURuntimeConfig("pcie"),
         device_id=0,
         sdk_identity=_TEST_SDK_IDENTITY)
     generator = _library_generator()
@@ -458,7 +490,8 @@ def test_tpu_load_rejects_another_path_from_the_same_generator_before_dlopen(mon
 @pytest.mark.parametrize("adapter_cls", [CtypesKernelAdapter, CythonKernelAdapter])
 def test_tpu_database_adapters_reject_prebuilt_artifacts_before_dlopen(monkeypatch, adapter_cls):
     raw_prim_func = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(tvm.tir.const(0, "int32")),
+        [],
+        tvm.tir.Evaluate(tvm.tir.const(0, "int32")),
     ).with_attr("global_symbol", "cached_tpu_artifact")
     loaded = []
     monkeypatch.setattr(ctypes, "CDLL", lambda path: loaded.append(path))
@@ -479,5 +512,4 @@ def test_tpu_database_adapters_reject_prebuilt_artifacts_before_dlopen(monkeypat
 
 def test_tpu_database_artifact_loading_is_disabled_without_manifest():
     with pytest.raises(RuntimeError, match="manifest"):
-        reject_unverified_tpu_database_artifact(
-            _tpu_target("sg2260e", "tpukernel"))
+        reject_unverified_tpu_database_artifact(_tpu_target("sg2260e", "tpukernel"))

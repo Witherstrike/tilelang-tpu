@@ -87,9 +87,12 @@ int main() {
 
   // 初始化输入数据
   printf("input_data:\n");
-  rand_data("test", "flashattn", 0, q_data, q_size, &q_shape, -5.0, 5.0, DT_FP16);
-  rand_data("test", "flashattn", 1, k_data, k_size, &k_shape, -5.0, 5.0, DT_FP16);
-  rand_data("test", "flashattn", 2, v_data, v_size, &v_shape, -5.0, 5.0, DT_FP16);
+  rand_data("test", "flashattn", 0, q_data, q_size, &q_shape, -5.0, 5.0,
+            DT_FP16);
+  rand_data("test", "flashattn", 1, k_data, k_size, &k_shape, -5.0, 5.0,
+            DT_FP16);
+  rand_data("test", "flashattn", 2, v_data, v_size, &v_shape, -5.0, 5.0,
+            DT_FP16);
   void *dev_q_data;
   void *dev_k_data;
   void *dev_v_data;
@@ -105,10 +108,9 @@ int main() {
   tpuRtMemcpyS2D(dev_k_data, k_data, k_size);
   tpuRtMemcpyS2D(dev_v_data, v_data, v_size);
   // 调用自动生成的 host 端函数，此函数内部会调用 device 端的 kernel函数
-  int rst = flashattn((unsigned long long)dev_q_data,
-                        (unsigned long long)dev_k_data,
-                        (unsigned long long)dev_v_data,
-                        (unsigned long long)dev_output_data);
+  int rst = flashattn(
+      (unsigned long long)dev_q_data, (unsigned long long)dev_k_data,
+      (unsigned long long)dev_v_data, (unsigned long long)dev_output_data);
   if (rst) {
     printf("kernel_launch failed\n");
     return 1;
@@ -123,7 +125,8 @@ int main() {
   dump_data("./test", "flashattn", "_q", ".in", 0, q_data, q_size, DT_FP16);
   dump_data("./test", "flashattn", "_k", ".in", 1, k_data, k_size, DT_FP16);
   dump_data("./test", "flashattn", "_v", ".in", 2, v_data, v_size, DT_FP16);
-  dump_data("./test", "flashattn", "_output", ".out", 3, output_data, output_size, DT_FP16);
+  dump_data("./test", "flashattn", "_output", ".out", 3, output_data,
+            output_size, DT_FP16);
   delete[] q_data;
   delete[] k_data;
   delete[] v_data;
@@ -172,31 +175,37 @@ int main() {
   MallocWrap(handle, &dev_v_data, (u64 *)&v_data, v_size);
   MallocWrap(handle, &dev_output_data, (u64 *)&output_data, output_size);
 
-  rand_data("test", "flashattn", 0, q_data, q_size, &q_shape, -5.0, 5.0, DT_FP16);
-  rand_data("test", "flashattn", 1, k_data, k_size, &k_shape, -5.0, 5.0, DT_FP16);
-  rand_data("test", "flashattn", 2, v_data, v_size, &v_shape, -5.0, 5.0, DT_FP16);
+  rand_data("test", "flashattn", 0, q_data, q_size, &q_shape, -5.0, 5.0,
+            DT_FP16);
+  rand_data("test", "flashattn", 1, k_data, k_size, &k_shape, -5.0, 5.0,
+            DT_FP16);
+  rand_data("test", "flashattn", 2, v_data, v_size, &v_shape, -5.0, 5.0,
+            DT_FP16);
   /**
    * load_file(std::string file_path, char *data, size_t data_size,
                size_t file_size, int dtype, int file_dtype)
    */
-  // load_file("./test/matmul_left0.in", left_data, left_size, left_size, DT_FP16, DT_FP16);
+  // load_file("./test/matmul_left0.in", left_data, left_size, left_size,
+  // DT_FP16, DT_FP16);
 
   MemcpyS2D(handle, &dev_q_data, q_data, q_size);
   MemcpyS2D(handle, &dev_k_data, k_data, k_size);
   MemcpyS2D(handle, &dev_v_data, v_data, v_size);
   int WARMUP = 0;
   int REPAET = 1;
-  for (int i = 0; i < WARMUP + REPAET; i++){
+  for (int i = 0; i < WARMUP + REPAET; i++) {
     bm_profile_t start, end;
     bm_get_profile(handle, &start);
     // 通过自动生成的 host 端封装函数调用 kernel 函数
-    int rst = flashattn(bm_mem_get_device_addr(dev_q_data), bm_mem_get_device_addr(dev_k_data), bm_mem_get_device_addr(dev_v_data), bm_mem_get_device_addr(dev_output_data));
+    int rst = flashattn(bm_mem_get_device_addr(dev_q_data),
+                        bm_mem_get_device_addr(dev_k_data),
+                        bm_mem_get_device_addr(dev_v_data),
+                        bm_mem_get_device_addr(dev_output_data));
     bm_get_profile(handle, &end);
     if (rst) {
       printf("kernel_launch failed\n");
       return 1;
-    }
-    else if (i >= WARMUP) {
+    } else if (i >= WARMUP) {
       size_t npu_time = end.tpu_process_time - start.tpu_process_time;
       std::cout << "npu time = " << npu_time << "(us) --> ";
       printf("kernel_launch success\n");
@@ -212,7 +221,8 @@ int main() {
   dump_data("./test", "flashattn", "_q", ".in", 0, q_data, q_size, DT_FP16);
   dump_data("./test", "flashattn", "_k", ".in", 1, k_data, k_size, DT_FP16);
   dump_data("./test", "flashattn", "_v", ".in", 2, v_data, v_size, DT_FP16);
-  dump_data("./test", "flashattn", "_output", ".out", 3, output_data, output_size, DT_FP16);
+  dump_data("./test", "flashattn", "_output", ".out", 3, output_data,
+            output_size, DT_FP16);
   FreeWrap(handle, &dev_q_data, q_data);
   FreeWrap(handle, &dev_k_data, k_data);
   FreeWrap(handle, &dev_v_data, v_data);

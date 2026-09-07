@@ -100,9 +100,8 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         self.tpu_runtime = None
         if is_tpu_target(self.target):
             if tpu_target is None or tpu_runtime is None:
-                raise ValueError(
-                    "TPU adapter requires target and runtime configuration "
-                    "from the compiled artifact")
+                raise ValueError("TPU adapter requires target and runtime configuration "
+                                 "from the compiled artifact")
             self.tpu_target = tpu_target
             self.tpu_runtime = tpu_runtime
         elif tpu_target is not None or tpu_runtime is not None:
@@ -123,8 +122,8 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
         if is_tpu_target(self.target):
-            self.tpu_forward = make_tpu_forward(
-                self.lib, self.params, self.result_idx, self.dynamic_symbolic_map)
+            self.tpu_forward = make_tpu_forward(self.lib, self.params, self.result_idx,
+                                                self.dynamic_symbolic_map)
         else:
             self.lib.init()
 
@@ -175,9 +174,8 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         adapter.tpu_runtime = None
         if is_tpu_target(adapter.target):
             if tpu_target is None or tpu_runtime is None:
-                raise ValueError(
-                    "TPU adapter requires target and runtime configuration "
-                    "from the compiled artifact")
+                raise ValueError("TPU adapter requires target and runtime configuration "
+                                 "from the compiled artifact")
             adapter.tpu_target = tpu_target
             adapter.tpu_runtime = tpu_runtime
         elif tpu_target is not None or tpu_runtime is not None:
@@ -190,8 +188,8 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         )
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
         if is_tpu_target(adapter.target):
-            adapter.tpu_forward = make_tpu_forward(
-                adapter.lib, adapter.params, adapter.result_idx, adapter.dynamic_symbolic_map)
+            adapter.tpu_forward = make_tpu_forward(adapter.lib, adapter.params, adapter.result_idx,
+                                                   adapter.dynamic_symbolic_map)
         else:
             adapter.lib.init()
 

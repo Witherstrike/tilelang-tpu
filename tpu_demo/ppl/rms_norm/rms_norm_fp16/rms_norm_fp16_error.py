@@ -34,5 +34,5 @@ def rms_norm(M, N, blk_m, dtype):
 dtype = "float16"
 func = rms_norm(128, 128, 32, dtype)
 mod = tilelang.lower(func)
-# This version produced results that were very close but not identical to NumPy’s output, 
+# This version produced results that were very close but not identical to NumPy’s output,
 # mainly due to FP16 accumulation and squaring precision loss.

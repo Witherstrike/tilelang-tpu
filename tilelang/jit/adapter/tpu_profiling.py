@@ -24,7 +24,7 @@ load its own private TileLang JIT artifact.
 from __future__ import annotations
 
 import ast
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 import errno
 import hashlib
@@ -44,23 +44,26 @@ from typing import Any, Mapping, MutableMapping, Optional, Sequence, Tuple, Unio
 from tilelang.engine.tpu_config import TPURuntimeConfig, TPUTargetSpec
 from tilelang.jit.adapter.ppl_layout import resolve_ppl_layout
 
-
 PathLike = Union[str, os.PathLike]
 
 _DEVICE_COMMAND_ENGINES = frozenset((
-    "bd", "bdc", "tiu", "gdma", "sdma", "vsdma", "cdma", "dma",
+    "bd",
+    "bdc",
+    "tiu",
+    "gdma",
+    "sdma",
+    "vsdma",
+    "cdma",
+    "dma",
 ))
 _LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
-_RAW_TRACE_ARTIFACT_RE = re.compile(
-    r"^(?P<label>[A-Za-z0-9][A-Za-z0-9_.-]*)-"
-    r"(?P<launch>\d+)-(?P<group>\d+)\."
-    r"(?P<engine>BD|GDMA|SDMA|VSDMA)\.(?P<core>\d+)(?:\.txt)?$")
-_RAW_TRACE_RE = re.compile(
-    r"^(?P<label>[A-Za-z0-9][A-Za-z0-9_.-]*)-"
-    r"(?P<launch>\d+)-(?P<group>\d+)\."
-    r"(?P<engine>BD|GDMA|SDMA|VSDMA)\.(?P<core>\d+)\.txt$")
-_PCIE_RAW_PROFILE_FILE_RE = re.compile(
-    r"^(?:global|cdmlib\d+_\d+)\.profile$")
+_RAW_TRACE_ARTIFACT_RE = re.compile(r"^(?P<label>[A-Za-z0-9][A-Za-z0-9_.-]*)-"
+                                    r"(?P<launch>\d+)-(?P<group>\d+)\."
+                                    r"(?P<engine>BD|GDMA|SDMA|VSDMA)\.(?P<core>\d+)(?:\.txt)?$")
+_RAW_TRACE_RE = re.compile(r"^(?P<label>[A-Za-z0-9][A-Za-z0-9_.-]*)-"
+                           r"(?P<launch>\d+)-(?P<group>\d+)\."
+                           r"(?P<engine>BD|GDMA|SDMA|VSDMA)\.(?P<core>\d+)\.txt$")
+_PCIE_RAW_PROFILE_FILE_RE = re.compile(r"^(?:global|cdmlib\d+_\d+)\.profile$")
 
 _PROFILE_SUPERVISOR_PATH = Path(__file__).parent.parent / "_tpu_profile_supervisor.py"
 _PCIE_PROFILE_DECODER_PATH = Path(__file__).parent.parent / "_tpu_pcie_profile_decoder.py"
@@ -106,17 +109,15 @@ class TPUProfilingConfig:
 
     def __post_init__(self) -> None:
         if self.runtime_mode not in ("cmodel", "pcie"):
-            raise ValueError(
-                f"Unsupported TPU profiling runtime mode {self.runtime_mode!r}; "
-                f"expected 'cmodel' or 'pcie'.")
+            raise ValueError(f"Unsupported TPU profiling runtime mode {self.runtime_mode!r}; "
+                             f"expected 'cmodel' or 'pcie'.")
         if isinstance(self.timeout_s, bool) or \
                 not isinstance(self.timeout_s, (int, float)) or \
                 not math.isfinite(float(self.timeout_s)) or self.timeout_s <= 0:
             raise ValueError("TPU profiling timeout_s must be a positive number.")
         if not _LABEL_RE.fullmatch(self.label):
-            raise ValueError(
-                "TPU profiling label must start with an ASCII letter/digit and "
-                "contain only letters, digits, '.', '_' or '-'.")
+            raise ValueError("TPU profiling label must start with an ASCII letter/digit and "
+                             "contain only letters, digits, '.', '_' or '-'.")
         if not isinstance(self.profile_record_size, int) or self.profile_record_size <= 0:
             raise ValueError("TPU profile_record_size must be a positive integer.")
         if not isinstance(self.profile_book_keeping, int) or self.profile_book_keeping < 0:
@@ -210,10 +211,8 @@ def _is_valid_pcie_raw_trace_artifact(raw_path: PathLike) -> bool:
     if not path.is_dir():
         return False
     try:
-        profile_files = tuple(
-            candidate for candidate in path.iterdir()
-            if candidate.is_file() and
-            _PCIE_RAW_PROFILE_FILE_RE.fullmatch(candidate.name) is not None)
+        profile_files = tuple(candidate for candidate in path.iterdir() if candidate.is_file() and
+                              _PCIE_RAW_PROFILE_FILE_RE.fullmatch(candidate.name) is not None)
         return bool(profile_files) and all(
             candidate.stat().st_size > 0 for candidate in profile_files)
     except OSError:
@@ -257,9 +256,7 @@ class TPUProfileReport:
     @property
     def has_raw_trace(self) -> bool:
         if self.config.runtime_mode == "pcie":
-            return any(
-                _is_valid_pcie_raw_trace_artifact(path)
-                for path in self.raw_trace_files)
+            return any(_is_valid_pcie_raw_trace_artifact(path) for path in self.raw_trace_files)
         return bool(self.raw_trace_files)
 
     @property
@@ -317,15 +314,16 @@ def _spawn_guarded_profile_process(command: Sequence[str], *, cwd: Path,
     """
 
     if not sys.platform.startswith("linux"):
-        raise TPUProfilingError(
-            "Safe TPU instruction profiling requires Linux PR_SET_PDEATHSIG; "
-            "refusing to create a detached profile worker on this platform.")
+        raise TPUProfilingError("Safe TPU instruction profiling requires Linux PR_SET_PDEATHSIG; "
+                                "refusing to create a detached profile worker on this platform.")
     if not _PROFILE_SUPERVISOR_PATH.is_file():
-        raise TPUProfilingError(
-            f"TPU profile supervisor is missing: {_PROFILE_SUPERVISOR_PATH}")
+        raise TPUProfilingError(f"TPU profile supervisor is missing: {_PROFILE_SUPERVISOR_PATH}")
     return subprocess.Popen(
-        [sys.executable, str(_PROFILE_SUPERVISOR_PATH), "--parent-pid",
-         str(os.getpid()), "--", *command],
+        [
+            sys.executable,
+            str(_PROFILE_SUPERVISOR_PATH), "--parent-pid",
+            str(os.getpid()), "--", *command
+        ],
         cwd=cwd,
         env=environment,
         stdout=subprocess.PIPE,
@@ -339,40 +337,115 @@ def _spawn_guarded_profile_process(command: Sequence[str], *, cwd: Path,
 _PROCESS_TERMINATION_GRACE_S = 5.0
 _PROCESS_KILL_GRACE_S = 5.0
 _PROCESS_PIPE_DRAIN_S = 5.0
+_PROCESS_GROUP_POLL_S = 0.02
 
 
-def _kill_process_group(process: subprocess.Popen) -> bool:
+def _process_group_exists(process_group: int) -> bool:
+    """Return whether a saved guarded process group still has members.
+
+    The supervisor is the group leader, but it can exit before a background
+    compiler/decoder child.  Consequently this probe must use the saved PGID
+    rather than the leader's ``poll()`` state.
+    """
+
+    try:
+        os.killpg(process_group, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # The private group should be owned by this process.  If that invariant
+        # is ever broken, treating the group as live is safer than declaring a
+        # TPU worker tree clean.
+        return True
+
+
+def _wait_for_process_group_exit(process: subprocess.Popen, process_group: int,
+                                 timeout_s: float) -> bool:
+    """Poll both the saved PGID and direct supervisor within one hard bound."""
+
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while True:
+        leader_reaped = process.poll() is not None
+        if not _process_group_exists(process_group):
+            return leader_reaped or process.poll() is not None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(_PROCESS_GROUP_POLL_S, remaining))
+
+
+def _kill_process_group(process: subprocess.Popen, *, process_group: Optional[int] = None) -> bool:
     """Stop a guarded worker and all of its children without touching its parent shell.
 
     The direct process is the lightweight supervisor.  ``SIGTERM`` makes its
     handler kill the private group that contains the command and ordinary
     descendants before exiting.  The SIGKILL fallback only covers a broken
     supervisor and is intentionally not presented as a substitute for that
-    guarded path.
+    guarded path.  Group cleanup is deliberately independent of the direct
+    supervisor's state: a successful command may have backgrounded a child and
+    allowed the group leader to exit first.
     """
 
-    if process.poll() is not None:
+    saved_process_group = process.pid if process_group is None else process_group
+    if _process_group_exists(saved_process_group):
+        try:
+            os.killpg(saved_process_group, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            # Retain the bounded escalation path.  Its final group probe makes
+            # an unclean result visible to the caller without masking the
+            # original timeout/cancellation exception.
+            pass
+    if _wait_for_process_group_exit(process, saved_process_group, _PROCESS_TERMINATION_GRACE_S):
         return True
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=_PROCESS_TERMINATION_GRACE_S)
-        return True
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=_PROCESS_KILL_GRACE_S)
-        return True
-    except subprocess.TimeoutExpired:
-        # A process stuck in uninterruptible kernel sleep cannot be reaped by
-        # user space.  Never turn the TPU watchdog into another unbounded wait.
-        return False
+    if _process_group_exists(saved_process_group):
+        try:
+            os.killpg(saved_process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+    # A process stuck in uninterruptible kernel sleep cannot be reaped by user
+    # space.  Never turn the TPU watchdog into another unbounded wait.
+    return _wait_for_process_group_exit(process, saved_process_group, _PROCESS_KILL_GRACE_S)
+
+
+@dataclass(frozen=True)
+class _GuardedProcessOutput:
+    stdout: str
+    stderr: str
+    left_live_descendant: bool
+    cleanup_complete: bool
+
+
+def _communicate_guarded_process(process: subprocess.Popen, *,
+                                 timeout: float) -> _GuardedProcessOutput:
+    """Collect one guarded command and reject a successful leader-only exit.
+
+    ``Popen.communicate`` waits only for the direct supervisor.  A descendant
+    that redirected its stdio can survive that wait unnoticed, so always probe
+    the PGID captured before communicate and clean it within the same bounded
+    TERM/KILL policy used by timeout and cancellation paths.
+    """
+
+    process_group = process.pid
+    stdout, stderr = process.communicate(timeout=timeout)
+    left_live_descendant = _process_group_exists(process_group)
+    cleanup_complete = True
+    if left_live_descendant:
+        cleanup_complete = _kill_process_group(process, process_group=process_group)
+        if not cleanup_complete:
+            diagnostic = ("TileLang TPU watchdog: a completed supervisor left a live "
+                          "descendant and its process group could not be fully reaped")
+            stderr = f"{stderr}\n{diagnostic}\n" if stderr else diagnostic + "\n"
+    return _GuardedProcessOutput(
+        stdout=stdout,
+        stderr=stderr,
+        left_live_descendant=left_live_descendant,
+        cleanup_complete=cleanup_complete,
+    )
 
 
 def _timeout_output_as_text(value: Any) -> str:
@@ -393,26 +466,23 @@ def _terminate_and_collect(process: subprocess.Popen) -> Tuple[str, str]:
     case.
     """
 
-    reaped = _kill_process_group(process)
+    process_group = process.pid
+    reaped = _kill_process_group(process, process_group=process_group)
     try:
         stdout, stderr = process.communicate(timeout=_PROCESS_PIPE_DRAIN_S)
         return stdout, stderr
     except subprocess.TimeoutExpired as exc:
         stdout = _timeout_output_as_text(exc.output)
         stderr = _timeout_output_as_text(exc.stderr)
-        diagnostic = (
-            "TileLang TPU watchdog: process group did not close its output "
-            f"pipes within {_PROCESS_PIPE_DRAIN_S:g}s after termination"
-        )
+        diagnostic = ("TileLang TPU watchdog: process group did not close its output "
+                      f"pipes within {_PROCESS_PIPE_DRAIN_S:g}s after termination")
         if not reaped:
             diagnostic += "; the supervisor process also could not be reaped"
         stderr = f"{stderr}\n{diagnostic}\n" if stderr else diagnostic + "\n"
         for pipe in (process.stdout, process.stderr):
             if pipe is not None:
-                try:
+                with suppress(OSError):
                     pipe.close()
-                except OSError:
-                    pass
         return stdout, stderr
 
 
@@ -460,8 +530,7 @@ def _exclusive_perfai_workspace(perfai_root: Path, deadline: float):
                 raise
             if time.monotonic() >= deadline:
                 lock_socket.close()
-                raise _PerfAIWorkspaceBusy(
-                    f"PerfAI workspace is busy: {perfai_root}")
+                raise _PerfAIWorkspaceBusy(f"PerfAI workspace is busy: {perfai_root}") from None
             time.sleep(0.05)
     try:
         yield
@@ -469,8 +538,7 @@ def _exclusive_perfai_workspace(perfai_root: Path, deadline: float):
         lock_socket.close()
 
 
-def _find_perfai_root(config: TPUProfilingConfig,
-                      environment: Mapping[str, str]) -> Optional[Path]:
+def _find_perfai_root(config: TPUProfilingConfig, environment: Mapping[str, str]) -> Optional[Path]:
     candidates = []
     if config.perfai_root is not None:
         candidates.append(Path(config.perfai_root))
@@ -562,8 +630,7 @@ def _extract_js_array(text: str, variable: str) -> Sequence[Any]:
         try:
             value = ast.literal_eval(python_source)
         except (SyntaxError, ValueError) as exc:
-            raise ValueError(
-                f"Could not parse PerfAI {variable!r} array as data.") from exc
+            raise ValueError(f"Could not parse PerfAI {variable!r} array as data.") from exc
     if not isinstance(value, list):
         raise ValueError(f"PerfAI {variable!r} is not an array.")
     return value
@@ -610,7 +677,8 @@ def _string_field(fields: Mapping[str, Any], *names: str) -> Optional[str]:
     return None
 
 
-def _timing_identity(fields: Mapping[str, Any]) -> Tuple[Optional[int], Optional[int], Optional[str]]:
+def _timing_identity(
+        fields: Mapping[str, Any]) -> Tuple[Optional[int], Optional[int], Optional[str]]:
     """Best-effort identity extraction without assuming one PerfAI schema.
 
     PerfAI releases have changed the extra columns in ``time_data``.  Preserve
@@ -619,16 +687,14 @@ def _timing_identity(fields: Mapping[str, Any]) -> Tuple[Optional[int], Optional
     """
 
     core_id = _integer_field(fields, "core", "core_id", "coreid", "core_idx")
-    command_id = _integer_field(
-        fields, "cmd_id", "command_id", "bd_id", "gdma_id", "sdma_id")
-    opcode = _string_field(
-        fields, "opcode", "op_name", "func_name", "instruction")
+    command_id = _integer_field(fields, "cmd_id", "command_id", "bd_id", "gdma_id", "sdma_id")
+    opcode = _string_field(fields, "opcode", "op_name", "func_name", "instruction")
     # PPL's historical PerfWeb schema stores ``bd_id=...`` / ``gdma_id=...``
     # in ``func_type`` rather than a separate command-id column. Preserve that
     # version-specific convention as a best-effort projection.
-    for text in (_string_field(fields, "func_type"),
-                 _string_field(fields, "type"),
-                 _string_field(fields, "info")):
+    for text in (_string_field(fields,
+                               "func_type"), _string_field(fields,
+                                                           "type"), _string_field(fields, "info")):
         if text is None:
             continue
         if command_id is None:
@@ -645,8 +711,8 @@ def _timing_identity(fields: Mapping[str, Any]) -> Tuple[Optional[int], Optional
     return core_id, command_id, opcode
 
 
-def parse_cmodel_raw_instruction_dumps(raw_trace_files: Sequence[PathLike]
-                                      ) -> Tuple[TPURawInstruction, ...]:
+def parse_cmodel_raw_instruction_dumps(
+        raw_trace_files: Sequence[PathLike]) -> Tuple[TPURawInstruction, ...]:
     """Parse CModel text dumps into command metadata without inventing latency.
 
     The emulator's ``*.txt`` sidecars describe engine, core, dependency, and
@@ -714,10 +780,7 @@ def parse_perfai_timeline_events(profile_data_path: PathLike) -> Tuple[TPUInstru
         duration: Optional[float] = None
         if isinstance(begin, (int, float)) and isinstance(end, (int, float)):
             duration = float(end - begin)
-        fields = {
-            str(headers[index]): row[index]
-            for index in range(min(len(headers), len(row)))
-        }
+        fields = {str(headers[index]): row[index] for index in range(min(len(headers), len(row)))}
         core_id, command_id, opcode = _timing_identity(fields)
         timings.append(
             TPUInstructionTiming(
@@ -734,7 +797,8 @@ def parse_perfai_timeline_events(profile_data_path: PathLike) -> Tuple[TPUInstru
     return tuple(timings)
 
 
-def parse_perfai_instruction_timings(profile_data_path: PathLike) -> Tuple[TPUInstructionTiming, ...]:
+def parse_perfai_instruction_timings(
+        profile_data_path: PathLike) -> Tuple[TPUInstructionTiming, ...]:
     """Return only recognized TPU command-engine rows from a PerfAI timeline.
 
     This deliberately filters PPL's host/subnet timeline rows.  Unknown
@@ -772,21 +836,21 @@ def parse_pcie_decoded_instruction_timings(
                 not isinstance(end, (int, float)) or \
                 not isinstance(fields, dict):
             raise ValueError(f"PCIe profile event {index} has invalid fields: {path}")
-        events.append(TPUInstructionTiming(
-            engine=engine,
-            begin=begin,
-            end=end,
-            duration=float(end - begin),
-            unit=unit,
-            core_id=raw_event.get("core_id"),
-            command_id=raw_event.get("command_id"),
-            opcode=raw_event.get("opcode"),
-            fields=fields,
-        ))
+        events.append(
+            TPUInstructionTiming(
+                engine=engine,
+                begin=begin,
+                end=end,
+                duration=float(end - begin),
+                unit=unit,
+                core_id=raw_event.get("core_id"),
+                command_id=raw_event.get("command_id"),
+                opcode=raw_event.get("opcode"),
+                fields=fields,
+            ))
         error = _pcie_instruction_timing_error(events[-1])
         if error is not None:
-            raise ValueError(
-                f"PCIe profile event {index} is invalid: {error}: {path}")
+            raise ValueError(f"PCIe profile event {index} is invalid: {error}: {path}")
     return tuple(events)
 
 
@@ -809,19 +873,17 @@ class TPUInstructionProfiler:
         if ppl_root is None:
             return
         if not ppl_root.strip():
-            raise TPUProfilingError(
-                "PPL_PROJECT_ROOT must not be empty for a TPU profile worker.")
+            raise TPUProfilingError("PPL_PROJECT_ROOT must not be empty for a TPU profile worker.")
         try:
             layout = resolve_ppl_layout(ppl_root, self.config.chip)
-            layout.require_profiling(
-                self.config.runtime_mode, environment=environment)
+            layout.require_profiling(self.config.runtime_mode, environment=environment)
         except (OSError, ValueError) as exc:
-            raise TPUProfilingError(
-                "PPL 1.7 dependency preflight failed for "
-                f"{self.config.runtime_mode} profiling: {exc}") from exc
+            raise TPUProfilingError("PPL 1.7 dependency preflight failed for "
+                                    f"{self.config.runtime_mode} profiling: {exc}") from exc
 
-    def pcie_profile_environment_overrides(
-            self, environment: Optional[Mapping[str, str]] = None) -> Mapping[str, str]:
+    def pcie_profile_environment_overrides(self,
+                                           environment: Optional[Mapping[str, str]] = None
+                                          ) -> Mapping[str, str]:
         """Return PPL's recorder overrides after PCIe safety preflight.
 
         The returned mapping is intentionally not a complete environment and
@@ -833,22 +895,18 @@ class TPUInstructionProfiler:
         """
 
         if self.config.runtime_mode != "pcie":
-            raise ValueError(
-                "pcie_profile_environment_overrides requires runtime_mode='pcie'.")
+            raise ValueError("pcie_profile_environment_overrides requires runtime_mode='pcie'.")
         resolved = _copy_environment(environment)
         if resolved.get("TILELANG_TPU_ALLOW_PCIE_LOAD") != "1":
-            raise TPUProfilingError(
-                "PCIe profiling requires TILELANG_TPU_ALLOW_PCIE_LOAD=1; "
-                "this helper does not initialize a board.")
+            raise TPUProfilingError("PCIe profiling requires TILELANG_TPU_ALLOW_PCIE_LOAD=1; "
+                                    "this helper does not initialize a board.")
         if resolved.get("TILELANG_TPU_ALLOW_PCIE_PROFILE") != "1":
-            raise TPUProfilingError(
-                "PCIe profiling requires the separate acknowledgement "
-                "TILELANG_TPU_ALLOW_PCIE_PROFILE=1.")
+            raise TPUProfilingError("PCIe profiling requires the separate acknowledgement "
+                                    "TILELANG_TPU_ALLOW_PCIE_PROFILE=1.")
         device_id = resolved.get("TILELANG_TPU_DEVICE_ID", "")
         if re.fullmatch(r"[0-9]+", device_id) is None or int(device_id) > 2**31 - 1:
-            raise TPUProfilingError(
-                "PCIe profiling requires a non-negative integer "
-                "TILELANG_TPU_DEVICE_ID.")
+            raise TPUProfilingError("PCIe profiling requires a non-negative integer "
+                                    "TILELANG_TPU_DEVICE_ID.")
         return {
             "BMLIB_ENABLE_ALL_PROFILE": "1",
             "PROFILE_RECORD_SIZE": str(self.config.profile_record_size),
@@ -872,8 +930,7 @@ class TPUInstructionProfiler:
         """
 
         if self.config.runtime_mode != "pcie":
-            raise TPUProfilingError(
-                "run_pcie only supports runtime_mode='pcie'.")
+            raise TPUProfilingError("run_pcie only supports runtime_mode='pcie'.")
         if not command:
             raise ValueError("TPU profiling command must not be empty.")
         normalized_command = tuple(os.fspath(item) for item in command)
@@ -901,34 +958,45 @@ class TPUInstructionProfiler:
             )
         except (OSError, subprocess.SubprocessError, TPUProfilingError) as exc:
             stdout_path, stderr_path = _write_worker_logs(output_dir, "", str(exc))
-            raise TPUProfilingCommandError(
-                f"Could not start PCIe TPU profile worker. Logs: "
-                f"{stdout_path}, {stderr_path}") from exc
+            raise TPUProfilingCommandError(f"Could not start PCIe TPU profile worker. Logs: "
+                                           f"{stdout_path}, {stderr_path}") from exc
         try:
             remaining = _remaining_timeout(deadline)
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(normalized_command, 0)
-            stdout, stderr = process.communicate(timeout=remaining)
+            guarded_output = _communicate_guarded_process(process, timeout=remaining)
+            stdout, stderr = guarded_output.stdout, guarded_output.stderr
         except subprocess.TimeoutExpired:
             stdout, stderr = _terminate_and_collect(process)
             stdout_path, stderr_path = _write_worker_logs(output_dir, stdout, stderr)
             raise TPUProfilingTimeoutError(
                 f"PCIe TPU profile session exceeded its total {self.config.timeout_s}s "
                 f"deadline and its worker process group was terminated. Logs: "
-                f"{stdout_path}, {stderr_path}")
+                f"{stdout_path}, {stderr_path}") from None
         except BaseException:
-            _kill_process_group(process)
+            # Preserve cancellation semantics while applying the same bounded
+            # process-tree cleanup and pipe drain as an explicit timeout.
+            with suppress(Exception):
+                _terminate_and_collect(process)
             raise
 
         stdout_path, stderr_path = _write_worker_logs(output_dir, stdout, stderr)
+        if guarded_output.left_live_descendant:
+            cleanup = ("was terminated"
+                       if guarded_output.cleanup_complete else "could not be fully reaped")
+            raise TPUProfilingCommandError(
+                "PCIe TPU profile worker exited while leaving a live descendant; "
+                f"its supervised process group {cleanup}. Logs: "
+                f"{stdout_path}, {stderr_path}")
         if process.returncode != 0:
             raise TPUProfilingCommandError(
                 f"PCIe TPU profile worker exited with status {process.returncode}. "
                 f"Logs: {stdout_path}, {stderr_path}")
 
-        raw_files = tuple(sorted(
-            path for path in output_dir.glob("cdm_profile_data_dev*")
-            if _is_valid_pcie_raw_trace_artifact(path)))
+        raw_files = tuple(
+            sorted(
+                path for path in output_dir.glob("cdm_profile_data_dev*")
+                if _is_valid_pcie_raw_trace_artifact(path)))
         parser_status = "not-requested"
         parser_message: Optional[str] = None
         report_paths: Tuple[Path, ...] = ()
@@ -939,23 +1007,21 @@ class TPUInstructionProfiler:
         if self.config.postprocess:
             if not raw_files:
                 parser_status = "no-raw-trace"
-                parser_message = (
-                    "The PCIe worker completed but produced no "
-                    "cdm_profile_data_dev* artifact; the decoder was not invoked.")
+                parser_message = ("The PCIe worker completed but produced no "
+                                  "cdm_profile_data_dev* artifact; the decoder was not invoked.")
             elif not _PCIE_PROFILE_DECODER_PATH.is_file():
                 parser_status = "unavailable"
-                parser_message = (
-                    "TileLang's offline PCIe profile decoder helper is missing; "
-                    "raw recorder artifacts were kept.")
+                parser_message = ("TileLang's offline PCIe profile decoder helper is missing; "
+                                  "raw recorder artifacts were kept.")
             else:
                 decoder: Optional[subprocess.Popen] = None
+                decoder_guarded_output: Optional[_GuardedProcessOutput] = None
                 try:
                     remaining = _remaining_timeout(deadline)
                     if remaining <= 0:
                         parser_status = "deadline-exhausted"
-                        parser_message = (
-                            "The PCIe worker used the total profile deadline; "
-                            "offline decoding was not started.")
+                        parser_message = ("The PCIe worker used the total profile deadline; "
+                                          "offline decoding was not started.")
                     else:
                         decoder_env = dict(worker_env)
                         # Decoding is offline and must not inherit permission to
@@ -965,78 +1031,84 @@ class TPUInstructionProfiler:
                         decoder_env.pop("TILELANG_TPU_DEVICE_ID", None)
                         decoder_env.pop("BMLIB_ENABLE_ALL_PROFILE", None)
                         decoder = _spawn_guarded_profile_process(
-                            [sys.executable, str(_PCIE_PROFILE_DECODER_PATH),
-                             "--profile-dir", str(output_dir),
-                             "--arch", _pcie_profile_arch(self.config)],
+                            [
+                                sys.executable,
+                                str(_PCIE_PROFILE_DECODER_PATH), "--profile-dir",
+                                str(output_dir), "--arch",
+                                _pcie_profile_arch(self.config)
+                            ],
                             cwd=output_dir,
                             environment=decoder_env,
                         )
-                        decoder_stdout, decoder_stderr = decoder.communicate(
-                            timeout=_remaining_timeout(deadline))
+                        decoder_guarded_output = _communicate_guarded_process(
+                            decoder, timeout=_remaining_timeout(deadline))
+                        decoder_stdout = decoder_guarded_output.stdout
+                        decoder_stderr = decoder_guarded_output.stderr
                 except subprocess.TimeoutExpired:
                     assert decoder is not None
                     decoder_stdout, decoder_stderr = _terminate_and_collect(decoder)
-                    parser_stdout, parser_stderr = _write_parser_logs(
-                        output_dir, decoder_stdout, decoder_stderr)
+                    parser_stdout, parser_stderr = _write_parser_logs(output_dir, decoder_stdout,
+                                                                      decoder_stderr)
                     parser_status = "timed-out"
-                    parser_message = (
-                        "The offline PCIe decoder exceeded the remaining total "
-                        f"profile deadline. Logs: {parser_stdout}, {parser_stderr}")
+                    parser_message = ("The offline PCIe decoder exceeded the remaining total "
+                                      f"profile deadline. Logs: {parser_stdout}, {parser_stderr}")
                     decoder = None
                 except (OSError, subprocess.SubprocessError, TPUProfilingError) as exc:
-                    parser_stdout, parser_stderr = _write_parser_logs(
-                        output_dir, "", str(exc))
+                    parser_stdout, parser_stderr = _write_parser_logs(output_dir, "", str(exc))
                     parser_status = "failed"
-                    parser_message = (
-                        f"Could not start the offline PCIe decoder. Logs: "
-                        f"{parser_stdout}, {parser_stderr}")
+                    parser_message = (f"Could not start the offline PCIe decoder. Logs: "
+                                      f"{parser_stdout}, {parser_stderr}")
                     decoder = None
                 except BaseException:
                     if decoder is not None:
-                        _kill_process_group(decoder)
+                        with suppress(Exception):
+                            _terminate_and_collect(decoder)
                     raise
 
                 if decoder is not None:
-                    parser_stdout, parser_stderr = _write_parser_logs(
-                        output_dir, decoder_stdout, decoder_stderr)
-                    if decoder.returncode == 3:
+                    parser_stdout, parser_stderr = _write_parser_logs(output_dir, decoder_stdout,
+                                                                      decoder_stderr)
+                    if (decoder_guarded_output is not None and
+                            decoder_guarded_output.left_live_descendant):
+                        cleanup = ("was terminated" if decoder_guarded_output.cleanup_complete else
+                                   "could not be fully reaped")
+                        parser_status = "failed"
+                        parser_message = ("The offline PCIe decoder exited while leaving a live "
+                                          f"descendant; its supervised process group {cleanup}. "
+                                          f"Logs: {parser_stdout}, {parser_stderr}")
+                    elif decoder.returncode == 3:
                         parser_status = "unavailable"
-                        parser_message = (
-                            "bigTpuProfile/PerfAI is not installed; no package was "
-                            "installed automatically and raw PCIe traces were kept. "
-                            f"Logs: {parser_stdout}, {parser_stderr}")
+                        parser_message = ("bigTpuProfile/PerfAI is not installed; no package was "
+                                          "installed automatically and raw PCIe traces were kept. "
+                                          f"Logs: {parser_stdout}, {parser_stderr}")
                     elif decoder.returncode != 0:
                         parser_status = "failed"
                         parser_message = (
                             f"The offline PCIe decoder exited with status "
                             f"{decoder.returncode}. Logs: {parser_stdout}, {parser_stderr}")
                     else:
-                        decoded_report_paths = tuple(sorted(
-                            output_dir.rglob(_PCIE_DECODED_REPORT_NAME)))
+                        decoded_report_paths = tuple(
+                            sorted(output_dir.rglob(_PCIE_DECODED_REPORT_NAME)))
                         if decoded_report_paths:
                             try:
                                 timings = tuple(
-                                    event
-                                    for path in decoded_report_paths
+                                    event for path in decoded_report_paths
                                     for event in parse_pcie_decoded_instruction_timings(path))
                             except (json.JSONDecodeError, ValueError) as exc:
                                 parser_status = "invalid-report"
                                 parser_message = str(exc)
                             else:
                                 timeline_events = timings
-                                parser_status = (
-                                    "ready" if timings else
-                                    "no-device-command-events")
+                                parser_status = ("ready" if timings else "no-device-command-events")
                                 if not timings:
                                     parser_message = (
                                         "bigTpuProfile decoded the PCIe recorder "
                                         "output but returned no device-command events.")
                         else:
                             parser_status = "missing-report"
-                            parser_message = (
-                                "The offline PCIe decoder completed without a "
-                                "canonical TileLang JSON artifact. Logs: "
-                                f"{parser_stdout}, {parser_stderr}")
+                            parser_message = ("The offline PCIe decoder completed without a "
+                                              "canonical TileLang JSON artifact. Logs: "
+                                              f"{parser_stdout}, {parser_stderr}")
 
         return TPUProfileReport(
             config=self.config,
@@ -1050,8 +1122,7 @@ class TPUInstructionProfiler:
             parser_message=parser_message,
             perfai_report_path=report_paths[0] if report_paths else None,
             perfai_report_paths=report_paths,
-            decoded_report_path=(
-                decoded_report_paths[0] if decoded_report_paths else None),
+            decoded_report_path=(decoded_report_paths[0] if decoded_report_paths else None),
             decoded_report_paths=decoded_report_paths,
             timeline_events=timeline_events,
             instruction_timings=timings,
@@ -1101,8 +1172,7 @@ class TPUInstructionProfiler:
         # PPL's CModel driver sets this for SG2260E.  Make the topology
         # explicit for both supported chips so a worker does not inherit a
         # previous process's emulator-core setting.
-        worker_env["TPU_RT_CORE_NUM"] = str(
-            self.config.target_spec.chip_spec.physical_core_count)
+        worker_env["TPU_RT_CORE_NUM"] = str(self.config.target_spec.chip_spec.physical_core_count)
         # PPL's CModel flow uses FILE_DUMP_CMD, not BMLIB's PCIe recorder.
         worker_env.pop("BMLIB_ENABLE_ALL_PROFILE", None)
         # Never inherit a previously acknowledged board session into a CModel
@@ -1120,36 +1190,45 @@ class TPUInstructionProfiler:
             )
         except (OSError, subprocess.SubprocessError, TPUProfilingError) as exc:
             stdout_path, stderr_path = _write_worker_logs(output_dir, "", str(exc))
-            raise TPUProfilingCommandError(
-                f"Could not start CModel TPU profile worker. Logs: "
-                f"{stdout_path}, {stderr_path}") from exc
+            raise TPUProfilingCommandError(f"Could not start CModel TPU profile worker. Logs: "
+                                           f"{stdout_path}, {stderr_path}") from exc
         try:
             remaining = _remaining_timeout(deadline)
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(normalized_command, 0)
-            stdout, stderr = process.communicate(timeout=remaining)
+            guarded_output = _communicate_guarded_process(process, timeout=remaining)
+            stdout, stderr = guarded_output.stdout, guarded_output.stderr
         except subprocess.TimeoutExpired:
             stdout, stderr = _terminate_and_collect(process)
             stdout_path, stderr_path = _write_worker_logs(output_dir, stdout, stderr)
             raise TPUProfilingTimeoutError(
                 f"CModel TPU profile session exceeded its total {self.config.timeout_s}s "
                 f"deadline and its worker process group was terminated. Logs: "
-                f"{stdout_path}, {stderr_path}")
+                f"{stdout_path}, {stderr_path}") from None
         except BaseException:
             # KeyboardInterrupt, test-runner cancellation, and similar paths
             # must not bypass the same process-tree cleanup as a timeout.
-            _kill_process_group(process)
+            with suppress(Exception):
+                _terminate_and_collect(process)
             raise
 
         stdout_path, stderr_path = _write_worker_logs(output_dir, stdout, stderr)
+        if guarded_output.left_live_descendant:
+            cleanup = ("was terminated"
+                       if guarded_output.cleanup_complete else "could not be fully reaped")
+            raise TPUProfilingCommandError(
+                "CModel TPU profile worker exited while leaving a live descendant; "
+                f"its supervised process group {cleanup}. Logs: "
+                f"{stdout_path}, {stderr_path}")
         if process.returncode != 0:
             raise TPUProfilingCommandError(
                 f"CModel TPU profile worker exited with status {process.returncode}. "
                 f"Logs: {stdout_path}, {stderr_path}")
 
-        raw_files = tuple(sorted(
-            path for path in output_dir.glob(f"{self.config.label}-*")
-            if _RAW_TRACE_ARTIFACT_RE.fullmatch(path.name) is not None))
+        raw_files = tuple(
+            sorted(
+                path for path in output_dir.glob(f"{self.config.label}-*")
+                if _RAW_TRACE_ARTIFACT_RE.fullmatch(path.name) is not None))
         raw_instructions = parse_cmodel_raw_instruction_dumps(raw_files)
         parser_status = "not-requested"
         parser_message: Optional[str] = None
@@ -1173,6 +1252,7 @@ class TPUInstructionProfiler:
             else:
                 runner = perfai_root / "AutoRunner.sh"
                 parser: Optional[subprocess.Popen] = None
+                parser_guarded_output: Optional[_GuardedProcessOutput] = None
                 parser_stdout: Optional[Path] = None
                 parser_stderr: Optional[Path] = None
                 remaining = _remaining_timeout(deadline)
@@ -1200,8 +1280,12 @@ class TPUInstructionProfiler:
                                 # child accidentally write into the parsing directory.
                                 parser_env.pop("FILE_DUMP_CMD", None)
                                 parser = _spawn_guarded_profile_process(
-                                    ["bash", str(runner), "-d", str(output_dir), "-e",
-                                     _perfai_chip_name(self.config)],
+                                    [
+                                        "bash",
+                                        str(runner), "-d",
+                                        str(output_dir), "-e",
+                                        _perfai_chip_name(self.config)
+                                    ],
                                     cwd=perfai_root,
                                     environment=parser_env,
                                 )
@@ -1219,8 +1303,13 @@ class TPUInstructionProfiler:
                                     parser = None
                                 else:
                                     try:
-                                        parser_stdout_text, parser_stderr_text = parser.communicate(
-                                            timeout=remaining)
+                                        parser_guarded_output = \
+                                            _communicate_guarded_process(
+                                                parser, timeout=remaining)
+                                        parser_stdout_text = \
+                                            parser_guarded_output.stdout
+                                        parser_stderr_text = \
+                                            parser_guarded_output.stderr
                                     except subprocess.TimeoutExpired:
                                         parser_stdout_text, parser_stderr_text = \
                                             _terminate_and_collect(parser)
@@ -1240,28 +1329,36 @@ class TPUInstructionProfiler:
                     except (OSError, subprocess.SubprocessError, TPUProfilingError) as exc:
                         parser_stdout, parser_stderr = _write_parser_logs(output_dir, "", str(exc))
                         parser_status = "failed"
-                        parser_message = (
-                            f"Could not start PerfAI AutoRunner.sh. Logs: "
-                            f"{parser_stdout}, {parser_stderr}")
+                        parser_message = (f"Could not start PerfAI AutoRunner.sh. Logs: "
+                                          f"{parser_stdout}, {parser_stderr}")
                         parser = None
                     except BaseException:
                         # Preserve cancellation semantics, but never leave an
                         # AutoRunner process tree behind when pytest is stopped.
                         if parser is not None:
-                            _kill_process_group(parser)
+                            with suppress(Exception):
+                                _terminate_and_collect(parser)
                         raise
                 if parser is not None:
-                    parser_stdout, parser_stderr = _write_parser_logs(
-                        output_dir, parser_stdout_text, parser_stderr_text)
-                if parser is not None and parser.returncode != 0:
+                    parser_stdout, parser_stderr = _write_parser_logs(output_dir,
+                                                                      parser_stdout_text,
+                                                                      parser_stderr_text)
+                if (parser is not None and parser_guarded_output is not None and
+                        parser_guarded_output.left_live_descendant):
+                    cleanup = ("was terminated" if parser_guarded_output.cleanup_complete else
+                               "could not be fully reaped")
+                    parser_status = "failed"
+                    parser_message = ("PerfAI AutoRunner.sh exited while leaving a live "
+                                      f"descendant; its supervised process group {cleanup}. "
+                                      f"Logs: {parser_stdout}, {parser_stderr}")
+                elif parser is not None and parser.returncode != 0:
                     parser_status = "failed"
                     parser_message = (
                         f"PerfAI AutoRunner.sh exited with status {parser.returncode}. "
                         f"Logs: {parser_stdout}, {parser_stderr}")
                 elif parser is not None:
                     candidate = (
-                        output_dir / "result_profiling" / "output" / "PerfWeb" /
-                        "profile_data.js")
+                        output_dir / "result_profiling" / "output" / "PerfWeb" / "profile_data.js")
                     if not candidate.is_file():
                         parser_status = "missing-report"
                         parser_message = (

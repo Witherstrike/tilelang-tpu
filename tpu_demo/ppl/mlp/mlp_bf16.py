@@ -2,21 +2,18 @@ import tilelang
 import tilelang.language as T
 import os
 
-
 T.copy = T.ppl_copy
 
 
-
 def deepseek_v3_mlp_bf16(
-    Block_bs: int,          # 批次维度分块大小
-    Block_h: int,           # 隐藏层维度分块大小
-    Block_i: int,           # 中间层维度分块大小
-    batch_seq: int,         # 输入序列长度 (batch_size * seq_len)
-    hidden_size: int,       # 隐藏层维度
-    intermediate_size: int, # 中间层维度
-    dtype: str = "bfloat16",
-    accum_dtype: str = "float32"
-):
+        Block_bs: int,  # 批次维度分块大小
+        Block_h: int,  # 隐藏层维度分块大小
+        Block_i: int,  # 中间层维度分块大小
+        batch_seq: int,  # 输入序列长度 (batch_size * seq_len)
+        hidden_size: int,  # 隐藏层维度
+        intermediate_size: int,  # 中间层维度
+        dtype: str = "bfloat16",
+        accum_dtype: str = "float32"):
     """
 
       - gate_gemm(bf16) -> gate_out_bf16 -> copy-> gate_out_fp32 -> SiLU(fp32)
@@ -39,14 +36,14 @@ def deepseek_v3_mlp_bf16(
 
     @T.macro
     def SiLU(
-        gate_in: T.Tensor((Block_bs, Block_i), accum_dtype),
-        silu_out: T.Tensor((Block_bs, Block_i), accum_dtype),
-        x_neg: T.Tensor((Block_bs, Block_i), accum_dtype),
-        ones: T.Tensor((Block_bs, Block_i), accum_dtype),
-        x_neg_exp_1: T.Tensor((Block_bs, Block_i), accum_dtype),
-        work0: T.Tensor((Block_bs, Block_i), accum_dtype),
-        work1: T.Tensor((Block_bs, Block_i), accum_dtype),
-        coeff: T.Tensor((64, 32), accum_dtype),
+            gate_in: T.Tensor((Block_bs, Block_i), accum_dtype),
+            silu_out: T.Tensor((Block_bs, Block_i), accum_dtype),
+            x_neg: T.Tensor((Block_bs, Block_i), accum_dtype),
+            ones: T.Tensor((Block_bs, Block_i), accum_dtype),
+            x_neg_exp_1: T.Tensor((Block_bs, Block_i), accum_dtype),
+            work0: T.Tensor((Block_bs, Block_i), accum_dtype),
+            work1: T.Tensor((Block_bs, Block_i), accum_dtype),
+            coeff: T.Tensor((64, 32), accum_dtype),
     ):
         T.ppl_mul_C(x_neg, gate_in, T.float32(-1.0))
         T.ppl_exp(x_neg, work0, work1, coeff)
@@ -54,13 +51,10 @@ def deepseek_v3_mlp_bf16(
         T.ppl_div(silu_out, gate_in, x_neg_exp_1)
 
     @T.prim_func
-    def main(
-        output: T.Tensor(output_shape, dtype),
-        x: T.Tensor(x_shape, dtype),
-        gate_weight: T.Tensor(gate_weight_shape, dtype),
-        up_weight: T.Tensor(up_weight_shape, dtype),
-        down_weight: T.Tensor(down_weight_shape, dtype)
-    ):
+    def main(output: T.Tensor(output_shape, dtype), x: T.Tensor(x_shape, dtype),
+             gate_weight: T.Tensor(gate_weight_shape,
+                                   dtype), up_weight: T.Tensor(up_weight_shape, dtype),
+             down_weight: T.Tensor(down_weight_shape, dtype)):
         num_blocks_bs = T.ceildiv(batch_seq, Block_bs)
         num_blocks_h = T.ceildiv(hidden_size, Block_h)
         num_blocks_i = T.ceildiv(intermediate_size, Block_i)
@@ -100,27 +94,34 @@ def deepseek_v3_mlp_bf16(
             T.ppl_fill(ones, T.float32(1.0))
 
             # ---------- loads: global -> shared (bf16) ----------
-            T.copy(x[bx*Block_bs : (bx+1)*Block_bs, by*Block_h : (by+1)*Block_h], x_block_bf16)
-            T.copy(gate_weight[bz*Block_i : (bz+1)*Block_i, by*Block_h : (by+1)*Block_h], gate_weight_block_bf16)
-            T.copy(up_weight[bz*Block_i : (bz+1)*Block_i, by*Block_h : (by+1)*Block_h], up_weight_block_bf16)
-            T.copy(down_weight[by*Block_h : (by+1)*Block_h, bz*Block_i : (bz+1)*Block_i], down_weight_block_bf16)
+            T.copy(x[bx * Block_bs:(bx + 1) * Block_bs, by * Block_h:(by + 1) * Block_h],
+                   x_block_bf16)
+            T.copy(gate_weight[bz * Block_i:(bz + 1) * Block_i, by * Block_h:(by + 1) * Block_h],
+                   gate_weight_block_bf16)
+            T.copy(up_weight[bz * Block_i:(bz + 1) * Block_i, by * Block_h:(by + 1) * Block_h],
+                   up_weight_block_bf16)
+            T.copy(down_weight[by * Block_h:(by + 1) * Block_h, bz * Block_i:(bz + 1) * Block_i],
+                   down_weight_block_bf16)
 
             # ---------- GATE_PROJ: bf16 GEMM ----------
             T.ppl_gemm(
-                x_block_bf16, gate_weight_block_bf16, gate_out_block_bf16,
-                transpose_B=True, accumulate=False)
+                x_block_bf16,
+                gate_weight_block_bf16,
+                gate_out_block_bf16,
+                transpose_B=True,
+                accumulate=False)
             # 转 fp32 做 SiLU
             T.copy(gate_out_block_bf16, gate_out_block_fp32)
-            SiLU(
-                gate_out_block_fp32, silu_out_block_fp32,
-                x_neg, ones, x_neg_exp_1,
-                exp_work0, exp_work1, exp_coeff
-            )
+            SiLU(gate_out_block_fp32, silu_out_block_fp32, x_neg, ones, x_neg_exp_1, exp_work0,
+                 exp_work1, exp_coeff)
 
             # ---------- UP_PROJ: bf16 GEMM ----------
             T.ppl_gemm(
-                x_block_bf16, up_weight_block_bf16, up_out_block_bf16,
-                transpose_B=True, accumulate=False)
+                x_block_bf16,
+                up_weight_block_bf16,
+                up_out_block_bf16,
+                transpose_B=True,
+                accumulate=False)
             # 转 fp32 做逐元素乘
             T.copy(up_out_block_bf16, up_out_block_fp32)
 
@@ -134,13 +135,18 @@ def deepseek_v3_mlp_bf16(
             # gated_up_block_bf16: (Block_bs, Block_i)
             # down_weight_block_bf16: (Block_h, Block_i)  -> transpose_B=True to match (Block_i, Block_h)
             T.ppl_gemm(
-                gated_up_block_bf16, down_weight_block_bf16, down_out_block_bf16,
-                transpose_B=True, accumulate=False)
+                gated_up_block_bf16,
+                down_weight_block_bf16,
+                down_out_block_bf16,
+                transpose_B=True,
+                accumulate=False)
 
             # ---------- 写回 global output (bf16 -> global) ----------
-            T.copy(down_out_block_bf16, output[bx*Block_bs : (bx+1)*Block_bs, by*Block_h : (by+1)*Block_h])
+            T.copy(down_out_block_bf16, output[bx * Block_bs:(bx + 1) * Block_bs,
+                                               by * Block_h:(by + 1) * Block_h])
 
     return main
+
 
 # --- 使用示例 ---
 if __name__ == "__main__":
@@ -155,10 +161,14 @@ if __name__ == "__main__":
 
     # 生成修复后的 TileLang 函数
     func_fixed = deepseek_v3_mlp_bf16(
-        Block_bs=Block_bs, Block_h=Block_h, Block_i=Block_i,
-        batch_seq=batch_seq, hidden_size=hidden_size, intermediate_size=intermediate_size,
-        dtype=dtype, accum_dtype=accum_dtype
-    )
+        Block_bs=Block_bs,
+        Block_h=Block_h,
+        Block_i=Block_i,
+        batch_seq=batch_seq,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        dtype=dtype,
+        accum_dtype=accum_dtype)
 
     # 生成 IR 和 C Kernel
     mod_fixed = tilelang.lower(func_fixed, target='c')

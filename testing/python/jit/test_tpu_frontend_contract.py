@@ -16,12 +16,11 @@ def _target(chip="sg2260e"):
 
 @pytest.mark.parametrize(
     ("dtype", "dtype_token"),
-    (("float16", "DT_FP16"), ("bfloat16", "DT_BFP16"),
-     ("float32", "DT_FP32")),
+    (("float16", "DT_FP16"), ("bfloat16", "DT_BFP16"), ("float32", "DT_FP32")),
 )
 @pytest.mark.parametrize("chip", ("bm1690", "sg2260e"))
-def test_rsqrt_selects_the_generic_instruction_for_all_declared_dtypes(
-        chip, dtype, dtype_token):
+def test_rsqrt_selects_the_generic_instruction_for_all_declared_dtypes(chip, dtype, dtype_token):
+
     @T.prim_func
     def kernel(A: T.Tensor((1, 32), dtype), B: T.Tensor((1, 32), dtype)):
         with T.Kernel(1, is_cpu=True) as _:
@@ -31,8 +30,7 @@ def test_rsqrt_selects_the_generic_instruction_for_all_declared_dtypes(
             T.ppl_rsqrt(dst, src)
             T.ppl_copy(dst, B)
 
-    source = tilelang.lower(
-        kernel, target=_target(chip), runtime_mode="cmodel").kernel_source
+    source = tilelang.lower(kernel, target=_target(chip), runtime_mode="cmodel").kernel_source
     assert "tpu_bdc_fp_rsqrt(" in source
     assert f"{dtype_token});" in source
     assert "tpu_bdc_fp32_rsqrt(" not in source
@@ -44,6 +42,7 @@ def test_rsqrt_selects_the_generic_instruction_for_all_declared_dtypes(
 )
 @pytest.mark.parametrize("operation", ("add", "mul"))
 def test_fp8_scalar_uses_generic_scalar_instruction(operation, dtype, dtype_token):
+
     @T.prim_func
     def kernel(A: T.Tensor((1, 32), dtype), B: T.Tensor((1, 32), dtype)):
         with T.Kernel(1, is_cpu=True) as _:
@@ -56,8 +55,7 @@ def test_fp8_scalar_uses_generic_scalar_instruction(operation, dtype, dtype_toke
                 T.ppl_mul_C(dst, src, T.float32(0.75))
             T.ppl_copy(dst, B)
 
-    source = tilelang.lower(
-        kernel, target=_target(), runtime_mode="cmodel").kernel_source
+    source = tilelang.lower(kernel, target=_target(), runtime_mode="cmodel").kernel_source
     assert f"tpu_bdc_fp_{operation}_C(" in source
     assert "tpu_cast(" in source and f", {dtype_token}, DT_FP32," in source
     assert f"tpu_bdc_fp8_{operation}_C(" not in source
@@ -65,17 +63,16 @@ def test_fp8_scalar_uses_generic_scalar_instruction(operation, dtype, dtype_toke
 
 @pytest.mark.parametrize("dtype", ("e4m3_float8", "e5m2_float8"))
 def test_fp8_transposed_gemm_accumulation_reaches_public_frontend(dtype):
+
     @T.prim_func
     def kernel():
         with T.Kernel(1, is_cpu=True) as _:
             lhs = T.alloc_shared((16, 64), dtype)
             rhs = T.alloc_shared((16, 64), dtype)
             out = T.alloc_shared((16, 16), "float32")
-            T.ppl_gemm(
-                lhs, rhs, out, transpose_B=True, accumulate=True)
+            T.ppl_gemm(lhs, rhs, out, transpose_B=True, accumulate=True)
 
-    source = tilelang.lower(
-        kernel, target=_target(), runtime_mode="cmodel").kernel_source
+    source = tilelang.lower(kernel, target=_target(), runtime_mode="cmodel").kernel_source
     assert "tpu_bdc_fp8_mm_R_trans(" in source
     assert "true, false, false" in source
 
@@ -85,8 +82,7 @@ def test_fp8_transposed_gemm_accumulation_reaches_public_frontend(dtype):
     (("e4m3_float8", "DT_FP8E4M3"), ("e5m2_float8", "DT_FP8E5M2")),
 )
 @pytest.mark.parametrize("operation", ("rope", "gather"))
-def test_validated_fp8_backend_owned_ops_reach_codegen(
-        operation, dtype, dtype_token):
+def test_validated_fp8_backend_owned_ops_reach_codegen(operation, dtype, dtype_token):
     if operation == "rope":
 
         @T.prim_func
@@ -95,48 +91,51 @@ def test_validated_fp8_backend_owned_ops_reach_codegen(
                 source0 = T.alloc_shared((4, 32), dtype)
                 source1 = T.alloc_shared((4, 32), dtype)
                 output = T.alloc_shared((4, 32), dtype)
-                T.ppl_rope_add(
-                    output, source0, source1, source0, source1)
+                T.ppl_rope_add(output, source0, source1, source0, source1)
     else:
 
         @T.prim_func
-        def kernel(param: T.Tensor((17, 32), dtype),
-                   index: T.Tensor((7, 1), "uint32"),
+        def kernel(param: T.Tensor((17, 32), dtype), index: T.Tensor((7, 1), "uint32"),
                    output: T.Tensor((7, 32), dtype)):
             with T.Kernel(1, is_cpu=True) as _:
                 T.ppl_gather(output, param, index, 17)
 
-    source = tilelang.lower(
-        kernel, target=_target(), runtime_mode="cmodel").kernel_source
-    expected_instruction = (
-        "tpu_bdc_fp_add(" if operation == "rope" else
-        "tpu_gdma_h_gather_S2S(")
+    source = tilelang.lower(kernel, target=_target(), runtime_mode="cmodel").kernel_source
+    expected_instruction = ("tpu_bdc_fp_add(" if operation == "rope" else "tpu_gdma_h_gather_S2S(")
     assert expected_instruction in source
     assert dtype_token in source
 
 
-def test_transposed_gemm_accumulation_is_selected_by_programming_model():
+@pytest.mark.parametrize(
+    ("dtype", "dtype_token"),
+    (("float16", "DT_FP16"), ("bfloat16", "DT_BFP16")),
+)
+def test_transposed_gemm_accumulation_is_selected_by_programming_model(dtype, dtype_token):
+
     @T.prim_func
     def kernel():
         with T.Kernel(1, is_cpu=True) as _:
-            lhs = T.alloc_shared((16, 64), "float16")
-            rhs = T.alloc_shared((16, 64), "float16")
+            lhs = T.alloc_shared((16, 64), dtype)
+            rhs = T.alloc_shared((16, 64), dtype)
             out = T.alloc_shared((16, 16), "float32")
-            T.ppl_gemm(
-                lhs, rhs, out, transpose_B=True, accumulate=True)
+            T.ppl_gemm(lhs, rhs, out, transpose_B=True, accumulate=True)
 
     with pytest.raises(
-            tvm.error.TVMError,
-            match="no accumulating right-transpose GEMM instruction"):
-        tilelang.lower(
-            kernel, target=_target(), runtime_mode="cmodel")
+            tvm.error.TVMError, match="no accumulating right-transpose GEMM instruction"):
+        tilelang.lower(kernel, target=_target(), runtime_mode="cmodel")
 
     rv_source = tilelang.lower(
         kernel,
         target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
         runtime_mode="cmodel",
     ).kernel_source
-    assert "rvt_fmm2a_nt(10, 8, 9, 0, 0, 0);" in rv_source
+    assert rv_source.count("rvt_fmm2a_nt(10, 8, 9, 0, 0, 0);") == 1
+    assert (f"rvt_tr(8, PRECISION({dtype_token}), FP8TYPE({dtype_token})" in rv_source)
+    assert (f"rvt_tr(9, PRECISION({dtype_token}), FP8TYPE({dtype_token})" in rv_source)
+    assert "rvt_tr(10, PRECISION(DT_FP32), FP8TYPE(DT_FP32)" in rv_source
+    assert "rvt_fmm2_nt(" not in rv_source
+    assert "rvt_fmm2_nn(" not in rv_source
+    assert "rvt_fmm2a_nn(" not in rv_source
 
 
 def test_rv_native_gemm_cannot_bypass_fp32_accumulator_contract():
@@ -147,16 +146,12 @@ def test_rv_native_gemm_cannot_bypass_fp32_accumulator_contract():
             lhs = T.alloc_shared((16, 16), "float16")
             rhs = T.alloc_shared((16, 16), "float16")
             out = T.alloc_shared((16, 16), "float16")
-            T.evaluate(T.call_extern(
-                "handle", "tl.tpu.gemm",
-                buffer_to_tile_region(lhs, "r"),
-                buffer_to_tile_region(rhs, "r"),
-                buffer_to_tile_region(out, "rw"), T.bool(False), T.bool(False),
-                16, 16, 16, T.bool(True)))
+            T.evaluate(
+                T.call_extern("handle", "tl.tpu.gemm", buffer_to_tile_region(lhs, "r"),
+                              buffer_to_tile_region(rhs, "r"), buffer_to_tile_region(out, "rw"),
+                              T.bool(False), T.bool(False), 16, 16, 16, T.bool(True)))
 
-    with pytest.raises(
-            tvm.error.TVMError,
-            match="accumulating fmm2 requires an FP32 C tile"):
+    with pytest.raises(tvm.error.TVMError, match="accumulating fmm2 requires an FP32 C tile"):
         tilelang.lower(
             kernel,
             target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
@@ -242,11 +237,8 @@ def test_rope_cannot_lose_a_reshaped_view_contract():
             T.ppl_fill(odd0, T.float32(0))
             T.ppl_fill(odd1, T.float32(0))
             T.ppl_rope_add(
-                T.view(out, (3, 4)),
-                T.view(even0, (3, 4)),
-                T.view(even1, (3, 4)),
-                T.view(odd0, (3, 4)),
-                T.view(odd1, (3, 4)))
+                T.view(out, (3, 4)), T.view(even0, (3, 4)), T.view(even1, (3, 4)),
+                T.view(odd0, (3, 4)), T.view(odd1, (3, 4)))
 
     with pytest.raises(
             tvm.error.TVMError,
@@ -274,6 +266,7 @@ def test_direct_tensor_alias_cannot_bypass_logical_shape_validation():
 
 @pytest.mark.parametrize("alias_kind", ("view", "reshape", "tensor"))
 def test_descriptor_equivalent_local_alias_is_allowed(alias_kind):
+
     def make_alias(storage):
         if alias_kind == "view":
             return T.view(storage, (2, 6))
@@ -288,8 +281,7 @@ def test_descriptor_equivalent_local_alias_is_allowed(alias_kind):
             alias = make_alias(storage)
             T.ppl_fill(alias, T.float32(0))
 
-    source = tilelang.lower(
-        kernel, target=_target(), runtime_mode="cmodel").kernel_source
+    source = tilelang.lower(kernel, target=_target(), runtime_mode="cmodel").kernel_source
     assert source.count("tpu_bdc_set_C(") == 1
 
 
@@ -368,6 +360,7 @@ def test_unvalidated_fp8_operations_fail_at_frontend(operation):
 
 
 def test_nonzero_fp8_fill_fails_closed_in_codegen():
+
     @T.prim_func
     def kernel():
         with T.Kernel(1, is_cpu=True) as _:

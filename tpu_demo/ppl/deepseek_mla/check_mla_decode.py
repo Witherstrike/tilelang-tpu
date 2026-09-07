@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 
-
 # 定义文件路径和期望的形状
 batch = 4
 heads = 8
@@ -26,13 +25,13 @@ for name, (path, shape) in files_and_shapes.items():
     with open(path, "rb") as f:
         data = f.read()
 
-    tensor = torch.frombuffer(data, dtype=torch.float32) # 按数据类型读取为Tensor
+    tensor = torch.frombuffer(data, dtype=torch.float32)  # 按数据类型读取为Tensor
 
-    if tensor.numel() != torch.prod(torch.tensor(shape)): # 检查大小是否匹配
+    if tensor.numel() != torch.prod(torch.tensor(shape)):  # 检查大小是否匹配
         raise ValueError(f"{name} 的大小和期望的 {shape} 不匹配，"
                          f"实际元素数：{tensor.numel()}，期望元素数：{torch.prod(torch.tensor(shape)).item()}")
 
-    tensors[name] = tensor.reshape(shape) # reshape 成目标形状
+    tensors[name] = tensor.reshape(shape)  # reshape 成目标形状
 
 # 从字典中提取 Tensor
 q_tensor = tensors["q_tensor"]
@@ -56,7 +55,7 @@ def ref_program(q, qpe, kv, kpe, is_causal):
     """
     # 1) 分数：Q·K^T + Q_pe·K_pe^T
     scores_nope = torch.einsum('bqhd,bkhd->bhqk', q, kv)  # Q @ K^T (不带位置)
-    scores_pe   = torch.einsum('bqhd,bkhd->bhqk', qpe, kpe)  # Q_pe @ K_pe^T (位置)
+    scores_pe = torch.einsum('bqhd,bkhd->bhqk', qpe, kpe)  # Q_pe @ K_pe^T (位置)
     scores = scores_nope + scores_pe
 
     scale = 1.0 / torch.sqrt(torch.tensor(dim + pe_dim, dtype=scores.dtype))
@@ -74,9 +73,9 @@ def ref_program(q, qpe, kv, kpe, is_causal):
 
     return output
 
+
 # 运行 refs
 result = ref_program(q_tensor, qpe_tensor, kv_tensor, kpe_tensor, is_causal=False)
-
 
 print("reference result:\n", result)
 print("kernel output:\n", output_tensor)

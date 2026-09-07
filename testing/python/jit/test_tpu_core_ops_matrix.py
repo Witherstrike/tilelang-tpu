@@ -8,10 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from testing.python.jit import tpu_core_ops_matrix as matrix_module
-from testing.python.jit import tpu_matrix_common
-from testing.python.jit import tpu_profile_worker
-from testing.python.jit.tpu_core_ops_matrix import (
+import tpu_core_ops_matrix as matrix_module
+import tpu_matrix_common
+import tpu_profile_worker
+from tpu_core_ops_matrix import (
     _report_summary,
     _validate_profile_report,
 )
@@ -31,8 +31,7 @@ def _report(*, parser_status="unavailable", timings=(), has_raw_trace=True):
 
 
 def _timing(*, begin=2, end=7, duration=5, unit="ns"):
-    return SimpleNamespace(
-        engine="bd", unit=unit, begin=begin, end=end, duration=duration)
+    return SimpleNamespace(engine="bd", unit=unit, begin=begin, end=end, duration=duration)
 
 
 _INVALID_TIMINGS = (
@@ -83,7 +82,7 @@ def test_portable_copy_cases_are_worker_cases_and_default_matrix_cases():
     )
 
     assert tuple(tpu_profile_worker._COPY_CASES) == expected
-    assert matrix_module._COPY_CASES == expected
+    assert expected == matrix_module._COPY_CASES
     assert matrix_module._CASES[-len(expected):] == expected
 
 
@@ -92,6 +91,7 @@ def test_runner_dispatches_every_portable_copy_case(monkeypatch, tmp_path):
     configs = []
 
     class FakeProfiler:
+
         def __init__(self, config):
             configs.append(config)
 
@@ -127,17 +127,14 @@ def test_runner_dispatches_every_portable_copy_case(monkeypatch, tmp_path):
     )
 
     assert status == 0
-    assert [call[0][-2:] for call in calls] == [
-        ["--case", case] for case in matrix_module._COPY_CASES
-    ]
+    assert [call[0][-2:] for call in calls
+           ] == [["--case", case] for case in matrix_module._COPY_CASES]
     assert all(call[0][0] == sys.executable for call in calls)
-    assert [config.label for config in configs] == [
-        f"sg2260e-rv-{case}" for case in matrix_module._COPY_CASES
-    ]
+    assert [config.label for config in configs
+           ] == [f"sg2260e-rv-{case}" for case in matrix_module._COPY_CASES]
     summary = json.loads((output_dir / "summary.json").read_text())
     assert summary["complete"] is True
-    assert set(summary["cases"]) == set(
-        f"sg2260e/rv/{case}" for case in matrix_module._COPY_CASES)
+    assert set(summary["cases"]) == set(f"sg2260e/rv/{case}" for case in matrix_module._COPY_CASES)
 
 
 def test_numeric_and_raw_acceptance_does_not_require_vendor_decoder():

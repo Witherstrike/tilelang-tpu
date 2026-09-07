@@ -20,7 +20,6 @@ if __package__:
 else:
     from tpu_matrix_common import git_source_identity
 
-
 _CHIPS = ("sg2260e", "bm1690")
 _DTYPES = ("e4m3", "e5m2")
 _CASES = (
@@ -69,12 +68,15 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parents[3]
     worker = Path(__file__).with_name("tpu_fp8_ops_worker.py")
     environment = {
-        "PPL_PROJECT_ROOT": ppl_root,
-        "PYTHONPATH": os.pathsep.join(
-            item for item in (str(repo_root), os.environ.get("PYTHONPATH", ""))
-            if item),
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "TMPDIR": str(scratch),
+        "PPL_PROJECT_ROOT":
+            ppl_root,
+        "PYTHONPATH":
+            os.pathsep.join(
+                item for item in (str(repo_root), os.environ.get("PYTHONPATH", "")) if item),
+        "PYTHONDONTWRITEBYTECODE":
+            "1",
+        "TMPDIR":
+            str(scratch),
     }
     summary: dict[str, Any] = {
         "schema_version": 1,
@@ -110,11 +112,9 @@ def main() -> int:
                         case,
                     ]
                     try:
-                        report = profiler.run_cmodel(
-                            command, environment=environment)
+                        report = profiler.run_cmodel(command, environment=environment)
                         if not report.has_raw_trace:
-                            raise RuntimeError(
-                                "successful dispatch produced no profiling trace")
+                            raise RuntimeError("successful dispatch produced no profiling trace")
                         summary["cases"][key] = {
                             "status": "passed",
                             "artifact_dir": str(report.output_dir),

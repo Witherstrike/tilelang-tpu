@@ -15,20 +15,20 @@ from tvm.target import Target
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.jit.kernel import JITKernel
 from tilelang.jit.adapter.tpu_profiling import (
-    TPUInstructionProfiler,
-    TPUInstructionTiming,
-    TPUProfileReport,
-    TPUProfilingCommandError,
-    TPUProfilingConfig,
-    TPUProfilingError,
-    TPUProfilingTimeoutError,
-    TPURawInstruction,
-    parse_cmodel_raw_instruction_dumps,
-    parse_perfai_instruction_timings,
-    parse_perfai_timeline_events,
-    parse_pcie_decoded_instruction_timings,
-    run_tpu_cmodel_profile,
-    run_tpu_pcie_profile,
+    TPUInstructionProfiler as TPUInstructionProfiler,
+    TPUInstructionTiming as TPUInstructionTiming,
+    TPUProfileReport as TPUProfileReport,
+    TPUProfilingCommandError as TPUProfilingCommandError,
+    TPUProfilingConfig as TPUProfilingConfig,
+    TPUProfilingError as TPUProfilingError,
+    TPUProfilingTimeoutError as TPUProfilingTimeoutError,
+    TPURawInstruction as TPURawInstruction,
+    parse_cmodel_raw_instruction_dumps as parse_cmodel_raw_instruction_dumps,
+    parse_perfai_instruction_timings as parse_perfai_instruction_timings,
+    parse_perfai_timeline_events as parse_perfai_timeline_events,
+    parse_pcie_decoded_instruction_timings as parse_pcie_decoded_instruction_timings,
+    run_tpu_cmodel_profile as run_tpu_cmodel_profile,
+    run_tpu_pcie_profile as run_tpu_pcie_profile,
 )
 from tilelang.utils.target import determine_target, AVAILABLE_TARGETS, is_tpu_target_spec
 from tilelang.cache import cached

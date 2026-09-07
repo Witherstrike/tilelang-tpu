@@ -43,9 +43,8 @@ void CheckRVShape(const std::vector<int> &shape, const char *operation,
       << "RV Tensor " << operation << " expects a TileLang 2-D local tile for "
       << operand;
   for (int extent : shape) {
-    ICHECK_GT(extent, 0)
-        << "RV Tensor " << operation << " requires positive " << operand
-        << " extents";
+    ICHECK_GT(extent, 0) << "RV Tensor " << operation << " requires positive "
+                         << operand << " extents";
     ICHECK_LT(extent, 1 << 16)
         << "RV Tensor " << operation << " descriptor extent exceeds 16 bits";
   }
@@ -54,17 +53,16 @@ void CheckRVShape(const std::vector<int> &shape, const char *operation,
 } // namespace
 
 void CodeGenTileLangTPU::EmitRVDescriptor(const std::string &tensor,
-                                           int register_id, bool is_global,
-                                           const std::string &dtype,
-                                           bool hw_aligned) {
-  const bool is_float =
-      dtype == "DT_FP32" || dtype == "DT_FP16" || dtype == "DT_BFP16" ||
-      dtype == "DT_FP8E5M2" || dtype == "DT_FP8E4M3";
+                                          int register_id, bool is_global,
+                                          const std::string &dtype,
+                                          bool hw_aligned) {
+  const bool is_float = dtype == "DT_FP32" || dtype == "DT_FP16" ||
+                        dtype == "DT_BFP16" || dtype == "DT_FP8E5M2" ||
+                        dtype == "DT_FP8E4M3";
   PrintIndent();
-  stream << (is_global ? "rvt_gr(" : "rvt_tr(") << register_id
-         << ", PRECISION(" << dtype << "), "
-         << (is_float ? "FP8TYPE(" : "SIGN(") << dtype << "), "
-         << tensor << ".addr, "
+  stream << (is_global ? "rvt_gr(" : "rvt_tr(") << register_id << ", PRECISION("
+         << dtype << "), " << (is_float ? "FP8TYPE(" : "SIGN(") << dtype
+         << "), " << tensor << ".addr, "
          << (hw_aligned ? "HW_ALIGN_LAYOUT" : "FREE_LAYOUT")
          << ", (array4_t){.n=" << tensor << ".shape.n, .c=" << tensor
          << ".shape.c, .h=" << tensor << ".shape.h, .w=" << tensor
@@ -73,9 +71,10 @@ void CodeGenTileLangTPU::EmitRVDescriptor(const std::string &tensor,
          << ");\n";
 }
 
-void CodeGenTileLangTPU::EmitRVCopy(
-    const std::string &src, bool src_is_global, const std::string &src_dtype,
-    const std::string &dst, bool dst_is_global, const std::string &dst_dtype) {
+void CodeGenTileLangTPU::EmitRVCopy(const std::string &src, bool src_is_global,
+                                    const std::string &src_dtype,
+                                    const std::string &dst, bool dst_is_global,
+                                    const std::string &dst_dtype) {
   // The DMA descriptors deliberately use FREE layout.  A TileLang region can
   // be a sub-view whose logical width is smaller than its parent's physical
   // HW-aligned row, so recomputing an aligned stride from the region shape is
@@ -92,8 +91,7 @@ void CodeGenTileLangTPU::EmitRVCopy(
         << "RV Tensor copy-and-convert requires two local tensors; DMA does "
            "not perform dtype conversion";
     auto is_supported_float = [](const std::string &dtype) {
-      return dtype == "DT_FP16" || dtype == "DT_BFP16" ||
-             dtype == "DT_FP32";
+      return dtype == "DT_FP16" || dtype == "DT_BFP16" || dtype == "DT_FP32";
     };
     ICHECK(is_supported_float(src_dtype) && is_supported_float(dst_dtype))
         << "RV Tensor rvt_cvt_f2f only accepts supported floating-point "
@@ -104,8 +102,7 @@ void CodeGenTileLangTPU::EmitRVCopy(
     PrintIndent();
     stream << "rvt_cfg_round_mode(0);\n";
     PrintIndent();
-    stream << "rvt_cvt_f2f(" << dst_register << ", " << src_register
-           << ");\n";
+    stream << "rvt_cvt_f2f(" << dst_register << ", " << src_register << ");\n";
     return;
   }
 
@@ -120,7 +117,7 @@ void CodeGenTileLangTPU::EmitRVCopy(
 }
 
 void CodeGenTileLangTPU::EmitRVFill(const std::string &dst, DataType dtype,
-                                     double value) {
+                                    double value) {
   RVDTypeName(dtype); // Validate before emitting a partially formed kernel.
   ICHECK_EQ(value, 0.0)
       << "RV Tensor tl.tpu.fill currently supports the zero constant used to "
@@ -140,10 +137,12 @@ void CodeGenTileLangTPU::EmitRVFill(const std::string &dst, DataType dtype,
   stream << "}\n";
 }
 
-void CodeGenTileLangTPU::EmitRVGemm(
-    const std::string &a, const std::string &b, const std::string &c,
-    DataType a_dtype, DataType b_dtype, DataType c_dtype, bool transpose_a,
-    bool transpose_b, bool accumulate, int64_t m, int64_t n, int64_t k) {
+void CodeGenTileLangTPU::EmitRVGemm(const std::string &a, const std::string &b,
+                                    const std::string &c, DataType a_dtype,
+                                    DataType b_dtype, DataType c_dtype,
+                                    bool transpose_a, bool transpose_b,
+                                    bool accumulate, int64_t m, int64_t n,
+                                    int64_t k) {
   ICHECK(!transpose_a)
       << "RV Tensor high-performance GEMM does not expose a standalone TN "
          "form; transpose_A=true is not supported by tl.tpu.gemm";
@@ -153,9 +152,9 @@ void CodeGenTileLangTPU::EmitRVGemm(
   ICHECK(a_dtype == DataType::Float(16) || a_dtype == DataType::BFloat(16))
       << "RV Tensor fmm2 currently accepts FP16 or BF16 TileLang inputs, got "
       << a_dtype;
-  ICHECK((accumulate && c_dtype == DataType::Float(32)) ||
-         (!accumulate &&
-          (c_dtype == DataType::Float(32) || c_dtype == a_dtype)))
+  ICHECK(
+      (accumulate && c_dtype == DataType::Float(32)) ||
+      (!accumulate && (c_dtype == DataType::Float(32) || c_dtype == a_dtype)))
       << "RV Tensor accumulating fmm2 requires an FP32 C tile; overwrite mode "
          "permits FP32 or a C tile matching A/B, got "
       << c_dtype;
@@ -187,9 +186,8 @@ void CodeGenTileLangTPU::EmitRVGemm(
 void CodeGenTileLangTPU::EmitRVElementwise(
     const std::string &operation, const std::string &dst,
     const std::string &src0, const std::string &src1, DataType dst_dtype,
-    DataType src0_dtype, DataType src1_dtype,
-    const std::vector<int> &dst_shape, const std::vector<int> &src0_shape,
-    const std::vector<int> &src1_shape) {
+    DataType src0_dtype, DataType src1_dtype, const std::vector<int> &dst_shape,
+    const std::vector<int> &src0_shape, const std::vector<int> &src1_shape) {
   CheckRVShape(dst_shape, operation.c_str(), "output");
   CheckRVShape(src0_shape, operation.c_str(), "lhs");
   CheckRVShape(src1_shape, operation.c_str(), "rhs");
@@ -203,8 +201,8 @@ void CodeGenTileLangTPU::EmitRVElementwise(
            dst_dtype == DataType::Float(32))
         << "rvt_fdiv only supports FP16, BF16, and FP32";
   }
-  ICHECK(dst_shape == src0_shape)
-      << "RV Tensor " << operation << " requires output and lhs shapes to match";
+  ICHECK(dst_shape == src0_shape) << "RV Tensor " << operation
+                                  << " requires output and lhs shapes to match";
   ICHECK(src1_shape == dst_shape ||
          (src1_shape[0] == dst_shape[0] && src1_shape[1] == 1))
       << "RV Tensor " << operation

@@ -11,7 +11,6 @@ import torch
 
 from .utils import is_tpu_target
 
-
 _TPU_EXECUTION_LOCK = threading.RLock()
 
 
@@ -36,9 +35,8 @@ class _TPURuntimeProfile:
 _TPU_RUNTIME_PROFILE: Optional[_TPURuntimeProfile] = None
 
 
-def reserve_tpu_runtime_profile(
-        tpu_target, tpu_runtime, device_id: int,
-        sdk_identity: Tuple[str, str, str]) -> None:
+def reserve_tpu_runtime_profile(tpu_target, tpu_runtime, device_id: int,
+                                sdk_identity: Tuple[str, str, str]) -> None:
     """Reserve the vendor runtime identity before loading a TPU library.
 
     CModel and PCIe share process-global vendor runtime state.  Since the
@@ -64,21 +62,21 @@ def reserve_tpu_runtime_profile(
     with _TPU_EXECUTION_LOCK:
         if _TPU_RUNTIME_PROFILE is None:
             _TPU_RUNTIME_PROFILE = profile
-        elif _TPU_RUNTIME_PROFILE != profile:
-            raise RuntimeError(
-                "TileLang TPU runtime is already reserved for "
-                f"runtime={_TPU_RUNTIME_PROFILE.runtime_mode}, "
-                f"chip={_TPU_RUNTIME_PROFILE.chip}, "
-                f"cores={_TPU_RUNTIME_PROFILE.core_count}, "
-                f"programming_model={_TPU_RUNTIME_PROFILE.programming_model}, "
-                f"device={_TPU_RUNTIME_PROFILE.device_id}, "
-                f"sdk={_TPU_RUNTIME_PROFILE.sdk_identity[0]}; cannot load "
-                f"runtime={profile.runtime_mode}, chip={profile.chip}, "
-                f"cores={profile.core_count}, "
-                f"programming_model={profile.programming_model}, "
-                f"device={profile.device_id}, sdk={profile.sdk_identity[0]} "
-                "in the same process. "
-                "Use a fresh process for another TPU runtime profile.")
+        elif profile != _TPU_RUNTIME_PROFILE:
+            raise RuntimeError("TileLang TPU runtime is already reserved for "
+                               f"runtime={_TPU_RUNTIME_PROFILE.runtime_mode}, "
+                               f"chip={_TPU_RUNTIME_PROFILE.chip}, "
+                               f"cores={_TPU_RUNTIME_PROFILE.core_count}, "
+                               f"programming_model={_TPU_RUNTIME_PROFILE.programming_model}, "
+                               f"device={_TPU_RUNTIME_PROFILE.device_id}, "
+                               f"sdk={_TPU_RUNTIME_PROFILE.sdk_identity[0]}; cannot load "
+                               f"runtime={profile.runtime_mode}, chip={profile.chip}, "
+                               f"cores={profile.core_count}, "
+                               f"programming_model={profile.programming_model}, "
+                               f"device={profile.device_id}, sdk={profile.sdk_identity[0]} "
+                               "in the same process. "
+                               "Use a fresh process for another TPU runtime profile.")
+
 
 def reject_unverified_tpu_database_artifact(target) -> None:
     """Fail closed for TPU artifacts that lack a verified sidecar manifest.
@@ -90,10 +88,9 @@ def reject_unverified_tpu_database_artifact(target) -> None:
     Rebuild the artifact until a bundled manifest format exists.
     """
     if is_tpu_target(target):
-        raise RuntimeError(
-            "Loading TPU artifacts from cache/database is disabled until a "
-            "chip/device/runtime manifest and bundled private libkernel.so are "
-            "implemented. Recompile the TPU kernel in this process instead.")
+        raise RuntimeError("Loading TPU artifacts from cache/database is disabled until a "
+                           "chip/device/runtime manifest and bundled private libkernel.so are "
+                           "implemented. Recompile the TPU kernel in this process instead.")
 
 
 def _param_dtype(param):
@@ -127,21 +124,19 @@ def _resolve_shape(index: int, params: Sequence, args: Sequence,
     return tuple(shape)
 
 
-def _validate_tensor(index: int, tensor: torch.Tensor, params: Sequence,
-                     args: Sequence, dynamic_symbolic_map: Dict) -> None:
+def _validate_tensor(index: int, tensor: torch.Tensor, params: Sequence, args: Sequence,
+                     dynamic_symbolic_map: Dict) -> None:
     if not isinstance(tensor, torch.Tensor):
-        raise TypeError(
-            "TileLang TPU JIT currently accepts Tensor arguments only; "
-            f"parameter {index} received {type(tensor).__name__}.")
+        raise TypeError("TileLang TPU JIT currently accepts Tensor arguments only; "
+                        f"parameter {index} received {type(tensor).__name__}.")
     expected_dtype = _param_dtype(params[index])
     if tensor.dtype != expected_dtype:
         raise TypeError(
             f"TPU parameter {index} has dtype {tensor.dtype}, expected {expected_dtype}.")
     expected_shape = _resolve_shape(index, params, args, dynamic_symbolic_map)
     if tuple(tensor.shape) != expected_shape:
-        raise ValueError(
-            f"TPU parameter {index} has shape {tuple(tensor.shape)}, "
-            f"expected {expected_shape}.")
+        raise ValueError(f"TPU parameter {index} has shape {tuple(tensor.shape)}, "
+                         f"expected {expected_shape}.")
     if tensor.numel() == 0:
         raise ValueError("TileLang TPU JIT does not support zero-sized Tensor arguments.")
 
@@ -161,9 +156,8 @@ def _reject_storage_aliases(args: Sequence[torch.Tensor]) -> None:
         key = (str(tensor.device), storage.data_ptr())
         previous = owners.get(key)
         if previous is not None:
-            raise ValueError(
-                "TileLang TPU JIT does not support aliased Tensor storage across "
-                f"parameters ({previous} and {index}); pass independent buffers.")
+            raise ValueError("TileLang TPU JIT does not support aliased Tensor storage across "
+                             f"parameters ({previous} and {index}); pass independent buffers.")
         owners[key] = index
 
 
@@ -243,8 +237,7 @@ def make_tpu_forward(lib: ctypes.CDLL, params: Sequence, result_idx: List[int],
 
         for index in copy_back_indices:
             output = args[index]
-            host_output = torch.empty(
-                tuple(output.shape), dtype=output.dtype, device="cpu")
+            host_output = torch.empty(tuple(output.shape), dtype=output.dtype, device="cpu")
             ctypes.memmove(host_output.data_ptr(), arg_buffers[index], arg_sizes[index])
             with torch.no_grad():
                 output.copy_(host_output.to(device=output.device))

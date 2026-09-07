@@ -32,9 +32,7 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
         ):
             T.copy(K[bz, k * block_N:(k + 1) * block_N, by, :], K_shared)
             T.ppl_fill(acc_s, T.float32(0))
-            T.ppl_gemm(
-                Q_shared, K_shared, acc_s,
-                transpose_B=True, accumulate=False)
+            T.ppl_gemm(Q_shared, K_shared, acc_s, transpose_B=True, accumulate=False)
 
         @T.macro
         def MMA1(
@@ -190,7 +188,7 @@ diff = ref.float() - out.float()
 max_diff = torch.max(torch.abs(diff))
 avg_diff = torch.mean(torch.abs(diff))
 
-print(f"\n=== 差异分析 ===")
+print("\n=== 差异分析 ===")
 print(f"最大差异: {max_diff}")
 print(f"平均差异: {avg_diff}")
 print("check close:")

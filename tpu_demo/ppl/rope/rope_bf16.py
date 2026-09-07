@@ -1,21 +1,20 @@
 import tilelang
 import tilelang.language as T
 
+
 def rope(Block_c, Block_w, C, W, dtype="bfloat16", accum_dtype="bfloat16"):
 
     global_shape = (C, W)
-    
+
     @T.prim_func
     def main(
-        G_out: T.Tensor(global_shape,dtype),
-        G_in: T.Tensor(global_shape,dtype),
-        G_cos: T.Tensor(global_shape, dtype),
-        G_sin: T.Tensor(global_shape, dtype),    
+            G_out: T.Tensor(global_shape, dtype),
+            G_in: T.Tensor(global_shape, dtype),
+            G_cos: T.Tensor(global_shape, dtype),
+            G_sin: T.Tensor(global_shape, dtype),
     ):
         with T.Kernel(T.ceildiv(C, Block_c), T.ceildiv(W, Block_w), is_cpu=True) as (bx, by):
             block_shape = (Block_c, Block_w)
-            block_half_shape = (Block_c, Block_w // 2)
-
             in_x = T.alloc_shared(block_shape, accum_dtype)
             in_cos = T.alloc_shared(block_shape, accum_dtype)
             in_sin = T.alloc_shared(block_shape, accum_dtype)
@@ -50,7 +49,7 @@ def rope(Block_c, Block_w, C, W, dtype="bfloat16", accum_dtype="bfloat16"):
     return main
 
 
-func =  rope(64, 16, 128, 64)
+func = rope(64, 16, 128, 64)
 mod = tilelang.lower(func)
 
-print("\n\n\n",mod)
+print("\n\n\n", mod)

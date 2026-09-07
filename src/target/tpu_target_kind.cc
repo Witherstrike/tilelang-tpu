@@ -66,4 +66,4 @@ struct TPUTargetKindRegistrar {
 
 static TPUTargetKindRegistrar tpu_target_kind_registrar;
 
-}  // namespace tvm
+} // namespace tvm

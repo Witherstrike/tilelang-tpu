@@ -13,10 +13,8 @@ from tilelang.jit.adapter.wrapper import TLWrapper
 
 
 def _tpu_target(chip="sg2260e", programming_model="rv"):
-    return (
-        f"tpu -mcpu={chip} "
-        f"-tpu-programming-model={programming_model}"
-    )
+    return (f"tpu -mcpu={chip} "
+            f"-tpu-programming-model={programming_model}")
 
 
 @T.prim_func
@@ -62,14 +60,14 @@ def test_rvt_call_requires_rvt_symbol_name():
 
 
 def test_rvt_frontend_emits_vendor_extern_calls():
-    call = T.rvt_fadd(tvm.tir.const(1, "uint64"), tvm.tir.const(2, "uint64"),
-                      tvm.tir.const(3, "uint64"))
+    call = T.rvt_fadd(
+        tvm.tir.const(1, "uint64"), tvm.tir.const(2, "uint64"), tvm.tir.const(3, "uint64"))
     assert call.op.same_as(tvm.ir.Op.get("tir.call_extern"))
     assert call.args[0].value == "rvt_fadd"
 
-    dma = T.rvt_call("rvt_dma_hscatter", tvm.tir.const(1, "uint64"),
-                     tvm.tir.const(2, "uint64"), tvm.tir.const(3, "uint64"),
-                     tvm.tir.const(4, "uint64"), tvm.tir.const(5, "uint64"))
+    dma = T.rvt_call("rvt_dma_hscatter", tvm.tir.const(1, "uint64"), tvm.tir.const(2, "uint64"),
+                     tvm.tir.const(3, "uint64"), tvm.tir.const(4, "uint64"),
+                     tvm.tir.const(5, "uint64"))
     assert dma.args[0].value == "rvt_dma_hscatter"
 
 
@@ -89,9 +87,7 @@ def test_rvt_lowering_keeps_explicit_vendor_calls():
     assert "rvt_fadd((uint64_t)10, (uint64_t)8, (uint64_t)9)" in source
     assert "rvt_sync_all()" in source
 
-    with pytest.raises(
-            ValueError,
-            match=r"programming.model.*tpukernel.*rvt_fadd"):
+    with pytest.raises(ValueError, match=r"programming.model.*tpukernel.*rvt_fadd"):
         tilelang.lower(
             _rvt_codegen_primfunc,
             target=_tpu_target("sg2260e", "tpukernel"),
@@ -107,8 +103,7 @@ def test_raw_rvt_cannot_consume_tilelang_buffer_descriptors():
         T.evaluate(T.rvt_dma_ld(T.uint64(8), A.data))
 
     with pytest.raises(
-            ValueError,
-            match=r"raw-rvt-descriptor-argument.*rvt_dma_ld.*descriptor Var"):
+            ValueError, match=r"raw-rvt-descriptor-argument.*rvt_dma_ld.*descriptor Var"):
         tilelang.lower(
             raw_descriptor_argument,
             target=_tpu_target("sg2260e", "rv"),
@@ -117,28 +112,25 @@ def test_raw_rvt_cannot_consume_tilelang_buffer_descriptors():
 
     # Direct native callers must not be able to bypass the same ownership
     # boundary by skipping the Python residual-IR verifier.
-    native_function = raw_descriptor_argument.with_attr(
-        "global_symbol", "raw_descriptor_argument")
+    native_function = raw_descriptor_argument.with_attr("global_symbol", "raw_descriptor_argument")
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
     with pytest.raises(
-            tvm.error.TVMError,
-            match=r"rvt_dma_ld.*cannot consume TileLang tensor descriptor Var"):
+            tvm.error.TVMError, match=r"rvt_dma_ld.*cannot consume TileLang tensor descriptor Var"):
         codegen(
             tvm.IRModule({"raw_descriptor_argument": native_function}),
             tvm.target.Target(_tpu_target("sg2260e", "rv")),
         )
 
     parameter = raw_descriptor_argument.params[0]
-    parameter_call = tvm.tir.call_extern(
-        "handle", "rvt_dma_ld", tvm.tir.const(8, "uint64"), parameter)
+    parameter_call = tvm.tir.call_extern("handle", "rvt_dma_ld", tvm.tir.const(8, "uint64"),
+                                         parameter)
     parameter_function = tvm.tir.PrimFunc(
         raw_descriptor_argument.params,
         tvm.tir.Evaluate(parameter_call),
         buffer_map=raw_descriptor_argument.buffer_map,
     ).with_attr("global_symbol", "raw_parameter_handle")
     with pytest.raises(
-            tvm.error.TVMError,
-            match=r"rvt_dma_ld.*cannot consume TileLang tensor descriptor Var"):
+            tvm.error.TVMError, match=r"rvt_dma_ld.*cannot consume TileLang tensor descriptor Var"):
         codegen(
             tvm.IRModule({"raw_parameter_handle": parameter_function}),
             tvm.target.Target(_tpu_target("sg2260e", "rv")),
@@ -148,7 +140,8 @@ def test_raw_rvt_cannot_consume_tilelang_buffer_descriptors():
 def test_raw_rvt_symbol_must_be_a_c_identifier_at_both_boundaries():
     invalid_call = tvm.tir.call_extern("handle", "rvt_bad-name")
     function = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(invalid_call),
+        [],
+        tvm.tir.Evaluate(invalid_call),
     ).with_attr("global_symbol", "invalid_raw_rvt_symbol")
     module = tvm.IRModule({"invalid_raw_rvt_symbol": function})
 
@@ -160,9 +153,7 @@ def test_raw_rvt_symbol_must_be_a_c_identifier_at_both_boundaries():
         )
 
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
-    with pytest.raises(
-            tvm.error.TVMError,
-            match=r"C identifier beginning with rvt_.*rvt_bad-name"):
+    with pytest.raises(tvm.error.TVMError, match=r"C identifier beginning with rvt_.*rvt_bad-name"):
         codegen(
             module,
             tvm.target.Target(_tpu_target("sg2260e", "rv")),
@@ -201,17 +192,14 @@ def test_tpukernel_externs_have_a_separate_programming_model_fence():
     "tpu_sync_all_bdc",
 ])
 @pytest.mark.parametrize("programming_model", ["tpukernel", "rv"])
-def test_raw_tpukernel_extern_is_not_a_supported_tir_abi(
-        extern_name, programming_model):
+def test_raw_tpukernel_extern_is_not_a_supported_tir_abi(extern_name, programming_model):
     raw_tpukernel = tvm.tir.PrimFunc(
         [],
         tvm.tir.Evaluate(tvm.tir.call_extern("handle", extern_name)),
     )
     module = tvm.IRModule({"raw_tpukernel": raw_tpukernel})
 
-    with pytest.raises(
-            ValueError,
-            match=rf"Raw tpu_\* call_extern.*{extern_name}"):
+    with pytest.raises(ValueError, match=rf"Raw tpu_\* call_extern.*{extern_name}"):
         tilelang.lower(
             module,
             target=_tpu_target("sg2260e", programming_model),
@@ -224,8 +212,7 @@ def test_raw_tpukernel_extern_is_not_a_supported_tir_abi(
     ("tpu_sdma_test_only", "rv"),
     ("rvt_fadd", "tpukernel"),
 ])
-def test_native_codegen_fences_contractless_direct_ffi_externs(
-        extern_name, programming_model):
+def test_native_codegen_fences_contractless_direct_ffi_externs(extern_name, programming_model):
     """The native target guard must survive callers that bypass lower()."""
     raw_extern = tvm.tir.PrimFunc(
         [],
@@ -289,11 +276,9 @@ def test_local_sg2260e_ppl_rvt_header_if_sdk_is_configured():
         tpu_runtime=TPURuntimeConfig("cmodel"),
     )
     try:
-        definitions, _ = generator._ppl_compile_flags(
-            layout, ".", "rv", "cmodel")
+        definitions, _ = generator._ppl_compile_flags(layout, ".", "rv", "cmodel")
         assert "-DTILELANG_TPU_RV" in definitions
-        tpukernel_definitions, _ = generator._ppl_compile_flags(
-            layout, ".", "tpukernel", "cmodel")
+        tpukernel_definitions, _ = generator._ppl_compile_flags(layout, ".", "tpukernel", "cmodel")
         assert "-DTILELANG_TPU_TPUKERNEL" in tpukernel_definitions
     finally:
         generator.remove_lib()
@@ -312,11 +297,9 @@ def test_rvt_cmodel_compile_is_private_if_sdk_is_configured():
         target=target,
         runtime_mode=runtime_config.runtime_mode,
     )
-    generator = LibraryGenerator(
-        target, tpu_target=target_spec, tpu_runtime=runtime_config)
+    generator = LibraryGenerator(target, tpu_target=target_spec, tpu_runtime=runtime_config)
     try:
-        wrapper = TLWrapper(
-            target, tpu_workspace_dir=generator.tpu_workspace_dir)
+        wrapper = TLWrapper(target, tpu_workspace_dir=generator.tpu_workspace_dir)
         wrapper.assign_optimized_module(tvm.IRModule({"rvt_codegen": _rvt_codegen_primfunc}))
         wrapper.assign_host_module(artifact.host_mod)
         wrapper.assign_device_module(artifact.device_mod)
@@ -332,8 +315,8 @@ def test_rvt_cmodel_compile_is_private_if_sdk_is_configured():
         assert b'setenv("TPU_RT_CORE_NUM", TILELANG_TPU_CMODEL_CORE_NUM, 1)' in (
             workspace / "main.cpp").read_bytes()
         assert b"tilelang_tpu_bind_device" in (workspace / "main.cpp").read_bytes()
-        assert b"tilelang_tpu_expected_device_id != device_id" in (
-            workspace / "main.cpp").read_bytes()
+        assert b"tilelang_tpu_expected_device_id != device_id" in (workspace /
+                                                                   "main.cpp").read_bytes()
         assert b"tpudnnEnableProfile" not in main_path.read_bytes()
     finally:
         generator.remove_lib()
@@ -352,13 +335,10 @@ def test_tpukernel_pcie_compile_is_private_if_sdk_is_configured():
         target=target,
         runtime_mode=runtime_config.runtime_mode,
     )
-    generator = LibraryGenerator(
-        target, tpu_target=target_spec, tpu_runtime=runtime_config)
+    generator = LibraryGenerator(target, tpu_target=target_spec, tpu_runtime=runtime_config)
     try:
-        wrapper = TLWrapper(
-            generator.target, tpu_workspace_dir=generator.tpu_workspace_dir)
-        wrapper.assign_optimized_module(
-            tvm.IRModule({"tpukernel_fill": _tpukernel_fill_primfunc}))
+        wrapper = TLWrapper(generator.target, tpu_workspace_dir=generator.tpu_workspace_dir)
+        wrapper.assign_optimized_module(tvm.IRModule({"tpukernel_fill": _tpukernel_fill_primfunc}))
         wrapper.assign_host_module(artifact.host_mod)
         wrapper.assign_device_module(artifact.device_mod)
         generator.update_lib_code(wrapper.wrap(artifact.kernel_source))
@@ -378,8 +358,7 @@ def test_tpukernel_pcie_compile_is_private_if_sdk_is_configured():
         assert "tpudnnEnableProfile" in main_source
         assert "tpudnnDisableProfile" in main_source
         assert b"libtpudnn.so" not in (workspace / "main.so").read_bytes()
-        assert b"libcdm_daemon_emulator.so" not in (
-            workspace / "main.so").read_bytes()
+        assert b"libcdm_daemon_emulator.so" not in (workspace / "main.so").read_bytes()
     finally:
         generator.remove_lib()
 
@@ -397,11 +376,9 @@ def test_rvt_pcie_compile_is_private_without_loading_if_sdk_is_configured():
         target=target,
         runtime_mode=runtime_config.runtime_mode,
     )
-    generator = LibraryGenerator(
-        target, tpu_target=target_spec, tpu_runtime=runtime_config)
+    generator = LibraryGenerator(target, tpu_target=target_spec, tpu_runtime=runtime_config)
     try:
-        wrapper = TLWrapper(
-            target, tpu_workspace_dir=generator.tpu_workspace_dir)
+        wrapper = TLWrapper(target, tpu_workspace_dir=generator.tpu_workspace_dir)
         wrapper.assign_optimized_module(tvm.IRModule({"rvt_codegen": _rvt_codegen_primfunc}))
         wrapper.assign_host_module(artifact.host_mod)
         wrapper.assign_device_module(artifact.device_mod)

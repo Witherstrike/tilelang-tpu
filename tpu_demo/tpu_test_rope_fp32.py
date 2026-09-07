@@ -2,21 +2,20 @@ import tilelang
 import tilelang.language as T
 import torch
 
+
 def rope(Block_c, Block_w, C, W, dtype="float32", accum_dtype="float32"):
 
     global_shape = (C, W)
-    
+
     @T.prim_func
     def main_kernel_inner(
-        G_in: T.Tensor(global_shape,dtype),
-        G_cos: T.Tensor(global_shape, dtype),
-        G_sin: T.Tensor(global_shape, dtype),    
-        G_out: T.Tensor(global_shape,accum_dtype),
+            G_in: T.Tensor(global_shape, dtype),
+            G_cos: T.Tensor(global_shape, dtype),
+            G_sin: T.Tensor(global_shape, dtype),
+            G_out: T.Tensor(global_shape, accum_dtype),
     ):
         with T.Kernel(T.ceildiv(C, Block_c), T.ceildiv(W, Block_w), is_cpu=True) as (bx, by):
             block_shape = (Block_c, Block_w)
-            block_half_shape = (Block_c, Block_w // 2)
-
             in_x = T.alloc_shared(block_shape, dtype)
             in_cos = T.alloc_shared(block_shape, dtype)
             in_sin = T.alloc_shared(block_shape, dtype)
@@ -50,16 +49,16 @@ def rope(Block_c, Block_w, C, W, dtype="float32", accum_dtype="float32"):
 
     return main_kernel_inner
 
+
 def make_rope_cos_sin(C, W, base=10000.0, pos_start=0, device="cpu", dtype=torch.float32):
     assert W % 2 == 0, "W 必须为偶数"
     half = W // 2
     # 频率向量：shape (half,)
     k = torch.arange(half, device=device, dtype=dtype)
-    inv_freq = (base ** (-2 * k / W)).to(dtype)
+    inv_freq = (base**(-2 * k / W)).to(dtype)
 
     # 位置：shape (C, 1)
-    pos = (torch.arange(pos_start, pos_start + C, device=device, dtype=dtype)
-           .unsqueeze(1))  # (C,1)
+    pos = (torch.arange(pos_start, pos_start + C, device=device, dtype=dtype).unsqueeze(1))  # (C,1)
 
     # 角度：shape (C, half)
     theta = pos * inv_freq  # 广播
@@ -69,9 +68,12 @@ def make_rope_cos_sin(C, W, base=10000.0, pos_start=0, device="cpu", dtype=torch
 
     cos = torch.empty(C, W, device=device, dtype=dtype)
     sin = torch.empty(C, W, device=device, dtype=dtype)
-    cos[:, 0::2] = c;  cos[:, 1::2] = c
-    sin[:, 0::2] = s;  sin[:, 1::2] = s
+    cos[:, 0::2] = c
+    cos[:, 1::2] = c
+    sin[:, 0::2] = s
+    sin[:, 1::2] = s
     return cos.contiguous(), sin.contiguous()
+
 
 def rope_ref_torch(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     assert x.shape == cos.shape == sin.shape, "x/cos/sin 的形状必须一致"
@@ -79,22 +81,22 @@ def rope_ref_torch(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> tor
     assert W % 2 == 0, "W 必须为偶数"
 
     x_even = x[:, 0::2]
-    x_odd  = x[:, 1::2]
+    x_odd = x[:, 1::2]
     c = cos[:, 0::2]
     s = sin[:, 0::2]
 
     out_even = x_even * c + (-x_odd) * s
-    out_odd  = x_odd  * c + ( x_even) * s
+    out_odd = x_odd * c + (x_even) * s
 
     out = torch.empty_like(x)
     out[:, 0::2] = out_even
     out[:, 1::2] = out_odd
     return out
 
-func =  rope(64, 16, 128, 64)
+
+func = rope(64, 16, 128, 64)
 kernel = tilelang.compile(
-    rope(64, 16, 128, 64), out_idx=-1,
-    target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
+    rope(64, 16, 128, 64), out_idx=-1, target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
 
 
 def read_txt_per_line(path: str, C: int, W: int, dtype=torch.float32, device="cpu"):
@@ -109,6 +111,7 @@ def read_txt_per_line(path: str, C: int, W: int, dtype=torch.float32, device="cp
     if len(vals) != need:
         raise ValueError(f"{path}: 读到 {len(vals)} 个数，但期望 {need} 个。")
     return torch.tensor(vals, dtype=dtype, device=device).view(C, W).contiguous()
+
 
 C, W = 128, 64
 

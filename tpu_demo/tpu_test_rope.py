@@ -2,21 +2,20 @@ import tilelang
 import tilelang.language as T
 import torch
 
+
 def rope(Block_c, Block_w, C, W, dtype="float32", accum_dtype="float32"):
 
     global_shape = (C, W)
-    
+
     @T.prim_func
     def main_kernel_inner(
-        G_in: T.Tensor(global_shape,dtype),
-        G_cos: T.Tensor(global_shape, dtype),
-        G_sin: T.Tensor(global_shape, dtype),    
-        G_out: T.Tensor(global_shape,accum_dtype),
+            G_in: T.Tensor(global_shape, dtype),
+            G_cos: T.Tensor(global_shape, dtype),
+            G_sin: T.Tensor(global_shape, dtype),
+            G_out: T.Tensor(global_shape, accum_dtype),
     ):
         with T.Kernel(T.ceildiv(C, Block_c), T.ceildiv(W, Block_w), is_cpu=True) as (bx, by):
             block_shape = (Block_c, Block_w)
-            block_half_shape = (Block_c, Block_w // 2)
-
             in_x = T.alloc_shared(block_shape, dtype)
             in_cos = T.alloc_shared(block_shape, dtype)
             in_sin = T.alloc_shared(block_shape, dtype)
@@ -51,11 +50,9 @@ def rope(Block_c, Block_w, C, W, dtype="float32", accum_dtype="float32"):
     return main_kernel_inner
 
 
-
-func =  rope(64, 16, 128, 64)
+func = rope(64, 16, 128, 64)
 kernel = tilelang.compile(
-    rope(64, 16, 128, 64), out_idx=-1,
-    target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
+    rope(64, 16, 128, 64), out_idx=-1, target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
 
 C, W = 128, 64
 

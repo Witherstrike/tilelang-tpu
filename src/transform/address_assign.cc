@@ -47,8 +47,8 @@
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
 #include "../op/gemm.h"
-#include "../target/tpuv7_lmem.h"
 #include "../target/tpu_target_info.h"
+#include "../target/tpuv7_lmem.h"
 
 namespace tvm {
 namespace tl {
@@ -63,8 +63,8 @@ int64_t AlignUp(int64_t value, int64_t align) {
 std::string GetPointerStorageScope(const Var &var) {
   const auto *pointer_type = var->type_annotation.as<PointerTypeNode>();
   ICHECK(pointer_type)
-      << "AddressAssign requires a pointer-typed allocation Var, got "
-      << var << " with type " << var->type_annotation;
+      << "AddressAssign requires a pointer-typed allocation Var, got " << var
+      << " with type " << var->type_annotation;
   return pointer_type->storage_scope;
 }
 
@@ -131,8 +131,8 @@ public:
         << " rank disagrees with its Allocate";
     const auto buffer_shape = tpuv7::NormalizeLocalShape(
         op->buffer->shape, "AddressAssign DeclBuffer");
-    const auto allocation_shape = tpuv7::NormalizeLocalShape(
-        allocate->extents, "AddressAssign Allocate");
+    const auto allocation_shape =
+        tpuv7::NormalizeLocalShape(allocate->extents, "AddressAssign Allocate");
     ICHECK(buffer_shape == allocation_shape)
         << "AddressAssign DeclBuffer " << op->buffer->name
         << " shape disagrees with its Allocate";
@@ -196,20 +196,20 @@ public:
     std::list<const BufferNode *> op_list;
     std::copy(ops.begin(), ops.end(), std::back_inserter(op_list));
 
-    op_list.sort([&liveRange, &conflictMap](const BufferNode *a,
-                                             const BufferNode *b) {
-      auto &lhs = liveRange[a];
-      auto &rhs = liveRange[b];
-      size_t lhs_degree = conflictMap[a].size();
-      size_t rhs_degree = conflictMap[b].size();
-      if (lhs_degree != rhs_degree) {
-        return lhs_degree > rhs_degree;
-      }
-      if (lhs.tensor_size != rhs.tensor_size) {
-        return lhs.tensor_size > rhs.tensor_size;
-      }
-      return lhs.start < rhs.start;
-    });
+    op_list.sort(
+        [&liveRange, &conflictMap](const BufferNode *a, const BufferNode *b) {
+          auto &lhs = liveRange[a];
+          auto &rhs = liveRange[b];
+          size_t lhs_degree = conflictMap[a].size();
+          size_t rhs_degree = conflictMap[b].size();
+          if (lhs_degree != rhs_degree) {
+            return lhs_degree > rhs_degree;
+          }
+          if (lhs.tensor_size != rhs.tensor_size) {
+            return lhs.tensor_size > rhs.tensor_size;
+          }
+          return lhs.start < rhs.start;
+        });
     for (auto &op : op_list) {
       std::shared_ptr<OpAddr> best_addr;
       int64_t min_conflict_count = std::numeric_limits<int64_t>::max();
@@ -226,20 +226,19 @@ public:
         if (i + mem_cross_bank_num > bank_num_) {
           break;
         }
-        int64_t end_offset = std::min(
-            offset + (mem_cross_bank_num + 1) * bank_size_, mem_size_);
+        int64_t end_offset =
+            std::min(offset + (mem_cross_bank_num + 1) * bank_size_, mem_size_);
         auto op_addr = searchAddr(op, liveRange, offset, end_offset);
 
         // op can insert
         if (op_addr->start + op_addr->size <= end_offset) {
           int64_t conf_count =
               getConflictCount(op_addr, liveRange, conflictMap);
-          bool better_addr =
-              !best_addr || conf_count < min_conflict_count ||
-              (conf_count == min_conflict_count &&
-               (op_addr->end < best_addr->end ||
-                (op_addr->end == best_addr->end &&
-                 op_addr->start < best_addr->start)));
+          bool better_addr = !best_addr || conf_count < min_conflict_count ||
+                             (conf_count == min_conflict_count &&
+                              (op_addr->end < best_addr->end ||
+                               (op_addr->end == best_addr->end &&
+                                op_addr->start < best_addr->start)));
           if (better_addr) {
             min_conflict_count = conf_count;
             best_addr = op_addr;
@@ -309,8 +308,7 @@ protected:
         break;
       }
       if (LiveRangesOverlap(*op_addr, *allocated_op_addr)) {
-        int64_t candidate =
-            AlignUp(prev_offset, tpuv7::kTensorAlignBytes);
+        int64_t candidate = AlignUp(prev_offset, tpuv7::kTensorAlignBytes);
         int64_t gap = allocated_op_addr->start - candidate;
         if (gap >= op_addr->size && gap < smallest_gap) {
           smallest_gap = gap;
@@ -319,8 +317,7 @@ protected:
         prev_offset = std::max(prev_offset, allocated_op_addr->end);
       }
     }
-    int64_t trailing_candidate =
-        AlignUp(prev_offset, tpuv7::kTensorAlignBytes);
+    int64_t trailing_candidate = AlignUp(prev_offset, tpuv7::kTensorAlignBytes);
     int64_t trailing_gap = end_offset - trailing_candidate;
     if (trailing_gap >= op_addr->size && trailing_gap < smallest_gap) {
       best_offset = trailing_candidate;
@@ -563,8 +560,9 @@ private:
   void VisitExpr_(const VarNode *op) {
     auto it = buffer_var_to_buffer_.find(op);
     if (it != buffer_var_to_buffer_.end()) {
-      MarkUse(it->second, collecting_operand_ ? operand_access_kind_
-                                               : BufferAccessKind::kConservative);
+      MarkUse(it->second, collecting_operand_
+                              ? operand_access_kind_
+                              : BufferAccessKind::kConservative);
     }
   }
 
@@ -594,8 +592,9 @@ private:
     OpScope scope(this);
     auto canonical = buffer_var_to_buffer_.find(op->buffer->data.get());
     if (canonical != buffer_var_to_buffer_.end()) {
-      MarkUse(canonical->second, collecting_operand_ ? operand_access_kind_
-                                                     : BufferAccessKind::kWrite);
+      MarkUse(canonical->second, collecting_operand_
+                                     ? operand_access_kind_
+                                     : BufferAccessKind::kWrite);
     }
     StmtExprVisitor::VisitStmt_(op);
   }
@@ -606,8 +605,8 @@ private:
   std::unordered_set<const BufferNode *> write_buffers_;
   std::unordered_set<const BufferNode *> conservative_buffers_;
   std::unordered_map<const BufferNode *, TensorLive> *live_ranges_;
-  std::unordered_map<const BufferNode *,
-                     std::unordered_set<const BufferNode *>> *conflict_map_;
+  std::unordered_map<const BufferNode *, std::unordered_set<const BufferNode *>>
+      *conflict_map_;
   uint32_t loc_ = 0;
   uint32_t current_loc_ = 0;
   bool inside_op_ = false;
@@ -642,10 +641,10 @@ PrimFunc InferAddress(PrimFunc f) {
         << "; descriptor aliases do not have a unique size/address contract";
     bool inserted =
         allocation_names.emplace(data_var->name_hint, data_var).second;
-    ICHECK(inserted)
-        << "AddressAssign requires unique local allocation data-variable names; "
-        << "duplicate name " << data_var->name_hint
-        << " would alias string-keyed LMEM metadata";
+    ICHECK(inserted) << "AddressAssign requires unique local allocation "
+                        "data-variable names; "
+                     << "duplicate name " << data_var->name_hint
+                     << " would alias string-keyed LMEM metadata";
     TensorLive live;
     live.tensor_size =
         tpuv7::TpuAlignSizeBytes(op->shape, op->dtype, "AddressAssign");
@@ -656,8 +655,8 @@ PrimFunc InferAddress(PrimFunc f) {
 
   std::unordered_map<const BufferNode *, int64_t> addrMapWithBC;
   MemAllocBankConflictAware allocatorBC(bank_num, bank_size);
-  auto success = allocatorBC.assignAddr(
-      alloc_ops, live_ranges, bank_conflict_map, addrMapWithBC);
+  auto success = allocatorBC.assignAddr(alloc_ops, live_ranges,
+                                        bank_conflict_map, addrMapWithBC);
   ICHECK(success) << "TPUv7 local memory allocation failed. buffers="
                   << alloc_ops.size() << ", lmem=" << bank_num * bank_size
                   << " bytes";

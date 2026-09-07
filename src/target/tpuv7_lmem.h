@@ -140,18 +140,16 @@ inline std::vector<int64_t> NormalizeLocalShape(const Array<PrimExpr> &shape,
             GetIntImmValue(shape[2], context)};
   }
   if (shape.size() == 4) {
-    return {GetIntImmValue(shape[0], context),
-            GetIntImmValue(shape[1], context),
-            GetIntImmValue(shape[2], context),
-            GetIntImmValue(shape[3], context)};
+    return {
+        GetIntImmValue(shape[0], context), GetIntImmValue(shape[1], context),
+        GetIntImmValue(shape[2], context), GetIntImmValue(shape[3], context)};
   }
-  LOG(FATAL) << context << " unsupported local tensor rank: "
-             << shape.size();
+  LOG(FATAL) << context << " unsupported local tensor rank: " << shape.size();
   return {1, 1, 1, 1};
 }
 
-inline int64_t TpuAlignSizeBytesFromShape4(
-    const std::vector<int64_t> &shape4, DataType dtype) {
+inline int64_t TpuAlignSizeBytesFromShape4(const std::vector<int64_t> &shape4,
+                                           DataType dtype) {
   ValidateDescriptorShape4(shape4, "TPUv7 local tensor");
   int64_t dtype_bytes = DTypeBytes(dtype);
   int64_t eu_num = std::max<int64_t>(1, kEuBytes / dtype_bytes);

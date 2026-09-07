@@ -4,6 +4,7 @@ import torch
 
 
 def reduce_max(M, N, block_M, block_N, dtype="float16", accum_dtype="float16"):
+
     @T.prim_func
     def main_kernel_inner(
             X: T.Tensor((M, N), dtype),
@@ -20,13 +21,14 @@ def reduce_max(M, N, block_M, block_N, dtype="float16", accum_dtype="float16"):
             T.ppl_reduce_max(X_shared, Y_shared, 1, True)
             # 将结果从共享内存复制回全局内存
             T.ppl_copy(Y_shared, Y[by * block_M, 0])
-    
+
     return main_kernel_inner
 
 
 M, N, block_M, block_N = 64, 64, 32, 64
 kernel = tilelang.compile(
-    reduce_max(M, N, block_M, block_N), out_idx=-1,
+    reduce_max(M, N, block_M, block_N),
+    out_idx=-1,
     target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
 
 x = torch.randn(M, N).half()

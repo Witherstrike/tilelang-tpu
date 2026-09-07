@@ -15,7 +15,6 @@ import json
 from pathlib import Path
 import sys
 
-
 _SUPPORTED_ARCHES = frozenset(("tpub_7_1", "tpub_7_1_e", "tpub_7_1_e_rv"))
 _DECODED_REPORT_NAME = "tilelang_pcie_profile.json"
 
@@ -43,12 +42,10 @@ def _canonical_events(result):
         for group in groups or ():
             for record in group:
                 if not isinstance(record, (tuple, list)) or len(record) < 3:
-                    raise ValueError(
-                        f"Unexpected bigTpuProfile {engine} event: {record!r}")
+                    raise ValueError(f"Unexpected bigTpuProfile {engine} event: {record!r}")
                 info, detail, metadata = record[:3]
                 if not isinstance(info, dict) or not isinstance(metadata, dict):
-                    raise ValueError(
-                        f"Unexpected bigTpuProfile {engine} event fields: {record!r}")
+                    raise ValueError(f"Unexpected bigTpuProfile {engine} event fields: {record!r}")
                 begin = info.get("Start Time(ns)")
                 end = info.get("End Time(ns)")
                 if not isinstance(begin, (int, float)) or not isinstance(end, (int, float)):
@@ -74,9 +71,8 @@ def _canonical_events(result):
 def main() -> int:
     args = _parse_args()
     profile_dir = args.profile_dir.resolve()
-    raw_files = tuple(sorted(
-        path for path in profile_dir.glob("cdm_profile_data_dev*")
-        if path.exists()))
+    raw_files = tuple(
+        sorted(path for path in profile_dir.glob("cdm_profile_data_dev*") if path.exists()))
     if not raw_files:
         print("No cdm_profile_data_dev* input was found.", file=sys.stderr)
         return 2

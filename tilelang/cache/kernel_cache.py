@@ -236,10 +236,9 @@ class KernelCache:
             - params.pkl: The serialized kernel parameters
         """
         if self._is_tpu_target_selection(kernel.target):
-            raise RuntimeError(
-                "Saving TPU artifacts to the persistent cache is disabled until "
-                "a verified manifest bundles the private libkernel.so, target, "
-                "and PPL SDK/runtime identity.")
+            raise RuntimeError("Saving TPU artifacts to the persistent cache is disabled until "
+                               "a verified manifest bundles the private libkernel.so, target, "
+                               "and PPL SDK/runtime identity.")
 
         cache_path = self._get_cache_path(key)
         os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists
@@ -302,10 +301,9 @@ class KernelCache:
             JITKernel: The loaded kernel if found, None otherwise.
         """
         if self._is_tpu_target_selection(target):
-            raise RuntimeError(
-                "Loading TPU artifacts from the persistent cache is disabled until "
-                "a verified manifest validates the private libkernel.so, target, "
-                "and PPL SDK/runtime identity.")
+            raise RuntimeError("Loading TPU artifacts from the persistent cache is disabled until "
+                               "a verified manifest validates the private libkernel.so, target, "
+                               "and PPL SDK/runtime identity.")
 
         cache_path = self._get_cache_path(key)
         if not os.path.exists(cache_path):

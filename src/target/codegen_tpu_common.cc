@@ -39,10 +39,10 @@
 #include <utility>
 #include <vector>
 
-#include "tpuv7_lmem.h"
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
 #include "../op/gemm.h"
+#include "tpuv7_lmem.h"
 
 namespace tvm {
 namespace codegen {
@@ -87,7 +87,8 @@ void CodeGenTileLangTPU::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {}
 
 std::string CodeGenTileLangTPU::Finish() {
   decl_stream << "/* TileLang TPU target: " << target_chip_
-              << ", programming model: " << target_programming_model_ << " */\n";
+              << ", programming model: " << target_programming_model_
+              << " */\n";
   decl_stream << "#include \"ppl_helper.h\"\n";
   if (uses_rvt_api_) {
     // RVT calls use the vendor ABI directly. Do not permit an accidental
@@ -245,14 +246,14 @@ void CodeGenTileLangTPU::PrintVecBinaryOp(const std::string &op, DataType t,
 void CodeGenTileLangTPU::PrintVecElemLoad(const std::string &vec, DataType t,
                                           int i,
                                           std::ostream &os) { // NOLINT(*)
-  LOG(FATAL) << "Vector element load " << vec << "[" << i << "] of dtype "
-             << t << " reached scalar-only TPU codegen";
+  LOG(FATAL) << "Vector element load " << vec << "[" << i << "] of dtype " << t
+             << " reached scalar-only TPU codegen";
 }
 
 void CodeGenTileLangTPU::PrintVecElemStore(const std::string &vec, DataType t,
                                            int i, const std::string &value) {
-  LOG(FATAL) << "Vector element store " << vec << "[" << i
-             << "] of dtype " << t << " reached scalar-only TPU codegen";
+  LOG(FATAL) << "Vector element store " << vec << "[" << i << "] of dtype " << t
+             << " reached scalar-only TPU codegen";
 }
 
 void CodeGenTileLangTPU::PrintStorageSync(const CallNode *op) {
@@ -302,9 +303,8 @@ void CodeGenTileLangTPU::PrintCallExtern(Type ret_type, String global_symbol,
                                          bool skip_first_arg,
                                          std::ostream &os) { // NOLINT(*)
   DataType ret_dtype = GetRuntimeDataType(ret_type);
-  ICHECK(!ret_dtype.is_vector())
-      << "Vector external return type " << ret_dtype
-      << " reached scalar-only TPU codegen";
+  ICHECK(!ret_dtype.is_vector()) << "Vector external return type " << ret_dtype
+                                 << " reached scalar-only TPU codegen";
   CodeGenC::PrintCallExtern(ret_type, global_symbol, args, skip_first_arg, os);
 }
 
@@ -374,9 +374,9 @@ std::string CodeGenTileLangTPU::GetBufferRef(DataType t,
 }
 
 CodeGenTileLangTPU::SemanticTensorOperand
-CodeGenTileLangTPU::ParseWholeBufferRegion(
-    const PrimExpr &expr, const std::string &context,
-    int expected_access_mask) const {
+CodeGenTileLangTPU::ParseWholeBufferRegion(const PrimExpr &expr,
+                                           const std::string &context,
+                                           int expected_access_mask) const {
   const auto *region = expr.as<CallNode>();
   ICHECK(region && region->op.same_as(tl::RegionOp::Get()))
       << context << " must be a canonical whole-buffer tl.region operand";
@@ -407,9 +407,9 @@ CodeGenTileLangTPU::ParseWholeBufferRegion(
   arith::Analyzer analyzer;
   for (size_t axis = 0; axis < rank; ++axis) {
     PrimExpr min = analyzer.Simplify(load->indices[axis]);
-    ICHECK(is_zero(min))
-        << context << " must cover the whole Buffer from zero; axis " << axis
-        << " has minimum " << min;
+    ICHECK(is_zero(min)) << context
+                         << " must cover the whole Buffer from zero; axis "
+                         << axis << " has minimum " << min;
     PrimExpr extent = analyzer.Simplify(region->args[axis + 2]);
     PrimExpr buffer_extent = analyzer.Simplify(buffer->shape[axis]);
     ICHECK(StructuralEqual()(extent, buffer_extent))
@@ -457,7 +457,8 @@ CodeGenTileLangTPU::ParseWholeBufferRegion(
          "aliases/views must preserve the exact rank, shape, and dtype";
   ICHECK_EQ(tl::tpuv7::DescriptorElementCount(logical_shape4, context.c_str()),
             element_count_it->second)
-      << context << " descriptor element count disagrees with its logical shape";
+      << context
+      << " descriptor element count disagrees with its logical shape";
 
   std::string descriptor;
   if (is_local) {
@@ -492,8 +493,9 @@ CodeGenTileLangTPU::ParseWholeBufferRegion(
   return operand;
 }
 
-const std::vector<int> &CodeGenTileLangTPU::DescriptorShape4(
-    const VarNode *data_var, const std::string &context) const {
+const std::vector<int> &
+CodeGenTileLangTPU::DescriptorShape4(const VarNode *data_var,
+                                     const std::string &context) const {
   ICHECK(data_var) << context << " requires a buffer data Var";
   auto shape_it = descriptor_shape4_.find(data_var);
   ICHECK(shape_it != descriptor_shape4_.end())
@@ -501,8 +503,8 @@ const std::vector<int> &CodeGenTileLangTPU::DescriptorShape4(
   return shape_it->second;
 }
 
-size_t CodeGenTileLangTPU::DescriptorRank(
-    const VarNode *data_var, const std::string &context) const {
+size_t CodeGenTileLangTPU::DescriptorRank(const VarNode *data_var,
+                                          const std::string &context) const {
   ICHECK(data_var) << context << " requires a buffer data Var";
   auto rank_it = descriptor_rank_.find(data_var);
   ICHECK(rank_it != descriptor_rank_.end())
@@ -551,8 +553,7 @@ static inline int TargetDTypeBytes(DataType dtype) {
   if (dtype == DataType::Float(32) || dtype == DataType::UInt(32) ||
       dtype == DataType::Int(32)) {
     return 4;
-  } else if (dtype == DataType::Float(16) ||
-             dtype == DataType::BFloat(16) ||
+  } else if (dtype == DataType::Float(16) || dtype == DataType::BFloat(16) ||
              dtype == DataType::UInt(16) || dtype == DataType::Int(16)) {
     return 2;
   } else if (dtype.is_e5m2_float8() || dtype.is_e4m3_float8() ||
@@ -572,8 +573,8 @@ inline int GetIntImmValueForDim4(const PrimExpr &expr, const char *context) {
 
 inline std::vector<int> LowerDimValuesToDim4(const std::vector<int> &dims) {
   int rank = dims.size();
-  ICHECK(rank >= 1 && rank <= 4) << "Only support rank 1 to 4, but got "
-                                 << rank;
+  ICHECK(rank >= 1 && rank <= 4)
+      << "Only support rank 1 to 4, but got " << rank;
   std::vector<int> dim4 = {1, 1, 1, 1};
   if (rank == 1) {
     dim4[3] = dims[0];
@@ -597,7 +598,8 @@ inline std::vector<int> LowerRegionToDim4(const Array<Range> &ranges) {
   std::vector<int> dims;
   dims.reserve(rank);
   for (const auto &range : ranges) {
-    dims.push_back(GetIntImmValueForDim4(range->extent, "TileLang TPU copy region"));
+    dims.push_back(
+        GetIntImmValueForDim4(range->extent, "TileLang TPU copy region"));
   }
   return LowerDimValuesToDim4(dims);
 }
@@ -633,10 +635,8 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
     const std::string prefix = "tl.tpu." + operation;
     auto dst_operand =
         ParseWholeBufferRegion(op->args[1], prefix + " output", 2);
-    auto src0_operand =
-        ParseWholeBufferRegion(op->args[2], prefix + " lhs", 1);
-    auto src1_operand =
-        ParseWholeBufferRegion(op->args[3], prefix + " rhs", 1);
+    auto src0_operand = ParseWholeBufferRegion(op->args[2], prefix + " lhs", 1);
+    auto src1_operand = ParseWholeBufferRegion(op->args[3], prefix + " rhs", 1);
     ICHECK(dst_operand.is_local && src0_operand.is_local &&
            src1_operand.is_local)
         << "TileLang TPU " << operation
@@ -702,8 +702,7 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK(!op->args.empty())
         << "TPU call_extern requires a compile-time function name";
     const auto *op_name_node = op->args[0].as<StringImmNode>();
-    ICHECK(op_name_node)
-        << "TPU call_extern function name must be a StringImm";
+    ICHECK(op_name_node) << "TPU call_extern function name must be a StringImm";
     std::string op_name = op_name_node->value;
     ICHECK(op_name.rfind("ppl.", 0) != 0)
         << "The internal ppl.* TIR ABI has been removed; use tl.tpu.* for "
@@ -718,10 +717,10 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
         << op_name;
     const bool has_rvt_prefix = op_name.rfind("rvt_", 0) == 0;
     ICHECK(!has_rvt_prefix || IsValidRawRVTSymbol(op_name))
-        << "Raw RVT extern name must be a C identifier beginning with rvt_; got "
+        << "Raw RVT extern name must be a C identifier beginning with rvt_; "
+           "got "
         << op_name;
-    const bool is_tpukernel_extern =
-        op_name.rfind("tl.tpukernel.", 0) == 0;
+    const bool is_tpukernel_extern = op_name.rfind("tl.tpukernel.", 0) == 0;
     const bool is_rvt_extern = has_rvt_prefix;
     const bool is_portable_tpu_op = op_name.rfind("tl.tpu.", 0) == 0;
     if (is_portable_tpu_op) {
@@ -748,13 +747,15 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           << " requires target tpu-programming-model=tpukernel";
       ICHECK_EQ(rvt_direct_call_count_, 0)
           << "Raw RVT rvt_* calls cannot share a kernel with TPU-Kernel calls; "
-          << "their descriptor and command-stream ownership models are distinct.";
+          << "their descriptor and command-stream ownership models are "
+             "distinct.";
       ++tpukernel_extern_count_;
       uses_tpukernel_api_ = true;
     }
     if (op_name == "tl.tpu.copy") {
       ICHECK_EQ(op->args.size(), 3U)
-          << op_name << " expects exactly one source and one destination region";
+          << op_name
+          << " expects exactly one source and one destination region";
       tl::BufferMap buffer_map;
       auto parse_copy_region = [&](const PrimExpr &expr,
                                    const char *operand_name,
@@ -815,23 +816,22 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
         for (size_t i = 0; i < ranges.size(); ++i) {
           const Range &range = ranges[i];
           PrimExpr raw_min = range->min;
-          PrimExpr min = raw_min.as<RampNode>()
-                             ? raw_min.as<RampNode>()->base
-                             : raw_min;
+          PrimExpr min =
+              raw_min.as<RampNode>() ? raw_min.as<RampNode>()->base : raw_min;
           min = analyzer.Simplify(min);
           PrimExpr upper = analyzer.Simplify(min + range->extent);
           PrimExpr shape_dim = buffer->shape[i];
-          bool lower_ok = analyzer.CanProve(
-              min >= make_const(min.dtype(), 0),
-              arith::ProofStrength::kSymbolicBound);
+          bool lower_ok =
+              analyzer.CanProve(min >= make_const(min.dtype(), 0),
+                                arith::ProofStrength::kSymbolicBound);
           bool upper_ok = analyzer.CanProve(
               upper <= shape_dim, arith::ProofStrength::kSymbolicBound);
           ICHECK(lower_ok && upper_ok)
-              << op_name << " " << operand_name << " region may be out of bounds "
+              << op_name << " " << operand_name
+              << " region may be out of bounds "
               << "for buffer " << buffer->name << " at dim " << i
-              << ": min=" << min
-              << ", extent=" << range->extent << ", upper=" << upper
-              << ", shape_dim=" << shape_dim
+              << ": min=" << min << ", extent=" << range->extent
+              << ", upper=" << upper << ", shape_dim=" << shape_dim
               << ". Portable TPU copy has no implicit tail masking; make "
               << "the tile divide the static shape or add explicit tail "
               << "handling in the frontend.";
@@ -912,8 +912,8 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
             << "descriptor dtype " << dtype_it->second;
         const auto declared_shape4 = tl::tpuv7::NormalizeLocalShape(
             src_buffer->shape, "TileLang TPU copy buffer");
-        const auto &owned_shape = DescriptorShape4(
-            src_buffer->data.get(), "TileLang TPU copy buffer");
+        const auto &owned_shape = DescriptorShape4(src_buffer->data.get(),
+                                                   "TileLang TPU copy buffer");
         ICHECK(std::equal(declared_shape4.begin(), declared_shape4.end(),
                           owned_shape.begin(), owned_shape.end()))
             << op_name << " " << operand_name
@@ -921,8 +921,8 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
                "descriptor; shape-changing aliases/views are not supported";
         if (is_local && src_ranges.size() >= 2U) {
           const size_t c_axis = src_ranges.size() == 2U ? 0U : 1U;
-          PrimExpr c_min = arith::Analyzer().Simplify(
-              range_min_base(src_ranges[c_axis]));
+          PrimExpr c_min =
+              arith::Analyzer().Simplify(range_min_base(src_ranges[c_axis]));
           ICHECK(is_zero(c_min))
               << op_name << " " << operand_name
               << " local C-axis minimum must be zero; TPUv7 channels map "
@@ -945,8 +945,7 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           std::string src_strides = vector2string(strides);
 
           std::string min_expr;
-          std::vector<int> stride_idx =
-              StrideIndicesForRank(src_ranges.size());
+          std::vector<int> stride_idx = StrideIndicesForRank(src_ranges.size());
 
           for (size_t i = 0; i < src_ranges.size(); i++) {
             auto sr = src_ranges[i];
@@ -974,8 +973,7 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           std::vector<std::string> strides = {
               parent_var + ".stride.n", parent_var + ".stride.c",
               parent_var + ".stride.h", parent_var + ".stride.w"};
-          std::vector<int> stride_idx =
-              StrideIndicesForRank(src_ranges.size());
+          std::vector<int> stride_idx = StrideIndicesForRank(src_ranges.size());
           for (size_t i = 0; i < src_ranges.size(); i++) {
             auto sr = src_ranges[i];
             const PrimExpr &e = sr->min;
@@ -989,13 +987,14 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           }
           min_expr[min_expr.size() - 1] = ' ';
           min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
-          inst.push_back("__tilelang_tpu_tensor_info " + new_src_var + " = {.shape = " +
-                         src_shape + ", .stride = " + parent_var +
-                         ".stride, .addr = " + parent_var +
+          inst.push_back("__tilelang_tpu_tensor_info " + new_src_var +
+                         " = {.shape = " + src_shape + ", .stride = " +
+                         parent_var + ".stride, .addr = " + parent_var +
                          ".addr + " + min_expr + ", .dtype = " + dtype +
-                         ", .mode = 0, .size = 1, .offset = " + min_expr + ", "
-                         ".unsigned_flag = 0, .default_stride = " + parent_var +
-                         ".default_stride};\n");
+                         ", .mode = 0, .size = 1, .offset = " + min_expr +
+                         ", "
+                         ".unsigned_flag = 0, .default_stride = " +
+                         parent_var + ".default_stride};\n");
         }
         return std::make_tuple(new_src_var, is_global ? "global" : "local",
                                dtype);
@@ -1008,7 +1007,8 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
         const auto src_shape4 = LowerRegionToDim4(src_ranges);
         const auto dst_shape4 = LowerRegionToDim4(dst_ranges);
         ICHECK(src_shape4 == dst_shape4)
-            << op_name << " requires source and destination regions to have "
+            << op_name
+            << " requires source and destination regions to have "
                "the same normalized N/C/H/W extents";
         auto [src_var_id, src_flag, src_dtype] =
             process_copy(src, src_ranges, "src");
@@ -1019,14 +1019,16 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
         };
         if (is_fp8(src_dtype) || is_fp8(dst_dtype)) {
           ICHECK_EQ(target_programming_model_, "tpukernel")
-              << op_name << " FP8 transport is validated only for the "
+              << op_name
+              << " FP8 transport is validated only for the "
                  "TPU-Kernel programming model";
           const bool same_format = src_dtype == dst_dtype;
           const bool fp32_conversion =
               (is_fp8(src_dtype) && dst_dtype == "DT_FP32") ||
               (src_dtype == "DT_FP32" && is_fp8(dst_dtype));
           ICHECK(same_format || fp32_conversion)
-              << op_name << " FP8 supports same-format transport and the "
+              << op_name
+              << " FP8 supports same-format transport and the "
                  "validated FP32 conversion boundary only";
         }
         // Region descriptors must be declared before either backend emits an
@@ -1058,8 +1060,8 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
     } else if (op_name == "tl.tpu.fill") {
       ICHECK_EQ(op->args.size(), 3U)
           << op_name << " expects a destination and floating literal";
-      auto destination = ParseWholeBufferRegion(
-          op->args[1], op_name + " destination", 2);
+      auto destination =
+          ParseWholeBufferRegion(op->args[1], op_name + " destination", 2);
       ICHECK(destination.is_local)
           << op_name
           << " destination must have a compiler-owned local descriptor";
@@ -1077,16 +1079,14 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
       ICHECK_EQ(op->args.size(), 10U)
           << "tl.tpu.gemm requires the canonical 10-argument ABI, including "
              "an explicit accumulate flag";
-      auto a_operand =
-          ParseWholeBufferRegion(op->args[1], op_name + " A", 1);
-      auto b_operand =
-          ParseWholeBufferRegion(op->args[2], op_name + " B", 1);
+      auto a_operand = ParseWholeBufferRegion(op->args[1], op_name + " A", 1);
+      auto b_operand = ParseWholeBufferRegion(op->args[2], op_name + " B", 1);
       const auto *accumulate_imm = op->args[9].as<IntImmNode>();
       ICHECK(accumulate_imm && accumulate_imm->dtype.is_bool())
           << "tl.tpu.gemm accumulate must be a compile-time boolean";
       bool accumulate = accumulate_imm->value != 0;
-      auto c_operand = ParseWholeBufferRegion(
-          op->args[3], op_name + " C", accumulate ? 3 : 2);
+      auto c_operand = ParseWholeBufferRegion(op->args[3], op_name + " C",
+                                              accumulate ? 3 : 2);
       ICHECK(a_operand.is_local && b_operand.is_local && c_operand.is_local)
           << op_name
           << " operands must all have compiler-owned local descriptors";
@@ -1151,9 +1151,9 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
         EmitRVGemm(a_access_data, b_access_data, c_access_data, a_dtype,
                    b_dtype, c_dtype, trans_A, trans_B, accumulate, M, N, K);
       } else {
-        EmitTPUKernelGemm(a_access_data, b_access_data, c_access_data,
-                          a_dtype, b_dtype, c_dtype, trans_A, trans_B,
-                          accumulate, M, N, K);
+        EmitTPUKernelGemm(a_access_data, b_access_data, c_access_data, a_dtype,
+                          b_dtype, c_dtype, trans_A, trans_B, accumulate, M, N,
+                          K);
       }
     } else if (op_name == "tl.tpu.sub") {
       handle_elementwise("sub");
@@ -1176,7 +1176,8 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           << " requires target tpu-programming-model=rv";
       ICHECK_EQ(tpukernel_extern_count_, 0)
           << "Raw RVT rvt_* calls cannot share a kernel with TPU-Kernel calls; "
-          << "their descriptor and command-stream ownership models are distinct.";
+          << "their descriptor and command-stream ownership models are "
+             "distinct.";
       ICHECK_EQ(canonical_tpu_op_count_, 0)
           << "Raw RVT rvt_* calls cannot share a kernel with backend-neutral "
              "tl.tpu.* operations; the compiler owns descriptors and lifecycle "
@@ -1322,7 +1323,8 @@ void CodeGenTileLangTPU::VisitStmt_(const AllocateNode *op) {
   std::string vid = AllocLocalVarID(buffer_var);
   var_idmap_[buffer_var] = vid;
 
-  auto shape4 = tl::tpuv7::NormalizeLocalShape(op->extents, "TileLang TPU codegen");
+  auto shape4 =
+      tl::tpuv7::NormalizeLocalShape(op->extents, "TileLang TPU codegen");
   std::string bv_shape = Shape4ToDim4Literal(shape4);
   std::vector<int> shapes;
   shapes.push_back(static_cast<int>(shape4[1]));
@@ -1427,8 +1429,8 @@ void CodeGenTileLangTPU::VisitStmt_(const DeclBufferNode *op) {
       << "DeclBuffer " << op->buffer->name
       << " rank disagrees with its Allocate; rank-changing descriptor views "
          "are not supported";
-  const auto &owned_shape = DescriptorShape4(
-      data_var, "TileLang TPU DeclBuffer " + op->buffer->name);
+  const auto &owned_shape =
+      DescriptorShape4(data_var, "TileLang TPU DeclBuffer " + op->buffer->name);
   ICHECK(std::equal(declared_shape4.begin(), declared_shape4.end(),
                     owned_shape.begin(), owned_shape.end()))
       << "DeclBuffer " << op->buffer->name
@@ -1541,10 +1543,9 @@ void CodeGenTileLangTPU::HandleVolatileLoads(const std::string &value,
 void CodeGenTileLangTPU::PrintVecElemLoadExpr(DataType t, int i,
                                               const std::string &value,
                                               std::ostream &os) {
-  LOG(FATAL) << "Vector element expression at lane " << i << " with dtype "
-             << t << " reached scalar-only TPU codegen";
+  LOG(FATAL) << "Vector element expression at lane " << i << " with dtype " << t
+             << " reached scalar-only TPU codegen";
 }
-
 
 void CodeGenTileLangTPU::AddFunction(const PrimFunc &f) {
   this->InitFuncState(f);
@@ -1744,7 +1745,8 @@ void CodeGenTileLangTPU::AddFunction(const PrimFunc &f) {
     this->stream << "  rvt_sync_i(0xdeadbeef, 0);\n";
   }
   this->stream << "  return 0;\n}\n";
-  this->stream << "TPUKERNEL_FUNC_REGISTER(" << "main_kernel)\n";
+  this->stream << "TPUKERNEL_FUNC_REGISTER("
+               << "main_kernel)\n";
 }
 
 } // namespace codegen

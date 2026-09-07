@@ -32,9 +32,8 @@ def rvt_call(intrinsic: str, *args):
     exact types and descriptor-register conventions in ``rvt_api.h``.
     """
     if not re.fullmatch(r"rvt_[A-Za-z0-9_]+", intrinsic):
-        raise ValueError(
-            "RVT intrinsics must be a C identifier beginning with 'rvt_'; "
-            f"got {intrinsic!r}")
+        raise ValueError("RVT intrinsics must be a C identifier beginning with 'rvt_'; "
+                         f"got {intrinsic!r}")
     return T.call_extern("handle", intrinsic, *args)
 
 

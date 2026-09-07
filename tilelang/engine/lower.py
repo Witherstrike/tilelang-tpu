@@ -71,6 +71,7 @@ _REMOVED_PPL_EXTERN_PREFIX = "ppl."
 def _is_valid_raw_rvt_symbol(name: str) -> bool:
     return re.fullmatch(r"rvt_[A-Za-z0-9_]+", name) is not None
 
+
 # Keep this list deliberately closed.  Adding a semantic operation requires a
 # frontend definition, address/effect analysis, target-specific codegen, and a
 # contract test; accepting an arbitrary name from either namespace would let a
@@ -134,14 +135,12 @@ _GPU_SYNC_OPS = frozenset({
 })
 
 
-def _tpu_contract_error(
-    target: Target, function_name: str, node_category: str, detail: str
-) -> ValueError:
+def _tpu_contract_error(target: Target, function_name: str, node_category: str,
+                        detail: str) -> ValueError:
     """Create one diagnostic format for every residual-IR rejection."""
-    return ValueError(
-        "TPU residual-IR contract violation: "
-        f"target={str(target)!r}; PrimFunc={function_name!r}; "
-        f"node category={node_category}; {detail}")
+    return ValueError("TPU residual-IR contract violation: "
+                      f"target={str(target)!r}; PrimFunc={function_name!r}; "
+                      f"node category={node_category}; {detail}")
 
 
 def _has_vector_lanes(dtype) -> bool:
@@ -224,19 +223,15 @@ def _reject_tpu_externs_for_non_tpu_target(mod: tvm.IRModule, target: Target) ->
     externs = _collect_tpu_externs(mod)
     if not externs:
         return
-    rendered = ", ".join(
-        f"{func}: {name} ({model})" for func, name, model in externs)
-    raise ValueError(
-        f"TPU externs cannot lower for target={target.kind.name!r}: {rendered}. "
-        "Use a complete TPU target such as 'tpu -mcpu=sg2260e "
-        "-tpu-programming-model=rv'. Portable tl.tpu.* calls select their "
-        "backend through the Target; explicit tl.tpukernel.* and raw rvt_* "
-        "calls must match that programming model.")
+    rendered = ", ".join(f"{func}: {name} ({model})" for func, name, model in externs)
+    raise ValueError(f"TPU externs cannot lower for target={target.kind.name!r}: {rendered}. "
+                     "Use a complete TPU target such as 'tpu -mcpu=sg2260e "
+                     "-tpu-programming-model=rv'. Portable tl.tpu.* calls select their "
+                     "backend through the Target; explicit tl.tpukernel.* and raw rvt_* "
+                     "calls must match that programming model.")
 
 
-def _validate_tpu_residual_ir(
-    mod: tvm.IRModule, target: Target, tpu_config
-) -> None:
+def _validate_tpu_residual_ir(mod: tvm.IRModule, target: Target, tpu_config) -> None:
     """Reject residual IR without a defined TPU source-emission contract.
 
     This verifier intentionally runs both before and after target passes.  The
@@ -257,8 +252,7 @@ def _validate_tpu_residual_ir(
         function_target = function.attrs.get("target") if function.attrs else None
         if function_target is not None and function_target.kind.name != "tpu":
             raise _tpu_contract_error(
-                target, function_name, "PrimFunc-target",
-                "function is bound to target kind "
+                target, function_name, "PrimFunc-target", "function is bound to target kind "
                 f"{function_target.kind.name!r}, but the module is being "
                 "compiled as TPU")
         if function_target is not None:
@@ -285,8 +279,7 @@ def _validate_tpu_residual_ir(
 
         for parameter in function.params:
             vector_dtype = _vector_dtype_in_type(parameter.type_annotation)
-            if (_has_vector_lanes(getattr(parameter, "dtype", None)) or
-                    vector_dtype is not None):
+            if (_has_vector_lanes(getattr(parameter, "dtype", None)) or vector_dtype is not None):
                 raise _tpu_contract_error(
                     target, function_name, "vector-parameter-dtype",
                     f"parameter {parameter.name!r} has unsupported dtype "
@@ -313,26 +306,21 @@ def _validate_tpu_residual_ir(
         # TileLang Buffer data pointers.  Keep the two ownership domains
         # separate even when a caller tries to hide a descriptor Var inside a
         # scalar expression.
-        descriptor_data_vars = {
-            buffer.data for buffer in function.buffer_map.values()
-        }
+        descriptor_data_vars = {buffer.data for buffer in function.buffer_map.values()}
         # Buffer data Vars and their handle parameters are distinct identities
         # in legal TIR.  Record both.  Scalar parameters have already been
         # rejected by the host ABI check above and must not be classified as
         # descriptors.
         descriptor_data_vars.update(
-            parameter for parameter in function.params
-            if parameter.dtype == "handle")
+            parameter for parameter in function.params if parameter.dtype == "handle")
 
-        def collect_descriptor_data_vars(
-                node, descriptor_data_vars=descriptor_data_vars):
+        def collect_descriptor_data_vars(node, descriptor_data_vars=descriptor_data_vars):
             if isinstance(node, tir.Allocate):
                 descriptor_data_vars.add(node.buffer_var)
             elif isinstance(node, (tir.DeclBuffer, tir.BufferRealize)):
                 descriptor_data_vars.add(node.buffer.data)
 
-        tir.stmt_functor.post_order_visit(
-            function.body, collect_descriptor_data_vars)
+        tir.stmt_functor.post_order_visit(function.body, collect_descriptor_data_vars)
 
         # Every compiler-owned TPU semantic extern carries tensor operands as
         # direct ``tl.region`` children.  Their BufferLoad/Ramp nodes are
@@ -342,23 +330,20 @@ def _validate_tpu_residual_ir(
         semantic_region_markers = set()
         canonical_semantic_calls = set()
 
-        def collect_semantic_region_markers(
-                node, function_name=function_name,
-                semantic_region_markers=semantic_region_markers,
-                canonical_semantic_calls=canonical_semantic_calls):
+        def collect_semantic_region_markers(node,
+                                            function_name=function_name,
+                                            semantic_region_markers=semantic_region_markers,
+                                            canonical_semantic_calls=canonical_semantic_calls):
             if (not isinstance(node, tir.Call) or
-                    getattr(node.op, "name", None) != "tir.call_extern" or
-                    not node.args):
+                    getattr(node.op, "name", None) != "tir.call_extern" or not node.args):
                 return
             extern_name = getattr(node.args[0], "value", None)
             positions = _TPU_SEMANTIC_REGION_ARGS.get(extern_name)
             if positions is None or len(node.args) <= positions[-1]:
                 return
             regions = [node.args[position] for position in positions]
-            if any(
-                    not isinstance(region, tir.Call) or
-                    getattr(region.op, "name", None) != "tl.region"
-                    for region in regions):
+            if any(not isinstance(region, tir.Call) or
+                   getattr(region.op, "name", None) != "tl.region" for region in regions):
                 return
             for position, region in zip(positions, regions):
                 rank = len(region.args) - 2
@@ -407,17 +392,16 @@ def _validate_tpu_residual_ir(
                                 f"{region.args[axis + 2]}")
                         semantic_region_markers.add(index)
 
-        tir.stmt_functor.post_order_visit(
-            function.body, collect_semantic_region_markers)
+        tir.stmt_functor.post_order_visit(function.body, collect_semantic_region_markers)
 
         # TIR is a DAG, so the same BufferLoad/Ramp ObjectRef can have more
         # than one parent.  A marker is exempt only while reached through its
         # canonical semantic call; reusing that exact node as an executable
         # load or vector expression elsewhere must still fail closed.
-        def reject_reused_semantic_marker(
-                node, function_name=function_name,
-                canonical_semantic_calls=canonical_semantic_calls,
-                semantic_region_markers=semantic_region_markers):
+        def reject_reused_semantic_marker(node,
+                                          function_name=function_name,
+                                          canonical_semantic_calls=canonical_semantic_calls,
+                                          semantic_region_markers=semantic_region_markers):
             if node in canonical_semantic_calls:
                 return False
             if node in semantic_region_markers:
@@ -427,18 +411,16 @@ def _validate_tpu_residual_ir(
                     "outside its canonical TPU semantic region")
             return True
 
-        tir.stmt_functor.pre_order_visit(
-            function.body, reject_reused_semantic_marker)
+        tir.stmt_functor.pre_order_visit(function.body, reject_reused_semantic_marker)
 
-        def visit(
-                node, function_name=function_name,
-                externs_by_model=externs_by_model,
-                descriptor_data_vars=descriptor_data_vars,
-                semantic_region_markers=semantic_region_markers):
+        def visit(node,
+                  function_name=function_name,
+                  externs_by_model=externs_by_model,
+                  descriptor_data_vars=descriptor_data_vars,
+                  semantic_region_markers=semantic_region_markers):
             if isinstance(node, tir.Allocate):
                 condition = node.condition
-                if (not isinstance(condition, tir.IntImm) or
-                        int(condition.value) != 1):
+                if (not isinstance(condition, tir.IntImm) or int(condition.value) != 1):
                     raise _tpu_contract_error(
                         target, function_name, "Allocate-condition",
                         f"allocation {node.buffer_var.name!r} has condition "
@@ -458,22 +440,20 @@ def _validate_tpu_residual_ir(
                     "verbatim source injection bypasses TPU programming-model, "
                     "descriptor, and command-lifecycle validation")
 
-            if isinstance(node, (
-                    tir.BufferRealize, tir.ProducerStore,
-                    tir.ProducerRealize, tir.Prefetch)):
+            if isinstance(
+                    node,
+                (tir.BufferRealize, tir.ProducerStore, tir.ProducerRealize, tir.Prefetch)):
                 raise _tpu_contract_error(
-                    target, function_name, type(node).__name__,
-                    "node has no residual TPU source-emission contract; "
+                    target, function_name,
+                    type(node).__name__, "node has no residual TPU source-emission contract; "
                     "consume it in a target pass before codegen")
 
             if isinstance(node, tir.ProducerLoad):
-                raise _tpu_contract_error(
-                    target, function_name, "ProducerLoad",
-                    "producer loads have no TPU descriptor lowering")
+                raise _tpu_contract_error(target, function_name, "ProducerLoad",
+                                          "producer loads have no TPU descriptor lowering")
 
             if (isinstance(node, tir.For) and
-                    node.kind not in (tir.ForKind.SERIAL,
-                                      tir.ForKind.UNROLLED)):
+                    node.kind not in (tir.ForKind.SERIAL, tir.ForKind.UNROLLED)):
                 raise _tpu_contract_error(
                     target, function_name, "For",
                     f"loop kind {node.kind} has no TPU execution mapping; "
@@ -488,9 +468,8 @@ def _validate_tpu_residual_ir(
             if isinstance(node, tir.Ramp):
                 if node in semantic_region_markers:
                     return
-                raise _tpu_contract_error(
-                    target, function_name, "Ramp",
-                    f"vector index {node} has no TPU residual-IR lowering")
+                raise _tpu_contract_error(target, function_name, "Ramp",
+                                          f"vector index {node} has no TPU residual-IR lowering")
 
             if isinstance(node, (tir.Allocate, tir.AllocateConst)) and \
                     _has_vector_lanes(node.dtype):
@@ -510,16 +489,14 @@ def _validate_tpu_residual_ir(
                 if node in semantic_region_markers:
                     return
                 raise _tpu_contract_error(
-                    target, function_name, "BufferLoad",
-                    f"direct scalar/vector load from buffer "
+                    target, function_name, "BufferLoad", f"direct scalar/vector load from buffer "
                     f"{node.buffer.name!r} has no TPU descriptor lowering; "
                     "move data with tl.tpu.copy and compute through a typed "
                     "TPU semantic operation")
 
             if isinstance(node, tir.BufferStore):
                 raise _tpu_contract_error(
-                    target, function_name, "BufferStore",
-                    f"direct scalar/vector store to buffer "
+                    target, function_name, "BufferStore", f"direct scalar/vector store to buffer "
                     f"{node.buffer.name!r} has no TPU descriptor lowering; "
                     "move data with tl.tpu.copy and compute through a typed "
                     "TPU semantic operation")
@@ -538,8 +515,7 @@ def _validate_tpu_residual_ir(
                     f"call {op_name!r} returns unsupported dtype {node.dtype}")
 
             lowered_op_name = op_name.lower()
-            if (op_name in _GPU_SYNC_OPS or
-                    "barrier" in lowered_op_name):
+            if (op_name in _GPU_SYNC_OPS or "barrier" in lowered_op_name):
                 raise _tpu_contract_error(
                     target, function_name, "gpu-synchronization",
                     f"GPU synchronization intrinsic {op_name!r} has no TPU "
@@ -563,12 +539,10 @@ def _validate_tpu_residual_ir(
             if op_name != "tir.call_extern":
                 return
 
-            extern_name = (
-                getattr(node.args[0], "value", None) if node.args else None)
+            extern_name = (getattr(node.args[0], "value", None) if node.args else None)
             if not isinstance(extern_name, str):
-                raise _tpu_contract_error(
-                    target, function_name, "call_extern",
-                    "external function name must be a compile-time string")
+                raise _tpu_contract_error(target, function_name, "call_extern",
+                                          "external function name must be a compile-time string")
             model = _tpu_extern_programming_model(node)
             if model == "portable":
                 return
@@ -590,16 +564,12 @@ def _validate_tpu_residual_ir(
                             f"beginning with 'rvt_'; got {extern_name!r}")
                     referenced_descriptors = set()
 
-                    def find_descriptor_var(
-                            candidate,
-                            descriptor_data_vars=descriptor_data_vars):
-                        if (isinstance(candidate, tir.Var) and
-                                candidate in descriptor_data_vars):
+                    def find_descriptor_var(candidate, descriptor_data_vars=descriptor_data_vars):
+                        if (isinstance(candidate, tir.Var) and candidate in descriptor_data_vars):
                             referenced_descriptors.add(candidate.name)
 
                     for argument in node.args[1:]:
-                        tir.stmt_functor.post_order_visit(
-                            argument, find_descriptor_var)
+                        tir.stmt_functor.post_order_visit(argument, find_descriptor_var)
                     if referenced_descriptors:
                         raise _tpu_contract_error(
                             target, function_name, "raw-rvt-descriptor-argument",
@@ -642,9 +612,7 @@ def _validate_tpu_residual_ir(
         tir.stmt_functor.post_order_visit(function.body, visit)
 
 
-def validate_target_module_contract(
-    mod: tvm.IRModule, target: Target
-):
+def validate_target_module_contract(mod: tvm.IRModule, target: Target):
     """Validate backend extern ownership and return the TPU target identity.
 
     This is shared by the full lowering path and annotation-only wrapper
@@ -879,8 +847,7 @@ def lower(
     # target choices are isolated from one another.
     codegen_mod = (
         device_codegen(device_mod, target)
-        if enable_device_compile else device_codegen_without_compile(device_mod, target)
-    )
+        if enable_device_compile else device_codegen_without_compile(device_mod, target))
     if enable_host_codegen:
         host_rt_mod = host_codegen(host_mod, target_host)
         host_rt_mod.import_module(codegen_mod)

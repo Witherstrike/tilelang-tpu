@@ -26,8 +26,8 @@ struct TargetSelection {
 
 inline std::string LowerASCII(std::string value) {
   for (char &character : value) {
-    character = static_cast<char>(
-        std::tolower(static_cast<unsigned char>(character)));
+    character =
+        static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
   }
   return value;
 }
@@ -69,17 +69,16 @@ inline bool SupportsProgrammingModel(const std::string &chip,
 
 inline TargetSelection ResolveTarget(const Target &target,
                                      const char *boundary) {
-  ICHECK_EQ(target->kind->name, "tpu")
-      << boundary << " requires a TPU Target";
-  const std::string chip = LowerASCII(
-      TargetStringOrEmpty(target->GetAttr<String>("mcpu")));
+  ICHECK_EQ(target->kind->name, "tpu") << boundary << " requires a TPU Target";
+  const std::string chip =
+      LowerASCII(TargetStringOrEmpty(target->GetAttr<String>("mcpu")));
   ICHECK(!chip.empty() && IsSupportedChip(chip))
       << boundary << " requires a supported target chip via "
       << "tpu -mcpu=<bm1690|sg2260e>; got "
       << (chip.empty() ? "no chip" : chip);
 
-  const std::string programming_model = TargetStringOrEmpty(
-      target->GetAttr<String>("tpu-programming-model"));
+  const std::string programming_model =
+      TargetStringOrEmpty(target->GetAttr<String>("tpu-programming-model"));
   ICHECK(programming_model == "tpukernel" || programming_model == "rv")
       << boundary << " requires a normalized target "
       << "tpu-programming-model=<tpukernel|rv>; got "
@@ -105,8 +104,8 @@ inline void CheckSameSelection(const TargetSelection &function_selection,
       << build_selection.programming_model;
 }
 
-}  // namespace tpu
-}  // namespace tl
-}  // namespace tvm
+} // namespace tpu
+} // namespace tl
+} // namespace tvm
 
-#endif  // TVM_TL_TARGET_TPU_TARGET_INFO_H_
+#endif // TVM_TL_TARGET_TPU_TARGET_INFO_H_

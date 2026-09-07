@@ -13,18 +13,16 @@ def _touch(path: Path):
 
 def _make_ppl_17_layout(tmp_path, chip="bm1690", arch="tpub_7_1"):
     (tmp_path / "deps/chip").mkdir(parents=True)
-    (tmp_path / "deps/chip/chip_map.json").write_text(
-        json.dumps({chip: arch}), encoding="utf-8"
-    )
+    (tmp_path / "deps/chip/chip_map.json").write_text(json.dumps({chip: arch}), encoding="utf-8")
     for directory in (
-        f"deps/chip/{arch}/TPU1686/kernel/include",
-        f"deps/chip/{arch}/TPU1686/tpuDNN/include",
-        f"deps/chip/{arch}/lib",
-        "deps/common/dev/kernel",
-        "deps/common/dev/utils/include",
-        "deps/common/host/include",
-        "deps/runtime/tpuv7-runtime/include",
-        "deps/runtime/tpuv7-runtime/lib",
+            f"deps/chip/{arch}/TPU1686/kernel/include",
+            f"deps/chip/{arch}/TPU1686/tpuDNN/include",
+            f"deps/chip/{arch}/lib",
+            "deps/common/dev/kernel",
+            "deps/common/dev/utils/include",
+            "deps/common/host/include",
+            "deps/runtime/tpuv7-runtime/include",
+            "deps/runtime/tpuv7-runtime/lib",
     ):
         (tmp_path / directory).mkdir(parents=True)
     _touch(tmp_path / "deps/common/dev/utils/src/ppl_helper.c")
@@ -44,15 +42,9 @@ def test_resolve_ppl_17_layout(tmp_path):
     assert layout.arch == arch
     assert layout.physical_core_count == 8
     assert layout.compile_definitions == ("__tpub_7_1__", "__sg2260__")
-    assert layout.firmware_archive == (
-        tmp_path / f"deps/chip/{arch}/lib/libfirmware_core.a"
-    )
-    assert layout.tpudnn_include == (
-        tmp_path / f"deps/chip/{arch}/TPU1686/tpuDNN/include"
-    )
-    assert layout.tpudnn_library == (
-        tmp_path / f"deps/chip/{arch}/lib/libtpudnn.so"
-    )
+    assert layout.firmware_archive == (tmp_path / f"deps/chip/{arch}/lib/libfirmware_core.a")
+    assert layout.tpudnn_include == (tmp_path / f"deps/chip/{arch}/TPU1686/tpuDNN/include")
+    assert layout.tpudnn_library == (tmp_path / f"deps/chip/{arch}/lib/libtpudnn.so")
     assert layout.root == tmp_path.resolve()
     assert layout.runtime_identity_for("cmodel") == (
         str(tmp_path.resolve()),
@@ -91,19 +83,15 @@ def test_rejects_missing_required_chip_map(tmp_path):
 
 def test_base_resolution_does_not_require_runtime_or_profiling_artifacts(tmp_path):
     _make_ppl_17_layout(tmp_path)
-    for relative in (
-            "deps/runtime/tpuv7-runtime/lib/libtpuv7_rt.so",
-            "deps/runtime/tpuv7-runtime/lib/libcdm_daemon_emulator.so",
-            "deps/chip/tpub_7_1/lib/libtpuv7_emulator.so",
-            "deps/chip/tpub_7_1/lib/libfirmware_core.a",
-            "deps/chip/tpub_7_1/lib/libtpudnn.so"):
+    for relative in ("deps/runtime/tpuv7-runtime/lib/libtpuv7_rt.so",
+                     "deps/runtime/tpuv7-runtime/lib/libcdm_daemon_emulator.so",
+                     "deps/chip/tpub_7_1/lib/libtpuv7_emulator.so",
+                     "deps/chip/tpub_7_1/lib/libfirmware_core.a",
+                     "deps/chip/tpub_7_1/lib/libtpudnn.so"):
         (tmp_path / relative).unlink()
-    for relative in (
-            "deps/common/host/include",
-            "deps/runtime/tpuv7-runtime/include",
-            "deps/runtime/tpuv7-runtime/lib",
-            "deps/chip/tpub_7_1/TPU1686/tpuDNN/include",
-            "deps/chip/tpub_7_1/lib"):
+    for relative in ("deps/common/host/include", "deps/runtime/tpuv7-runtime/include",
+                     "deps/runtime/tpuv7-runtime/lib", "deps/chip/tpub_7_1/TPU1686/tpuDNN/include",
+                     "deps/chip/tpub_7_1/lib"):
         (tmp_path / relative).rmdir()
 
     layout = resolve_ppl_layout(str(tmp_path), "bm1690")
@@ -128,9 +116,8 @@ def test_cmodel_requires_emulator_but_not_firmware_or_tpudnn(tmp_path):
 
 def test_pcie_requires_firmware_but_not_emulator_or_tpudnn(tmp_path, monkeypatch):
     _make_ppl_17_layout(tmp_path)
-    gcc = tmp_path / (
-        "third_party/toolchains_dir/release/bin/"
-        "riscv64-unknown-linux-gnu-gcc")
+    gcc = tmp_path / ("third_party/toolchains_dir/release/bin/"
+                      "riscv64-unknown-linux-gnu-gcc")
     _touch(gcc)
     board_runtime = tmp_path / "installed-board-runtime/lib"
     _touch(board_runtime / "libtpuv7_rt.so")
@@ -149,9 +136,8 @@ def test_pcie_requires_firmware_but_not_emulator_or_tpudnn(tmp_path, monkeypatch
 
 def test_only_pcie_profiling_requires_tpudnn(tmp_path, monkeypatch):
     _make_ppl_17_layout(tmp_path)
-    gcc = tmp_path / (
-        "third_party/toolchains_dir/release/bin/"
-        "riscv64-unknown-linux-gnu-gcc")
+    gcc = tmp_path / ("third_party/toolchains_dir/release/bin/"
+                      "riscv64-unknown-linux-gnu-gcc")
     _touch(gcc)
     board_runtime = tmp_path / "installed-board-runtime/lib"
     _touch(board_runtime / "libtpuv7_rt.so")
@@ -175,8 +161,7 @@ def test_rejects_unknown_chip_in_ppl_17_layout(tmp_path):
 
 
 def test_rejects_chip_map_that_disagrees_with_the_capability_registry(tmp_path):
-    _make_ppl_17_layout(
-        tmp_path, chip="sg2260e", arch="tpub_7_1")
+    _make_ppl_17_layout(tmp_path, chip="sg2260e", arch="tpub_7_1")
 
     with pytest.raises(ValueError, match="disagrees with TileLang's validated capability"):
         resolve_ppl_layout(str(tmp_path), "sg2260e")
@@ -184,9 +169,8 @@ def test_rejects_chip_map_that_disagrees_with_the_capability_registry(tmp_path):
 
 def test_pcie_cross_compiler_is_discovered_without_a_pinned_sdk_version(tmp_path):
     _make_ppl_17_layout(tmp_path, chip="sg2260e", arch="tpub_7_1_e")
-    gcc = tmp_path / (
-        "third_party/toolchains_dir/any-ppl-release/bin/"
-        "riscv64-unknown-linux-gnu-gcc")
+    gcc = tmp_path / ("third_party/toolchains_dir/any-ppl-release/bin/"
+                      "riscv64-unknown-linux-gnu-gcc")
     _touch(gcc)
 
     layout = resolve_ppl_layout(str(tmp_path), "sg2260e")
@@ -196,9 +180,8 @@ def test_pcie_cross_compiler_is_discovered_without_a_pinned_sdk_version(tmp_path
 def test_pcie_cross_compiler_rejects_ambiguous_sdk_toolchains(tmp_path):
     _make_ppl_17_layout(tmp_path)
     for release in ("first", "second"):
-        _touch(tmp_path / (
-            f"third_party/toolchains_dir/{release}/bin/"
-            "riscv64-unknown-linux-gnu-gcc"))
+        _touch(tmp_path / (f"third_party/toolchains_dir/{release}/bin/"
+                           "riscv64-unknown-linux-gnu-gcc"))
 
     layout = resolve_ppl_layout(str(tmp_path), "bm1690")
     with pytest.raises(ValueError, match="selection is ambiguous"):

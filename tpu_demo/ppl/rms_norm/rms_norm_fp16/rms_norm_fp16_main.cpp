@@ -80,7 +80,8 @@ int main() {
   memset(output_data, 0x00, output_size);
 
   // 初始化输入数据
-  rand_data("test", func_name, 0, input_data, input_size, &input_shape, -5, 5, DT_FP16);
+  rand_data("test", func_name, 0, input_data, input_size, &input_shape, -5, 5,
+            DT_FP16);
 
   void *dev_input_data;
   void *dev_output_data;
@@ -93,7 +94,7 @@ int main() {
 
   // 调用自动生成的 host 端函数，此函数内部会调用 device 端的 kernel函数
   int rst = rms_norm((unsigned long long)dev_input_data,
-                      (unsigned long long)dev_output_data);
+                     (unsigned long long)dev_output_data);
   if (rst) {
     printf("kernel_launch failed\n");
     return 1;
@@ -104,8 +105,10 @@ int main() {
   tpuRtMemcpyD2S(output_data, dev_output_data, output_size);
 
   // 保存运行结果
-  dump_data("./test", func_name, "_input", ".in", 0, input_data, input_size, DT_FP16);
-  dump_data("./test", func_name, "_output", ".out", 1, output_data, output_size, DT_FP16);
+  dump_data("./test", func_name, "_input", ".in", 0, input_data, input_size,
+            DT_FP16);
+  dump_data("./test", func_name, "_output", ".out", 1, output_data, output_size,
+            DT_FP16);
   delete[] input_data;
   delete[] output_data;
   // 释放计算设备的memory
@@ -145,9 +148,11 @@ int main() {
   MallocWrap(handle, &dev_output_data, (u64 *)&output_data, output_size);
   printf("Malloc wrap success\n");
   // 随机生成输入数据
-  rand_data("test", func_name, 0, input_data, input_size, &input_shape, -5, 5, DT_FP16);
+  rand_data("test", func_name, 0, input_data, input_size, &input_shape, -5, 5,
+            DT_FP16);
   // 改为从test中读取输入数据
-  //load_file("./test/rms_norm_input0.in", input_data, input_size, input_size, DT_FP16, DT_FP16);
+  // load_file("./test/rms_norm_input0.in", input_data, input_size, input_size,
+  // DT_FP16, DT_FP16);
   printf("Input data loaded\n");
   // 将在系统内存上的数据拷贝到device mem
   // MemcpyS2D还有一个默认参数offset，默认为0，从src的offset偏移开始拷贝
@@ -155,20 +160,19 @@ int main() {
   // 预热3次后重复执行10次
   int WARMUP = 3;
   int REPEAT = 10;
-  size_t total_time= 0;
+  size_t total_time = 0;
   printf("Tests begin\n");
-  for (int i = 0; i < WARMUP + REPEAT; i++){
+  for (int i = 0; i < WARMUP + REPEAT; i++) {
     bm_profile_t start, end;
     bm_get_profile(handle, &start);
     // 通过自动生成的 host 端封装函数调用 kernel 函数
     int rst = rms_norm(bm_mem_get_device_addr(dev_input_data),
-                          bm_mem_get_device_addr(dev_output_data));
+                       bm_mem_get_device_addr(dev_output_data));
     bm_get_profile(handle, &end);
     if (rst) {
       printf("kernel_launch failed\n");
       return 1;
-    }
-    else if (i >= WARMUP) {
+    } else if (i >= WARMUP) {
       size_t npu_time = end.tpu_process_time - start.tpu_process_time;
       total_time += npu_time;
       std::cout << "npu time = " << npu_time << "(us) --> ";
@@ -185,8 +189,10 @@ int main() {
   // }
   printf("\n");
   // 保存输入输出结果
-  dump_data("./test", func_name, "_input", ".in", 0, input_data, input_size, DT_FP16);
-  dump_data("./test", func_name, "_output", ".out", 1, output_data, output_size, DT_FP16);
+  dump_data("./test", func_name, "_input", ".in", 0, input_data, input_size,
+            DT_FP16);
+  dump_data("./test", func_name, "_output", ".out", 1, output_data, output_size,
+            DT_FP16);
   // device mem和host mem
   FreeWrap(handle, &dev_input_data, input_data);
   FreeWrap(handle, &dev_output_data, output_data);

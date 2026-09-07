@@ -52,7 +52,8 @@ N = 512
 blk_m = 32
 blk_k = 32
 kernel = tilelang.compile(
-    rms_norm_splitk(M, N, blk_m, blk_k), out_idx=-1,
+    rms_norm_splitk(M, N, blk_m, blk_k),
+    out_idx=-1,
     target="tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
 
 a = torch.randn(M, N).half()
@@ -65,8 +66,7 @@ print(b)
 
 eps = 1e-12
 a_fp32 = a.float()
-ref_fp32 = a_fp32 / torch.sqrt(
-    torch.mean(a_fp32 * a_fp32, dim=1, keepdim=True) + eps)
+ref_fp32 = a_fp32 / torch.sqrt(torch.mean(a_fp32 * a_fp32, dim=1, keepdim=True) + eps)
 ref = ref_fp32.to(a.dtype)
 print("ref:")
 print(ref)
@@ -75,7 +75,7 @@ diff = ref.float() - b.float()
 max_diff = torch.max(torch.abs(diff))
 avg_diff = torch.mean(torch.abs(diff))
 
-print(f"\n=== 差异分析 ===")
+print("\n=== 差异分析 ===")
 print(f"最大差异: {max_diff}")
 print(f"平均差异: {avg_diff}")
 print("check close:")

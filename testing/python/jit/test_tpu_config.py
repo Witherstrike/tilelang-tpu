@@ -26,10 +26,8 @@ from tilelang.cache.kernel_cache import KernelCache
 
 
 def _tpu_target(chip="sg2260e", programming_model="tpukernel"):
-    return (
-        f"tpu -mcpu={chip} "
-        f"-tpu-programming-model={programming_model}"
-    )
+    return (f"tpu -mcpu={chip} "
+            f"-tpu-programming-model={programming_model}")
 
 
 def test_auto_target_never_implicitly_selects_a_tpu(monkeypatch):
@@ -45,16 +43,16 @@ def test_auto_target_never_implicitly_selects_a_tpu(monkeypatch):
 def test_tpu_pipeline_does_not_run_unvalidated_pipeline_or_vector_passes(monkeypatch):
     target = tvm.target.Target(_tpu_target())
     prim_func = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(0),
+        [],
+        tvm.tir.Evaluate(0),
     ).with_attr("global_symbol", "conservative_tpu_pipeline")
     mod = tvm.IRModule({"conservative_tpu_pipeline": prim_func})
 
     def forbidden_pass():
         raise AssertionError("unsupported TPU optimization was invoked")
 
-    for pass_name in (
-            "LegalizeVectorizedLoop", "PipelinePlanning",
-            "InjectSoftwarePipeline", "VectorizeLoop"):
+    for pass_name in ("LegalizeVectorizedLoop", "PipelinePlanning", "InjectSoftwarePipeline",
+                      "VectorizeLoop"):
         monkeypatch.setattr(tilelang.transform, pass_name, forbidden_pass)
 
     mod = phase_module.LowerAndLegalize(mod, target)
@@ -67,7 +65,8 @@ def test_tpu_pipeline_does_not_run_unvalidated_pipeline_or_vector_passes(monkeyp
 ])
 def test_direct_tpu_phase_entrypoints_require_a_complete_target(phase):
     prim_func = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(0),
+        [],
+        tvm.tir.Evaluate(0),
     ).with_attr("global_symbol", "incomplete_phase_target")
     mod = tvm.IRModule({"incomplete_phase_target": prim_func})
     incomplete = tvm.target.Target("tpu -mcpu=sg2260e")
@@ -79,26 +78,25 @@ def test_direct_tpu_phase_entrypoints_require_a_complete_target(phase):
 def test_tpu_contract_is_revalidated_before_address_assignment(monkeypatch):
     target = _tpu_target("sg2260e", "tpukernel")
     original = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(0),
+        [],
+        tvm.tir.Evaluate(0),
     ).with_attr("global_symbol", "contract_order")
     incompatible = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(
-            tvm.tir.call_extern("handle", "rvt_fadd")),
+        [],
+        tvm.tir.Evaluate(tvm.tir.call_extern("handle", "rvt_fadd")),
     ).with_attr("global_symbol", "contract_order")
     rewritten = tvm.IRModule({"contract_order": incompatible})
     address_assignment_called = False
 
     monkeypatch.setattr(lower_module, "LowerAndLegalize", lambda mod, _target: mod)
-    monkeypatch.setattr(
-        lower_module, "OptimizeForTarget", lambda _mod, _target: rewritten)
+    monkeypatch.setattr(lower_module, "OptimizeForTarget", lambda _mod, _target: rewritten)
 
     def record_address_assignment(mod, _target):
         nonlocal address_assignment_called
         address_assignment_called = True
         return mod
 
-    monkeypatch.setattr(
-        lower_module, "AssignTPUAddresses", record_address_assignment)
+    monkeypatch.setattr(lower_module, "AssignTPUAddresses", record_address_assignment)
 
     with pytest.raises(ValueError, match="different programming model"):
         tilelang.lower(original, target=target)
@@ -149,40 +147,37 @@ def test_tpu_chip_capabilities_are_explicit_and_fail_closed():
     ("sg2260e", "tpukernel", True),
     ("sg2260e", "rv", True),
 ])
-def test_python_and_native_tpu_capability_boundaries_share_one_matrix(
-        chip, programming_model, supported):
+def test_python_and_native_tpu_capability_boundaries_share_one_matrix(chip, programming_model,
+                                                                      supported):
     target = tvm.target.Target(_tpu_target(chip, programming_model))
     prim_func = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(0),
+        [],
+        tvm.tir.Evaluate(0),
     ).with_attr("global_symbol", "capability_matrix")
     native_codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
     if supported:
-        assert resolve_tpu_target(target=target) == TPUTargetSpec(
-            chip, programming_model)
-        source = native_codegen(
-            tvm.IRModule({"capability_matrix": prim_func}), target)
+        assert resolve_tpu_target(target=target) == TPUTargetSpec(chip, programming_model)
+        source = native_codegen(tvm.IRModule({"capability_matrix": prim_func}), target)
         assert f"target: {chip}, programming model: {programming_model}" in source
     else:
         with pytest.raises(ValueError, match="does not support programming model"):
             resolve_tpu_target(target=target)
         with pytest.raises(tvm.error.TVMError, match="does not support"):
-            native_codegen(
-                tvm.IRModule({"capability_matrix": prim_func}), target)
+            native_codegen(tvm.IRModule({"capability_matrix": prim_func}), target)
 
 
 def test_address_assignment_rejects_a_different_bound_tpu_identity():
     function_target = tvm.target.Target(_tpu_target("bm1690", "tpukernel"))
     requested_target = tvm.target.Target(_tpu_target("sg2260e", "tpukernel"))
     prim_func = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(0),
-    ).with_attr("global_symbol", "address_target_mismatch").with_attr(
-        "target", function_target)
+        [],
+        tvm.tir.Evaluate(0),
+    ).with_attr("global_symbol", "address_target_mismatch").with_attr("target", function_target)
 
     with pytest.raises(ValueError, match="target identity mismatch"):
         phase_module.AssignTPUAddresses(
-            tvm.IRModule({"address_target_mismatch": prim_func}),
-            requested_target)
+            tvm.IRModule({"address_target_mismatch": prim_func}), requested_target)
 
 
 def test_target_and_runtime_are_resolved_as_independent_identities():
@@ -201,15 +196,12 @@ def test_tpu_target_uses_a_backend_specific_dispatch_key():
 
 def test_tpu_target_requires_both_canonical_compile_axes():
     with pytest.raises(ValueError, match="explicit physical chip"):
-        resolve_tpu_target(
-            target=tvm.target.Target(
-                "tpu -tpu-programming-model=tpukernel"))
+        resolve_tpu_target(target=tvm.target.Target("tpu -tpu-programming-model=tpukernel"))
     with pytest.raises(ValueError, match="explicit programming model"):
         resolve_tpu_target(target=tvm.target.Target("tpu -mcpu=sg2260e"))
     with pytest.raises(ValueError, match="Unsupported TPU programming model"):
         resolve_tpu_target(
-            target=tvm.target.Target(
-                "tpu -mcpu=sg2260e -tpu-programming-model=legacy"))
+            target=tvm.target.Target("tpu -mcpu=sg2260e -tpu-programming-model=legacy"))
 
 
 def test_target_model_is_workload_metadata_not_a_chip_alias():
@@ -219,8 +211,7 @@ def test_target_model_is_workload_metadata_not_a_chip_alias():
         "model": "matmul_smoke",
         "tpu-programming-model": "tpukernel",
     })
-    assert resolve_tpu_target(target=target) == TPUTargetSpec(
-        "sg2260e", "tpukernel")
+    assert resolve_tpu_target(target=target) == TPUTargetSpec("sg2260e", "tpukernel")
     assert target.model == "matmul_smoke"
 
 
@@ -230,14 +221,14 @@ def test_native_and_python_target_boundaries_share_normalization():
         "mcpu": " SG2260E ",
         "tpu-programming-model": " tpukernel ",
     })
-    assert resolve_tpu_target(target=target) == TPUTargetSpec(
-        "sg2260e", "tpukernel")
+    assert resolve_tpu_target(target=target) == TPUTargetSpec("sg2260e", "tpukernel")
 
     prim_func = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(0),
+        [],
+        tvm.tir.Evaluate(0),
     ).with_attr("global_symbol", "normalized_target")
-    source = tvm._ffi.get_global_func("target.build.tilelang_tpu")(
-        tvm.IRModule({"normalized_target": prim_func}), target)
+    source = tvm._ffi.get_global_func("target.build.tilelang_tpu")(tvm.IRModule(
+        {"normalized_target": prim_func}), target)
     assert "target: sg2260e, programming model: tpukernel" in source
 
 
@@ -253,12 +244,13 @@ def test_native_and_python_target_boundaries_share_normalization():
         "PrimFunc programming model rv disagrees with build target",
     ),
 ])
-def test_native_tpu_codegen_rejects_a_mismatched_primfunc_target(
-        function_target, build_target, message):
+def test_native_tpu_codegen_rejects_a_mismatched_primfunc_target(function_target, build_target,
+                                                                 message):
     prim_func = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(0),
-    ).with_attr("global_symbol", "native_target_mismatch").with_attr(
-        "target", tvm.target.Target(function_target))
+        [],
+        tvm.tir.Evaluate(0),
+    ).with_attr("global_symbol",
+                "native_target_mismatch").with_attr("target", tvm.target.Target(function_target))
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
     with pytest.raises(tvm.error.TVMError, match=message):
@@ -271,7 +263,8 @@ def test_native_tpu_codegen_rejects_a_mismatched_primfunc_target(
 @pytest.mark.parametrize("extern_name", ["AtomicAdd", "cuda_helper"])
 def test_native_tpu_codegen_rejects_unknown_externs(extern_name):
     prim_func = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(tvm.tir.call_extern("handle", extern_name)),
+        [],
+        tvm.tir.Evaluate(tvm.tir.call_extern("handle", extern_name)),
     ).with_attr("global_symbol", "native_unknown_extern")
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
@@ -290,7 +283,8 @@ def test_native_tpu_codegen_does_not_emit_cuda_math_constants():
         tvm.tir.Evaluate(tvm.tir.FloatImm("bfloat16", float("inf"))),
     ])
     prim_func = tvm.tir.PrimFunc(
-        [], body,
+        [],
+        body,
     ).with_attr("global_symbol", "native_math_constants")
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
@@ -314,7 +308,8 @@ def test_native_tpu_codegen_let_type_does_not_depend_on_name():
         tvm.tir.Evaluate(shared_scalar),
     )
     prim_func = tvm.tir.PrimFunc(
-        [], body,
+        [],
+        body,
     ).with_attr("global_symbol", "native_scalar_let")
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
@@ -331,14 +326,16 @@ def test_native_tpu_codegen_rejects_direct_scalar_tensor_access():
     source = tvm.tir.decl_buffer((8,), "float32", name="source")
     load = tvm.tir.BufferLoad(source, [tvm.tir.IntImm("int32", 0)])
     prim_func = tvm.tir.PrimFunc(
-        [source.data], tvm.tir.Evaluate(load),
-        buffer_map={source.data: source},
+        [source.data],
+        tvm.tir.Evaluate(load),
+        buffer_map={
+            source.data: source
+        },
     ).with_attr("global_symbol", "native_scalar_tensor_access")
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
     with pytest.raises(
-            tvm.error.TVMError,
-            match="Direct scalar BufferLoad/BufferStore.*unsupported"):
+            tvm.error.TVMError, match="Direct scalar BufferLoad/BufferStore.*unsupported"):
         codegen(
             tvm.IRModule({"native_scalar_tensor_access": prim_func}),
             tvm.target.Target(_tpu_target()),
@@ -347,25 +344,24 @@ def test_native_tpu_codegen_rejects_direct_scalar_tensor_access():
 
 def test_native_tpu_codegen_rejects_nonserial_loops_and_attributes():
     loop_var = tvm.tir.Var("i", "int32")
-    parallel = tvm.tir.For(
-        loop_var, 0, 4, tvm.tir.ForKind.PARALLEL, tvm.tir.Evaluate(0))
+    parallel = tvm.tir.For(loop_var, 0, 4, tvm.tir.ForKind.PARALLEL, tvm.tir.Evaluate(0))
     parallel_func = tvm.tir.PrimFunc(
-        [], parallel,
+        [],
+        parallel,
     ).with_attr("global_symbol", "native_parallel_loop")
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
     target = tvm.target.Target(_tpu_target())
 
-    with pytest.raises(
-            tvm.error.TVMError, match="supports only serial and unrolled loops"):
+    with pytest.raises(tvm.error.TVMError, match="supports only serial and unrolled loops"):
         codegen(tvm.IRModule({"native_parallel_loop": parallel_func}), target)
 
     attribute_func = tvm.tir.PrimFunc(
-        [], tvm.tir.AttrStmt(
+        [],
+        tvm.tir.AttrStmt(
             tvm.tir.StringImm("payload"), "pragma_import_c",
             tvm.tir.StringImm("side_effecting_source"), tvm.tir.Evaluate(0)),
     ).with_attr("global_symbol", "native_residual_attribute")
-    with pytest.raises(
-            tvm.error.TVMError, match="Residual AttrStmt pragma_import_c"):
+    with pytest.raises(tvm.error.TVMError, match="Residual AttrStmt pragma_import_c"):
         codegen(
             tvm.IRModule({"native_residual_attribute": attribute_func}),
             target,
@@ -375,13 +371,12 @@ def test_native_tpu_codegen_rejects_nonserial_loops_and_attributes():
 @pytest.mark.parametrize("chip", ["bm1690", "sg2260e"])
 def test_native_tpukernel_codegen_rejects_pure_rv_extern_bypass(chip):
     function = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(tvm.tir.call_pure_extern("int32", "rvt_fadd")),
+        [],
+        tvm.tir.Evaluate(tvm.tir.call_pure_extern("int32", "rvt_fadd")),
     ).with_attr("global_symbol", "pure_rv_bypass")
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
-    with pytest.raises(
-            tvm.error.TVMError,
-            match="call_pure_extern has no TPU semantic ABI"):
+    with pytest.raises(tvm.error.TVMError, match="call_pure_extern has no TPU semantic ABI"):
         codegen(
             tvm.IRModule({"pure_rv_bypass": function}),
             tvm.target.Target(_tpu_target(chip, "tpukernel")),
@@ -400,9 +395,11 @@ def test_native_tpu_codegen_rejects_descriptor_let_aliases():
         tvm.tir.LetStmt(alias, tile, tvm.tir.Evaluate(0)),
     )
     prim_func = tvm.tir.PrimFunc(
-        [], body,
-    ).with_attr("global_symbol", "native_descriptor_let").with_attr(
-        "tilelang.tpu.lmem.address.tile", tvm.tir.IntImm("int64", 0))
+        [],
+        body,
+    ).with_attr("global_symbol",
+                "native_descriptor_let").with_attr("tilelang.tpu.lmem.address.tile",
+                                                   tvm.tir.IntImm("int64", 0))
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
     with pytest.raises(tvm.error.TVMError, match="descriptor cannot be bound"):
@@ -447,6 +444,21 @@ def test_jit_kernel_resolves_canonical_tpu_identities_without_compiling():
     assert kernel.tpu_runtime == TPURuntimeConfig("cmodel")
 
 
+def test_tpu_jit_rejects_dlpack_before_lowering(monkeypatch):
+
+    def forbidden_lower(*_args, **_kwargs):
+        raise AssertionError("TPU lowering must not run for an unsupported adapter")
+
+    monkeypatch.setattr(tilelang, "lower", forbidden_lower)
+    with pytest.raises(ValueError, match=r"TPU targets do not support execution_backend='dlpack'"):
+        JITKernel(
+            func=object(),
+            target=_tpu_target("sg2260e", "rv"),
+            execution_backend="dlpack",
+            runtime_mode="cmodel",
+        )
+
+
 def test_non_tpu_jit_rejects_tpu_runtime_selection():
     with pytest.raises(ValueError, match="only valid for a TPU target"):
         JITKernel(
@@ -459,7 +471,8 @@ def test_non_tpu_jit_rejects_tpu_runtime_selection():
 
 def test_non_tpu_lower_rejects_tpu_runtime_selection():
     prim_func = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(0),
+        [],
+        tvm.tir.Evaluate(0),
     ).with_attr("global_symbol", "runtime_axis_requires_tpu")
 
     with pytest.raises(ValueError, match="only valid for a TPU target"):
@@ -470,11 +483,15 @@ def test_lower_keeps_non_tpu_targets_on_the_regular_codegen_path():
     A = tvm.tir.decl_buffer((4,), "float32", name="A")
     B = tvm.tir.decl_buffer((4,), "float32", name="B")
     i = tvm.tir.Var("i", "int32")
-    body = tvm.tir.For(
-        i, 0, 4, tvm.tir.ForKind.SERIAL,
-        tvm.tir.BufferStore(B, tvm.tir.BufferLoad(A, [i]), [i]))
+    body = tvm.tir.For(i, 0, 4, tvm.tir.ForKind.SERIAL,
+                       tvm.tir.BufferStore(B, tvm.tir.BufferLoad(A, [i]), [i]))
     prim_func = tvm.tir.PrimFunc(
-        [A.data, B.data], body, buffer_map={A.data: A, B.data: B},
+        [A.data, B.data],
+        body,
+        buffer_map={
+            A.data: A,
+            B.data: B
+        },
     ).with_attr("global_symbol", "cpu_copy")
 
     artifact = tilelang.lower(prim_func, target="c")
@@ -487,7 +504,8 @@ def test_lower_keeps_non_tpu_targets_on_the_regular_codegen_path():
 @pytest.mark.parametrize("extern_name", ["ppl.fill", "tpu_sync_all_bdc", "rvt_fadd"])
 def test_tpu_externs_cannot_silently_lower_for_a_non_tpu_target(extern_name):
     prim_func = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(tvm.tir.call_extern("handle", extern_name)),
+        [],
+        tvm.tir.Evaluate(tvm.tir.call_extern("handle", extern_name)),
     ).with_attr("global_symbol", "must_select_tpu")
 
     with pytest.raises(ValueError, match="complete TPU target"):
@@ -496,10 +514,10 @@ def test_tpu_externs_cannot_silently_lower_for_a_non_tpu_target(extern_name):
 
 def test_tpu_externs_cannot_silently_lower_after_auto_selects_c(monkeypatch):
     prim_func = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(tvm.tir.call_extern("handle", "ppl.fill")),
+        [],
+        tvm.tir.Evaluate(tvm.tir.call_extern("handle", "ppl.fill")),
     ).with_attr("global_symbol", "auto_must_select_tpu")
-    monkeypatch.setattr(
-        lower_module, "determine_target", lambda target: tvm.target.Target("c"))
+    monkeypatch.setattr(lower_module, "determine_target", lambda target: tvm.target.Target("c"))
 
     with pytest.raises(ValueError, match="complete TPU target"):
         tilelang.lower(prim_func, target="auto")
@@ -525,8 +543,8 @@ def test_library_generator_receives_target_and_runtime_identities():
     ("ctypes", "CtypesKernelAdapter"),
     ("cython", "CythonKernelAdapter"),
 ])
-def test_database_adapter_forwards_target_and_runtime_identities(
-        monkeypatch, backend, adapter_name):
+def test_database_adapter_forwards_target_and_runtime_identities(monkeypatch, backend,
+                                                                 adapter_name):
     captured = {}
 
     class FakeAdapter:

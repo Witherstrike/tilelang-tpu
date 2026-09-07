@@ -11,15 +11,13 @@ from tilelang import tvm
 import tilelang.language as T
 from tilelang.engine.phase import AssignTPUAddresses, LowerAndLegalize, OptimizeForTarget
 
-
 BANK_SIZE = 16 * 1024
 LMEM_ADDRESS_ATTR_PREFIX = "tilelang.tpu.lmem.address."
 
 
 def _assigned_attrs(func):
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
-    target = tvm.target.Target(
-        "tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
+    target = tvm.target.Target("tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
     with contextlib.redirect_stdout(io.StringIO()):
         mod = LowerAndLegalize(mod, target)
         mod = OptimizeForTarget(mod, target)
@@ -28,8 +26,7 @@ def _assigned_attrs(func):
 
 
 def _addr(attrs, name):
-    key = name if name.startswith(LMEM_ADDRESS_ATTR_PREFIX) else (
-        LMEM_ADDRESS_ATTR_PREFIX + name)
+    key = name if name.startswith(LMEM_ADDRESS_ATTR_PREFIX) else (LMEM_ADDRESS_ATTR_PREFIX + name)
     return int(attrs[key])
 
 
@@ -38,10 +35,7 @@ def _attr_keys(attrs):
 
 
 def _single_attr_with_prefix(attrs, prefix):
-    keys = [
-        key for key in _attr_keys(attrs)
-        if key.startswith(LMEM_ADDRESS_ATTR_PREFIX + prefix)
-    ]
+    keys = [key for key in _attr_keys(attrs) if key.startswith(LMEM_ADDRESS_ATTR_PREFIX + prefix)]
     assert len(keys) == 1, keys
     return keys[0]
 
@@ -51,16 +45,12 @@ def _raw_local_allocations(*, data_names, buffer_names=None):
     if buffer_names is None:
         buffer_names = data_names
     body = tvm.tir.Evaluate(0)
-    for data_name, buffer_name in reversed(
-            list(zip(data_names, buffer_names))):
-        pointer_type = tvm.ir.PointerType(
-            tvm.ir.PrimType("float32"), "shared")
+    for data_name, buffer_name in reversed(list(zip(data_names, buffer_names))):
+        pointer_type = tvm.ir.PointerType(tvm.ir.PrimType("float32"), "shared")
         data = tvm.tir.Var(data_name, pointer_type)
-        buffer = tvm.tir.decl_buffer(
-            (32,), "float32", name=buffer_name, data=data, scope="shared")
-        body = tvm.tir.Allocate(
-            data, "float32", [32], tvm.tir.IntImm("bool", 1),
-            tvm.tir.DeclBuffer(buffer, body))
+        buffer = tvm.tir.decl_buffer((32,), "float32", name=buffer_name, data=data, scope="shared")
+        body = tvm.tir.Allocate(data, "float32", [32], tvm.tir.IntImm("bool", 1),
+                                tvm.tir.DeclBuffer(buffer, body))
     return tvm.tir.PrimFunc([], body).with_attr("global_symbol", "main")
 
 
@@ -151,6 +141,7 @@ def test_exp_composite_operands_are_conservative_bank_clique():
 
 
 def test_address_assignment_rejects_non_tpu_target():
+
     @T.prim_func
     def main():
         T.evaluate(0)
@@ -179,8 +170,9 @@ def test_address_assignment_rejects_non_tpu_target():
         "does not support",
     ),
 ])
-def test_address_assignment_requires_a_complete_supported_tpu_target(
-        target_spec, message, native_message):
+def test_address_assignment_requires_a_complete_supported_tpu_target(target_spec, message,
+                                                                     native_message):
+
     @T.prim_func
     def main():
         T.evaluate(0)
@@ -202,8 +194,7 @@ def test_lmem_address_attributes_are_namespaced_and_follow_the_data_var():
     # owns the allocation data Var, so its identity must drive the hand-off.
     function = _raw_local_allocations(
         data_names=("target",), buffer_names=("unrelated_buffer_name",))
-    target = tvm.target.Target(
-        "tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
+    target = tvm.target.Target("tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
     mod = tvm.tir.transform.BindTarget(target)(tvm.IRModule({"main": function}))
     attrs = tilelang.transform.AddressAssign()(mod)["main"].attrs
 
@@ -214,13 +205,11 @@ def test_lmem_address_attributes_are_namespaced_and_follow_the_data_var():
 
 def test_address_assignment_rejects_duplicate_allocation_data_names():
     function = _raw_local_allocations(data_names=("duplicate", "duplicate"))
-    target = tvm.target.Target(
-        "tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
+    target = tvm.target.Target("tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
     mod = tvm.tir.transform.BindTarget(target)(tvm.IRModule({"main": function}))
 
     with pytest.raises(
-            tvm.error.TVMError,
-            match="unique local allocation data-variable names.*duplicate"):
+            tvm.error.TVMError, match="unique local allocation data-variable names.*duplicate"):
         tilelang.transform.AddressAssign()(mod)
 
 
@@ -233,39 +222,28 @@ def test_copy_aliases_use_canonical_allocations_and_write_effects():
     live together (no overlapping addresses), while a read/write pair need not
     be separated into different banks.
     """
-    pointer_type = tvm.ir.PointerType(
-        tvm.ir.PrimType("float32"), "shared")
+    pointer_type = tvm.ir.PointerType(tvm.ir.PrimType("float32"), "shared")
     a_data = tvm.tir.Var("a", pointer_type)
     b_data = tvm.tir.Var("b", pointer_type)
-    a_decl = tvm.tir.decl_buffer(
-        (32,), "float32", name="a_decl", data=a_data, scope="shared")
-    b_decl = tvm.tir.decl_buffer(
-        (32,), "float32", name="b_decl", data=b_data, scope="shared")
-    a_alias = tvm.tir.decl_buffer(
-        (32,), "float32", name="a_alias", data=a_data, scope="shared")
-    b_alias = tvm.tir.decl_buffer(
-        (32,), "float32", name="b_alias", data=b_data, scope="shared")
+    a_decl = tvm.tir.decl_buffer((32,), "float32", name="a_decl", data=a_data, scope="shared")
+    b_decl = tvm.tir.decl_buffer((32,), "float32", name="b_decl", data=b_data, scope="shared")
+    a_alias = tvm.tir.decl_buffer((32,), "float32", name="a_alias", data=a_data, scope="shared")
+    b_alias = tvm.tir.decl_buffer((32,), "float32", name="b_alias", data=b_data, scope="shared")
 
     def region(buffer, access_mask):
-        return tvm.tir.call_intrin(
-            "handle", tvm.ir.Op.get("tl.region"),
-            tvm.tir.BufferLoad(buffer, [0]), access_mask, 32)
+        return tvm.tir.call_intrin("handle", tvm.ir.Op.get("tl.region"),
+                                   tvm.tir.BufferLoad(buffer, [0]), access_mask, 32)
 
-    copy = tvm.tir.call_extern(
-        "handle", "tl.tpu.copy", region(a_alias, 1), region(b_alias, 2))
+    copy = tvm.tir.call_extern("handle", "tl.tpu.copy", region(a_alias, 1), region(b_alias, 2))
     body = tvm.tir.Allocate(
         a_data, "float32", [32], tvm.tir.IntImm("bool", 1),
         tvm.tir.DeclBuffer(
             a_decl,
-            tvm.tir.Allocate(
-                b_data, "float32", [32], tvm.tir.IntImm("bool", 1),
-                tvm.tir.DeclBuffer(b_decl, tvm.tir.Evaluate(copy)))))
-    function = tvm.tir.PrimFunc(
-        [], body).with_attr("global_symbol", "main")
-    target = tvm.target.Target(
-        "tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
-    mod = tvm.tir.transform.BindTarget(target)(
-        tvm.IRModule({"main": function}))
+            tvm.tir.Allocate(b_data, "float32", [32], tvm.tir.IntImm("bool", 1),
+                             tvm.tir.DeclBuffer(b_decl, tvm.tir.Evaluate(copy)))))
+    function = tvm.tir.PrimFunc([], body).with_attr("global_symbol", "main")
+    target = tvm.target.Target("tpu -mcpu=bm1690 -tpu-programming-model=tpukernel")
+    mod = tvm.tir.transform.BindTarget(target)(tvm.IRModule({"main": function}))
 
     attrs = tilelang.transform.AddressAssign()(mod)["main"].attrs
     a_addr = _addr(attrs, "a")

@@ -32,8 +32,13 @@ def git_source_identity(repo_root: Path) -> dict[str, Any]:
             raise RuntimeError("git returned an empty HEAD revision")
         tracked_status = subprocess.run(
             [
-                "git", "status", "--porcelain=v1", "--untracked-files=no",
-                "--", ".", ":(exclude)research/**",
+                "git",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=no",
+                "--",
+                ".",
+                ":(exclude)research/**",
             ],
             cwd=repo_root,
             check=True,

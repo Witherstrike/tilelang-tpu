@@ -53,7 +53,8 @@ int main() {
   size_t q_size = batch * 1 * heads * dim * DtypeSize(DT_FP16);
   size_t qpe_size = batch * 1 * heads * pe_dim * DtypeSize(DT_FP16);
   size_t kv_size = batch * seqlen_kv * kv_head_num * dim * DtypeSize(DT_FP16);
-  size_t kpe_size = batch * seqlen_kv * kv_head_num * pe_dim * DtypeSize(DT_FP16);
+  size_t kpe_size =
+      batch * seqlen_kv * kv_head_num * pe_dim * DtypeSize(DT_FP16);
   size_t output_size = batch * 1 * heads * dim * DtypeSize(DT_FP16);
 #ifdef TILELANG_TPUV7_RUNTIME
   // tpuv7_runimte的状态变量
@@ -92,10 +93,14 @@ int main() {
 
   // 初始化输入数据
   printf("input_data:\n");
-  rand_data("test", "flashattn", 0, q_data, q_size, &q_shape, -5.0, 5.0, DT_FP16);
-  rand_data("test", "flashattn", 1, qpe_data, qpe_size, &qpe_shape, -5.0, 5.0, DT_FP16);
-  rand_data("test", "flashattn", 2, kv_data, kv_size, &kv_shape, -5.0, 5.0, DT_FP16);
-  rand_data("test", "flashattn", 3, kpe_data, kpe_size, &kpe_shape, -5.0, 5.0, DT_FP16);
+  rand_data("test", "flashattn", 0, q_data, q_size, &q_shape, -5.0, 5.0,
+            DT_FP16);
+  rand_data("test", "flashattn", 1, qpe_data, qpe_size, &qpe_shape, -5.0, 5.0,
+            DT_FP16);
+  rand_data("test", "flashattn", 2, kv_data, kv_size, &kv_shape, -5.0, 5.0,
+            DT_FP16);
+  rand_data("test", "flashattn", 3, kpe_data, kpe_size, &kpe_shape, -5.0, 5.0,
+            DT_FP16);
   void *dev_q_data;
   void *dev_qpe_data;
   void *dev_kv_data;
@@ -114,11 +119,10 @@ int main() {
   tpuRtMemcpyS2D(dev_kv_data, kv_data, kv_size);
   tpuRtMemcpyS2D(dev_kpe_data, kpe_data, kpe_size);
   // 调用自动生成的 host 端函数，此函数内部会调用 device 端的 kernel函数
-  int rst = flashattn((unsigned long long)dev_q_data,
-                        (unsigned long long)dev_qpe_data,
-                        (unsigned long long)dev_kv_data,
-                        (unsigned long long)dev_kpe_data,
-                        (unsigned long long)dev_output_data);
+  int rst = flashattn(
+      (unsigned long long)dev_q_data, (unsigned long long)dev_qpe_data,
+      (unsigned long long)dev_kv_data, (unsigned long long)dev_kpe_data,
+      (unsigned long long)dev_output_data);
   if (rst) {
     printf("kernel_launch failed\n");
     return 1;
@@ -131,10 +135,13 @@ int main() {
   // 打印运行结果
   printf("output data:\n");
   dump_data("./test", "flashattn", "_q", ".in", 0, q_data, q_size, DT_FP16);
-  dump_data("./test", "flashattn", "_qpe", ".in", 1, qpe_data, qpe_size, DT_FP16);
+  dump_data("./test", "flashattn", "_qpe", ".in", 1, qpe_data, qpe_size,
+            DT_FP16);
   dump_data("./test", "flashattn", "_kv", ".in", 2, kv_data, kv_size, DT_FP16);
-  dump_data("./test", "flashattn", "_kpe", ".in", 3, kpe_data, kpe_size, DT_FP16);
-  dump_data("./test", "flashattn", "_output", ".out", 4, output_data, output_size, DT_FP16);
+  dump_data("./test", "flashattn", "_kpe", ".in", 3, kpe_data, kpe_size,
+            DT_FP16);
+  dump_data("./test", "flashattn", "_output", ".out", 4, output_data,
+            output_size, DT_FP16);
   delete[] q_data;
   delete[] qpe_data;
   delete[] kv_data;
@@ -151,7 +158,7 @@ int main() {
   tpuRtStreamDestroy(stream);
 #endif
 #if defined(__bm1684x__) || defined(__bm1688__)
- 
+
 #endif
   return 0;
 }

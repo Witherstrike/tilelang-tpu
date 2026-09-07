@@ -1,10 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-
 import tilelang
 import tilelang.language as T
 import torch
+
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float32"):
 
@@ -14,7 +14,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             B: T.Tensor((K, N), dtype),
             C: T.Tensor((M, N), accum_dtype),
     ):
-      with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
@@ -26,6 +26,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
                 T.ppl_gemm(A_shared, B_shared, C_shared, accumulate=True)
 
             T.ppl_copy(C_shared, C[by * block_M, bx * block_N])
+
     return main_kernel_inner
 
 
@@ -33,7 +34,7 @@ M = 64
 N = 64
 K = 64
 block_M = 32
-block_N = 32    
+block_N = 32
 block_K = 32
 kernel = tilelang.compile(
     matmul(M, N, K, block_M=block_M, block_N=block_N, block_K=block_K),
@@ -48,15 +49,14 @@ res = kernel(a, b, c)
 print(res)
 print("output:")
 print(c)
-import torch.nn.functional as F
 ref = torch.matmul(a, b).float()
 print("ref")
 print(ref)
-diff = ref-c
+diff = ref - c
 max_diff = torch.max(diff)
 avg_diff = torch.mean(diff)
 
-print(f"\n=== 差异分析 ===")
+print("\n=== 差异分析 ===")
 print(f"最大差异: {max_diff}")
 print(f"平均差异: {avg_diff}")
 print("check close:")

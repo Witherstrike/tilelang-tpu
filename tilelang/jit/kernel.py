@@ -104,6 +104,9 @@ class JITKernel(object):
         # Validate the execution backend.
         if execution_backend not in ("dlpack", "ctypes", "cython"):
             raise ValueError(f"Invalid execution backend: {execution_backend!r}")
+        if self.tpu_target is not None and execution_backend == "dlpack":
+            raise ValueError("TPU targets do not support execution_backend='dlpack'; "
+                             "use 'ctypes' or 'cython'.")
 
         if execution_backend == "cython":
             from tilelang.contrib.cc import get_cplus_compiler
@@ -206,9 +209,7 @@ class JITKernel(object):
         enable_device_compile = execution_backend == "dlpack"
         lower_kwargs = {}
         if self.tpu_runtime is not None:
-            lower_kwargs.update(
-                runtime_mode=self.tpu_runtime.runtime_mode,
-            )
+            lower_kwargs.update(runtime_mode=self.tpu_runtime.runtime_mode,)
         with tvm.transform.PassContext(opt_level=3, config=pass_configs):
             artifact = tilelang.lower(
                 tilelang_func,
@@ -222,10 +223,8 @@ class JITKernel(object):
         if self.tpu_target is not None:
             # The lowered artifact is the sole source consumed downstream.
             # Equality checks catch a target/runtime mutation at the boundary.
-            if (artifact.tpu_target != self.tpu_target or
-                    artifact.tpu_runtime != self.tpu_runtime):
-                raise RuntimeError(
-                    "Lowered TPU artifact identity disagrees with the JIT selection")
+            if (artifact.tpu_target != self.tpu_target or artifact.tpu_runtime != self.tpu_runtime):
+                raise RuntimeError("Lowered TPU artifact identity disagrees with the JIT selection")
             self.tpu_target = artifact.tpu_target
             self.tpu_runtime = artifact.tpu_runtime
 

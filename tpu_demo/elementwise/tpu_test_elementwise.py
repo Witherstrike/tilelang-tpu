@@ -17,7 +17,6 @@ import tilelang
 import tilelang.language as T
 import torch
 
-
 M = 64
 N = 64
 BLOCK_M = 32
@@ -32,9 +31,9 @@ def elementwise(operation: str):
 
     @T.prim_func
     def main_kernel_inner(
-        A: T.Tensor((M, N), "float32"),
-        B: T.Tensor((M, N), "float32"),
-        C: T.Tensor((M, N), "float32"),
+            A: T.Tensor((M, N), "float32"),
+            B: T.Tensor((M, N), "float32"),
+            C: T.Tensor((M, N), "float32"),
     ):
         with T.Kernel(2, 2, is_cpu=True) as (bx, by):
             A_shared = T.alloc_shared((BLOCK_M, BLOCK_N), "float32")
@@ -57,36 +56,23 @@ def elementwise(operation: str):
 
 def _device_id(value: str) -> int:
     if not value.isascii() or not value.isdecimal() or int(value) > 2**31 - 1:
-        raise argparse.ArgumentTypeError(
-            "device id must be a non-negative 32-bit decimal integer"
-        )
+        raise argparse.ArgumentTypeError("device id must be a non-negative 32-bit decimal integer")
     return int(value)
 
 
-def _configure_runtime_safety(
-    runtime_mode: str, allow_pcie: bool, device_id: Optional[int]
-) -> None:
+def _configure_runtime_safety(runtime_mode: str, allow_pcie: bool,
+                              device_id: Optional[int]) -> None:
     if runtime_mode == "cmodel":
         if allow_pcie or device_id is not None:
-            raise ValueError(
-                "--allow-pcie/--device-id are only valid with --runtime-mode pcie"
-            )
+            raise ValueError("--allow-pcie/--device-id are only valid with --runtime-mode pcie")
         return
 
     if not allow_pcie:
-        raise ValueError(
-            "PCIe execution is disabled by default; rerun with --allow-pcie "
-            "only from an isolated, supervised process"
-        )
-    if (
-        device_id is None
-        or isinstance(device_id, bool)
-        or not isinstance(device_id, int)
-        or not 0 <= device_id <= 2**31 - 1
-    ):
-        raise ValueError(
-            "PCIe execution requires an explicit non-negative 32-bit --device-id"
-        )
+        raise ValueError("PCIe execution is disabled by default; rerun with --allow-pcie "
+                         "only from an isolated, supervised process")
+    if (device_id is None or isinstance(device_id, bool) or not isinstance(device_id, int) or
+            not 0 <= device_id <= 2**31 - 1):
+        raise ValueError("PCIe execution requires an explicit non-negative 32-bit --device-id")
 
     requested_id = str(device_id)
     existing_gate = os.environ.get("TILELANG_TPU_ALLOW_PCIE_LOAD")
@@ -94,9 +80,7 @@ def _configure_runtime_safety(
     if existing_gate not in (None, "1"):
         raise ValueError("TILELANG_TPU_ALLOW_PCIE_LOAD must be unset or equal to 1")
     if existing_id is not None and existing_id != requested_id:
-        raise ValueError(
-            "--device-id conflicts with the existing TILELANG_TPU_DEVICE_ID"
-        )
+        raise ValueError("--device-id conflicts with the existing TILELANG_TPU_DEVICE_ID")
     os.environ["TILELANG_TPU_ALLOW_PCIE_LOAD"] = "1"
     os.environ["TILELANG_TPU_DEVICE_ID"] = requested_id
 
@@ -162,26 +146,16 @@ def run(
         flush=True,
     )
     if not passed:
-        raise AssertionError(
-            f"elementwise {operation} mismatch: max absolute error is "
-            f"{max_abs_error:.8g}"
-        )
+        raise AssertionError(f"elementwise {operation} mismatch: max absolute error is "
+                             f"{max_abs_error:.8g}")
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--operation", choices=("add", "sub", "mul", "div"), default="add"
-    )
-    parser.add_argument(
-        "--chip", choices=("bm1690", "sg2260e"), default="sg2260e"
-    )
-    parser.add_argument(
-        "--programming-model", choices=("tpukernel", "rv"), default="tpukernel"
-    )
-    parser.add_argument(
-        "--runtime-mode", choices=("cmodel", "pcie"), default="cmodel"
-    )
+    parser.add_argument("--operation", choices=("add", "sub", "mul", "div"), default="add")
+    parser.add_argument("--chip", choices=("bm1690", "sg2260e"), default="sg2260e")
+    parser.add_argument("--programming-model", choices=("tpukernel", "rv"), default="tpukernel")
+    parser.add_argument("--runtime-mode", choices=("cmodel", "pcie"), default="cmodel")
     parser.add_argument(
         "--allow-pcie",
         action="store_true",

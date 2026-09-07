@@ -22,7 +22,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Optional
 
 from tilelang.jit import TPUInstructionProfiler, TPUProfilingConfig
 from tilelang.jit.adapter.tpu_profiling import _pcie_instruction_timings_error
@@ -32,26 +32,25 @@ if __package__:
 else:
     from tpu_matrix_common import git_source_identity
 
-
 _COPY_CASES = ("copy-fp32-local-roundtrip", "copy-fp32-global-to-global",
                "copy-fp16-local-roundtrip", "copy-fp16-global-to-global")
-_CASES = ("elementwise-add", "elementwise-sub", "elementwise-mul",
-          "elementwise-div", "matmul", *_COPY_CASES)
-_CMODEL_CONFIGS = (("sg2260e", "tpukernel"), ("sg2260e", "rv"),
-                   ("bm1690", "tpukernel"))
+_CASES = ("elementwise-add", "elementwise-sub", "elementwise-mul", "elementwise-div", "matmul",
+          *_COPY_CASES)
+_CMODEL_CONFIGS = (("sg2260e", "tpukernel"), ("sg2260e", "rv"), ("bm1690", "tpukernel"))
 _PCIE_CONFIGS = (("sg2260e", "tpukernel"), ("sg2260e", "rv"))
 
 
 def _worker_environment(repo_root: Path, runtime_mode: str,
-                        device_id: int | None) -> dict[str, str]:
+                        device_id: Optional[int]) -> dict[str, str]:
     ppl_root = os.environ.get("PPL_PROJECT_ROOT")
     if not ppl_root:
         raise RuntimeError("PPL_PROJECT_ROOT must identify the configured PPL 1.7 SDK")
     inherited_pythonpath = os.environ.get("PYTHONPATH", "")
     environment = {
-        "PPL_PROJECT_ROOT": ppl_root,
-        "PYTHONPATH": os.pathsep.join(
-            item for item in (str(repo_root), inherited_pythonpath) if item),
+        "PPL_PROJECT_ROOT":
+            ppl_root,
+        "PYTHONPATH":
+            os.pathsep.join(item for item in (str(repo_root), inherited_pythonpath) if item),
     }
     if runtime_mode == "pcie":
         assert device_id is not None
@@ -111,16 +110,14 @@ def _validate_profile_report(report: Any, *, require_decoded_timing: bool) -> No
     if not require_decoded_timing:
         return
     if report.parser_status != "ready" or not report.has_instruction_timings:
-        raise RuntimeError(
-            "decoded instruction timing was explicitly required but the "
-            "successful PCIe dispatch did not produce it "
-            f"(parser_status={report.parser_status!r}, "
-            f"message={report.parser_message!r})")
+        raise RuntimeError("decoded instruction timing was explicitly required but the "
+                           "successful PCIe dispatch did not produce it "
+                           f"(parser_status={report.parser_status!r}, "
+                           f"message={report.parser_message!r})")
     timing_error = _pcie_instruction_timings_error(report.instruction_timings)
     if timing_error is not None:
-        raise RuntimeError(
-            "PCIe decoder produced an invalid instruction interval: "
-            f"{timing_error}")
+        raise RuntimeError("PCIe decoder produced an invalid instruction interval: "
+                           f"{timing_error}")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -145,14 +142,14 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
-                configurations: tuple[tuple[str, str], ...],
-                cases: tuple[str, ...],
+                configurations: tuple[tuple[str, str], ...], cases: tuple[str, ...],
                 environment: dict[str, str]) -> int:
     summary: dict[str, Any] = {
         "schema_version": 1,
         "runtime_mode": args.runtime_mode,
-        "acceptance": ("numeric-raw-and-decoded-timing"
-                       if args.require_decoded_timing else "numeric-and-raw"),
+        "acceptance":
+            ("numeric-raw-and-decoded-timing" if args.require_decoded_timing else "numeric-and-raw"
+            ),
         "decoded_timing_required": args.require_decoded_timing,
         "complete": False,
         "cases": {},
@@ -177,11 +174,10 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
             profiler = TPUInstructionProfiler(config)
             command = [sys.executable, str(worker), "--case", case]
             try:
-                report = (profiler.run_pcie(command, environment=environment)
-                          if args.runtime_mode == "pcie"
-                          else profiler.run_cmodel(command, environment=environment))
-                _validate_profile_report(
-                    report, require_decoded_timing=args.require_decoded_timing)
+                report = (
+                    profiler.run_pcie(command, environment=environment) if args.runtime_mode
+                    == "pcie" else profiler.run_cmodel(command, environment=environment))
+                _validate_profile_report(report, require_decoded_timing=args.require_decoded_timing)
                 summary["cases"][key] = _report_summary(
                     report, require_decoded_timing=args.require_decoded_timing)
                 print(
@@ -207,8 +203,7 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
             )
 
     summary["complete"] = True
-    summary_path.write_text(
-        json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"MATRIX_OK {summary_path}", flush=True)
     return 0
 
@@ -219,8 +214,7 @@ def main() -> int:
         raise ValueError("--timeout must be positive")
     if args.runtime_mode == "pcie":
         if not args.allow_pcie or not args.allow_pcie_profile:
-            raise RuntimeError(
-                "PCIe requires both --allow-pcie and --allow-pcie-profile")
+            raise RuntimeError("PCIe requires both --allow-pcie and --allow-pcie-profile")
         if args.device_id is None or args.device_id < 0:
             raise RuntimeError("PCIe requires a non-negative --device-id")
     elif args.device_id is not None or args.allow_pcie or args.allow_pcie_profile:
@@ -233,20 +227,17 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     configurations = _PCIE_CONFIGS if args.runtime_mode == "pcie" else _CMODEL_CONFIGS
     configurations = tuple(
-        item for item in configurations
-        if (args.chip is None or item[0] == args.chip)
-        and (args.programming_model is None or item[1] == args.programming_model))
+        item for item in configurations if (args.chip is None or item[0] == args.chip) and
+        (args.programming_model is None or item[1] == args.programming_model))
     if not configurations:
-        raise RuntimeError(
-            "the requested chip/programming-model pair is not in this matrix")
+        raise RuntimeError("the requested chip/programming-model pair is not in this matrix")
     cases = tuple(args.cases) if args.cases else _CASES
     scratch_dir = Path(tempfile.mkdtemp(prefix=".scratch-", dir=output_dir))
     environment = _worker_environment(repo_root, args.runtime_mode, args.device_id)
     environment["TMPDIR"] = str(scratch_dir)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
-        return _run_matrix(
-            args, repo_root, output_dir, configurations, cases, environment)
+        return _run_matrix(args, repo_root, output_dir, configurations, cases, environment)
     finally:
         # Delete only the unique directory created by this invocation.  Trace,
         # decoder, and report artifacts are siblings and remain intact.

@@ -23,9 +23,8 @@ def _target(programming_model="tpukernel"):
 def _make_local_copy(scope, width=32):
 
     @T.prim_func
-    def local_copy(
-            source: T.Tensor((1, width), "float32"),
-            destination: T.Tensor((1, width), "float32")):
+    def local_copy(source: T.Tensor((1, width), "float32"), destination: T.Tensor((1, width),
+                                                                                  "float32")):
         T.func_attr({"global_symbol": "local_copy", "tir.noalias": T.bool(True)})
         with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
             tile = T.alloc_shared((1, width), "float32", scope=scope)
@@ -42,9 +41,9 @@ def _make_raw_fill(scope, width):
         T.func_attr({"global_symbol": "raw_fill"})
         with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
             tile = T.alloc_shared((1, width), "float32", scope=scope)
-            T.evaluate(T.call_extern(
-                "handle", "tl.tpu.fill",
-                buffer_to_tile_region(tile, "w"), T.float32(0)))
+            T.evaluate(
+                T.call_extern("handle", "tl.tpu.fill", buffer_to_tile_region(tile, "w"),
+                              T.float32(0)))
 
     return raw_fill
 
@@ -52,9 +51,7 @@ def _make_raw_fill(scope, width):
 def _make_global_copy(width, dtype="uint8"):
 
     @T.prim_func
-    def global_copy(
-            source: T.Tensor((width,), dtype),
-            destination: T.Tensor((width,), dtype)):
+    def global_copy(source: T.Tensor((width,), dtype), destination: T.Tensor((width,), dtype)):
         T.func_attr({"global_symbol": "global_copy", "tir.noalias": T.bool(True)})
         with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
             T.ppl_copy(source, destination)
@@ -76,20 +73,18 @@ def _make_exp_family_with_large_hw(op_name):
             work1 = T.alloc_shared((1, 1, 256, 256), "float16")
             coeff = T.alloc_shared((64, 32), "float16")
             if op_name == "tl.tpukernel.exp":
-                T.evaluate(T.call_extern(
-                    "handle", op_name,
-                    buffer_to_tile_region(out, "rw"),
-                    buffer_to_tile_region(work0, "rw"),
-                    buffer_to_tile_region(work1, "rw"),
-                    buffer_to_tile_region(coeff, "rw")))
+                T.evaluate(
+                    T.call_extern("handle", op_name, buffer_to_tile_region(out, "rw"),
+                                  buffer_to_tile_region(work0, "rw"),
+                                  buffer_to_tile_region(work1, "rw"),
+                                  buffer_to_tile_region(coeff, "rw")))
             else:
-                T.evaluate(T.call_extern(
-                    "handle", op_name,
-                    buffer_to_tile_region(out, "rw"),
-                    buffer_to_tile_region(source, "r"),
-                    buffer_to_tile_region(work0, "rw"),
-                    buffer_to_tile_region(work1, "rw"),
-                    buffer_to_tile_region(coeff, "rw")))
+                T.evaluate(
+                    T.call_extern("handle", op_name, buffer_to_tile_region(out, "rw"),
+                                  buffer_to_tile_region(source, "r"),
+                                  buffer_to_tile_region(work0, "rw"),
+                                  buffer_to_tile_region(work1, "rw"),
+                                  buffer_to_tile_region(coeff, "rw")))
 
     return exp_family
 
@@ -117,20 +112,17 @@ def _emit_source_without_address_assignment(function):
 
         tvm.tir.stmt_functor.post_order_visit(lowered.body, collect)
         for index, name in enumerate(allocation_names):
-            lowered = lowered.with_attr(
-                "tilelang.tpu.lmem.address." + name,
-                tvm.tir.IntImm("int64", index * 64))
+            lowered = lowered.with_attr("tilelang.tpu.lmem.address." + name,
+                                        tvm.tir.IntImm("int64", index * 64))
         module.update_func(global_var, lowered)
 
     codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
     return codegen(module, target)
 
 
-@pytest.mark.parametrize(
-    "scope", ("shared", "shared.dyn", "local", "local.fragment"))
+@pytest.mark.parametrize("scope", ("shared", "shared.dyn", "local", "local.fragment"))
 @pytest.mark.parametrize("programming_model", ("tpukernel", "rv"))
-def test_all_normalized_local_scopes_reach_the_descriptor_paths(
-        scope, programming_model):
+def test_all_normalized_local_scopes_reach_the_descriptor_paths(scope, programming_model):
     source = tilelang.lower(
         _make_local_copy(scope),
         target=_target(programming_model),
@@ -166,16 +158,14 @@ def test_descriptor_dimension_limit_accepts_65535_and_rejects_65536():
     ).kernel_source
     assert ".shape = {1, 1, 1, 65535}" in source
 
-    with pytest.raises(
-            tvm.error.TVMError, match="dimension 65536.*dim4 limit 65535"):
+    with pytest.raises(tvm.error.TVMError, match="dimension 65536.*dim4 limit 65535"):
         tilelang.lower(
             _make_global_copy(65536),
             target=_target(),
             runtime_mode="cmodel",
         )
 
-    with pytest.raises(
-            tvm.error.TVMError, match="dimension 65536.*dim4 limit 65535"):
+    with pytest.raises(tvm.error.TVMError, match="dimension 65536.*dim4 limit 65535"):
         tilelang.lower(
             _make_raw_fill("shared.dyn", 65536),
             target=_target(),
@@ -197,13 +187,11 @@ def test_local_rank_zero_descriptor_fails_closed():
         T.func_attr({"global_symbol": "scalar_fill"})
         with T.Kernel(1, is_cpu=True) as _:
             scalar = T.alloc_shared((), "float32")
-            T.evaluate(T.call_extern(
-                "handle", "tl.tpu.fill",
-                buffer_to_tile_region(scalar, "w"), T.float32(0)))
+            T.evaluate(
+                T.call_extern("handle", "tl.tpu.fill", buffer_to_tile_region(scalar, "w"),
+                              T.float32(0)))
 
-    with pytest.raises(
-            ValueError,
-            match="semantic-region-ABI.*rank 0.*rank 1 through 4"):
+    with pytest.raises(ValueError, match="semantic-region-ABI.*rank 0.*rank 1 through 4"):
         tilelang.lower(
             scalar_fill,
             target=_target(),
@@ -230,12 +218,10 @@ def test_rv_integer_copy_descriptors_preserve_signedness(dtype, dtype_name):
     assert f"PRECISION({dtype_name}), FP8TYPE({dtype_name})" not in source
 
 
-@pytest.mark.parametrize(
-    "op_name", ("tl.tpukernel.exp", "tl.tpukernel.sigmoid"))
+@pytest.mark.parametrize("op_name", ("tl.tpukernel.exp", "tl.tpukernel.sigmoid"))
 def test_exp_family_rejects_h_w_product_above_ppl_limit(op_name):
     with pytest.raises(tvm.error.TVMError, match=r"requires h\*w <= 65535"):
-        _emit_source_without_address_assignment(
-            _make_exp_family_with_large_hw(op_name))
+        _emit_source_without_address_assignment(_make_exp_family_with_large_hw(op_name))
 
 
 @pytest.mark.parametrize("reduce", (T.ppl_reduce_sum, T.ppl_reduce_max))
@@ -249,14 +235,12 @@ def test_reduction_rejects_unrepresentable_aligned_width(reduce):
             destination = T.alloc_shared((1, 1), "float16")
             reduce(source, destination, dim=1)
 
-    with pytest.raises(
-            tvm.error.TVMError, match="aligned width 65536.*dim4 limit 65535"):
+    with pytest.raises(tvm.error.TVMError, match="aligned width 65536.*dim4 limit 65535"):
         tilelang.lower(reduction, target=_target(), runtime_mode="cmodel")
 
 
 @pytest.mark.parametrize("programming_model", ("tpukernel", "rv"))
-def test_rank3_multichannel_full_copy_uses_one_lane_aware_descriptor(
-        programming_model):
+def test_rank3_multichannel_full_copy_uses_one_lane_aware_descriptor(programming_model):
 
     @T.prim_func
     def rank3_copy(source: T.Tensor((1, 2, 32), "float32")):
@@ -278,36 +262,33 @@ def test_rank3_multichannel_full_copy_uses_one_lane_aware_descriptor(
 
 
 def test_native_codegen_rejects_malformed_descriptor_operands():
-    pointer_type = tvm.ir.PointerType(
-        tvm.ir.PrimType("float32"), "shared")
+    pointer_type = tvm.ir.PointerType(tvm.ir.PrimType("float32"), "shared")
     tile = tvm.tir.Var("tile", pointer_type)
-    tile_buffer = tvm.tir.decl_buffer(
-        (8,), "float32", name="tile_buffer", data=tile, scope="shared")
+    tile_buffer = tvm.tir.decl_buffer((8,),
+                                      "float32",
+                                      name="tile_buffer",
+                                      data=tile,
+                                      scope="shared")
     native_codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
     def region(buffer, minimum=0, extent=8, access_mask=2):
-        return tvm.tir.call_intrin(
-            "handle", tvm.tir.op.Op.get("tl.region"),
-            tvm.tir.BufferLoad(buffer, [minimum]), access_mask, extent)
+        return tvm.tir.call_intrin("handle", tvm.tir.op.Op.get("tl.region"),
+                                   tvm.tir.BufferLoad(buffer, [minimum]), access_mask, extent)
 
     def descriptor_function(operand):
-        call = tvm.tir.call_extern(
-            "handle", "tl.tpu.fill", operand,
-            tvm.tir.FloatImm("float32", 0))
-        body = tvm.tir.Allocate(
-            tile, "float32", [8], tvm.tir.IntImm("bool", 1),
-            tvm.tir.DeclBuffer(tile_buffer, tvm.tir.Evaluate(call)))
+        call = tvm.tir.call_extern("handle", "tl.tpu.fill", operand, tvm.tir.FloatImm("float32", 0))
+        body = tvm.tir.Allocate(tile, "float32", [8], tvm.tir.IntImm("bool", 1),
+                                tvm.tir.DeclBuffer(tile_buffer, tvm.tir.Evaluate(call)))
         return tvm.tir.PrimFunc(
-            [], body,
-        ).with_attr("global_symbol", "malformed_region").with_attr(
-            "tilelang.tpu.lmem.address.tile", tvm.tir.IntImm("int64", 0))
+            [],
+            body,
+        ).with_attr("global_symbol", "malformed_region").with_attr("tilelang.tpu.lmem.address.tile",
+                                                                   tvm.tir.IntImm("int64", 0))
 
     malformed_cases = (
         (tvm.tir.IntImm("int32", 0), "whole-buffer tl.region operand"),
-        (tvm.tir.call_intrin(
-            "handle", tvm.tir.op.Op.get("tl.region"),
-            tvm.tir.IntImm("int32", 0), 2, 8),
-         "must start with a BufferLoad marker"),
+        (tvm.tir.call_intrin("handle", tvm.tir.op.Op.get("tl.region"), tvm.tir.IntImm("int32", 0),
+                             2, 8), "must start with a BufferLoad marker"),
         (region(tile_buffer, minimum=1), "cover the whole Buffer from zero"),
         (region(tile_buffer, extent=7), "must cover the whole Buffer"),
         (region(tile_buffer, access_mask=1), "requires access mask 2"),
@@ -319,49 +300,45 @@ def test_native_codegen_rejects_malformed_descriptor_operands():
                 tvm.target.Target(_target()),
             )
 
-    mismatched_view = tvm.tir.decl_buffer(
-        (4,), "float32", name="mismatched_view", data=tile,
-        scope="shared")
+    mismatched_view = tvm.tir.decl_buffer((4,),
+                                          "float32",
+                                          name="mismatched_view",
+                                          data=tile,
+                                          scope="shared")
     mismatched_function = descriptor_function(region(mismatched_view, extent=4))
     with pytest.raises(
-            tvm.error.TVMError,
-            match="logical Buffer shape disagrees with its descriptor owner"):
+            tvm.error.TVMError, match="logical Buffer shape disagrees with its descriptor owner"):
         native_codegen(
             tvm.IRModule({"mismatched_region": mismatched_function}),
             tvm.target.Target(_target()),
         )
 
     malformed_copy = tvm.tir.PrimFunc(
-        [], tvm.tir.Evaluate(tvm.tir.call_extern(
-            "handle", "tl.tpu.copy",
-            tvm.tir.IntImm("int32", 0),
-            tvm.tir.IntImm("int32", 0))),
+        [],
+        tvm.tir.Evaluate(
+            tvm.tir.call_extern("handle", "tl.tpu.copy", tvm.tir.IntImm("int32", 0),
+                                tvm.tir.IntImm("int32", 0))),
     ).with_attr("global_symbol", "malformed_copy_region")
-    with pytest.raises(
-            tvm.error.TVMError,
-            match="src must be a canonical tl.region descriptor"):
+    with pytest.raises(tvm.error.TVMError, match="src must be a canonical tl.region descriptor"):
         native_codegen(
             tvm.IRModule({"malformed_copy_region": malformed_copy}),
             tvm.target.Target(_target()),
         )
 
-    invalid_dtype_region = tvm.tir.call_intrin(
-        "int32", tvm.tir.op.Op.get("tl.region"),
-        tvm.tir.BufferLoad(tile_buffer, [0]), 1, 8)
-    invalid_dtype_copy = tvm.tir.call_extern(
-        "handle", "tl.tpu.copy", invalid_dtype_region,
-        region(tile_buffer, access_mask=2))
+    invalid_dtype_region = tvm.tir.call_intrin("int32", tvm.tir.op.Op.get("tl.region"),
+                                               tvm.tir.BufferLoad(tile_buffer, [0]), 1, 8)
+    invalid_dtype_copy = tvm.tir.call_extern("handle", "tl.tpu.copy", invalid_dtype_region,
+                                             region(tile_buffer, access_mask=2))
     invalid_dtype_copy_body = tvm.tir.Allocate(
         tile, "float32", [8], tvm.tir.IntImm("bool", 1),
-        tvm.tir.DeclBuffer(
-            tile_buffer, tvm.tir.Evaluate(invalid_dtype_copy)))
+        tvm.tir.DeclBuffer(tile_buffer, tvm.tir.Evaluate(invalid_dtype_copy)))
     invalid_dtype_copy_function = tvm.tir.PrimFunc(
-        [], invalid_dtype_copy_body,
-    ).with_attr("global_symbol", "invalid_dtype_copy_region").with_attr(
-        "tilelang.tpu.lmem.address.tile", tvm.tir.IntImm("int64", 0))
-    with pytest.raises(
-            tvm.error.TVMError,
-            match="src tl.region must have handle dtype"):
+        [],
+        invalid_dtype_copy_body,
+    ).with_attr("global_symbol",
+                "invalid_dtype_copy_region").with_attr("tilelang.tpu.lmem.address.tile",
+                                                       tvm.tir.IntImm("int64", 0))
+    with pytest.raises(tvm.error.TVMError, match="src tl.region must have handle dtype"):
         native_codegen(
             tvm.IRModule({
                 "invalid_dtype_copy_region": invalid_dtype_copy_function,
@@ -378,10 +355,9 @@ def test_native_semantic_ops_validate_source_rank_and_full_shape():
         with T.Kernel(1, is_cpu=True) as _:
             dst = T.alloc_shared((2, 3, 1, 4), "float32")
             src = T.alloc_shared((1, 3, 2, 4), "float32")
-            T.evaluate(T.call_extern(
-                "handle", "tl.tpukernel.rsqrt",
-                buffer_to_tile_region(dst, "w"),
-                buffer_to_tile_region(src, "r")))
+            T.evaluate(
+                T.call_extern("handle", "tl.tpukernel.rsqrt", buffer_to_tile_region(dst, "w"),
+                              buffer_to_tile_region(src, "r")))
 
     with pytest.raises(tvm.error.TVMError, match="matching dst/src shapes"):
         tilelang.lower(
@@ -397,12 +373,10 @@ def test_native_semantic_ops_validate_source_rank_and_full_shape():
             lhs = T.alloc_shared((1, 16, 16), "float16")
             rhs = T.alloc_shared((1, 16, 16), "float16")
             out = T.alloc_shared((1, 16, 16), "float16")
-            T.evaluate(T.call_extern(
-                "handle", "tl.tpu.gemm",
-                buffer_to_tile_region(lhs, "r"),
-                buffer_to_tile_region(rhs, "r"),
-                buffer_to_tile_region(out, "w"), T.bool(False), T.bool(False),
-                16, 16, 16, T.bool(False)))
+            T.evaluate(
+                T.call_extern("handle", "tl.tpu.gemm", buffer_to_tile_region(lhs, "r"),
+                              buffer_to_tile_region(rhs, "r"), buffer_to_tile_region(out, "w"),
+                              T.bool(False), T.bool(False), 16, 16, 16, T.bool(False)))
 
     with pytest.raises(tvm.error.TVMError, match="requires rank-2 A"):
         tilelang.lower(
@@ -421,16 +395,13 @@ def test_native_gemm_rejects_output_storage_alias(programming_model):
         with T.Kernel(1, is_cpu=True) as _:
             lhs_and_out = T.alloc_shared((16, 16), "float16")
             rhs = T.alloc_shared((16, 16), "float16")
-            T.evaluate(T.call_extern(
-                "handle", "tl.tpu.gemm",
-                buffer_to_tile_region(lhs_and_out, "r"),
-                buffer_to_tile_region(rhs, "r"),
-                buffer_to_tile_region(lhs_and_out, "w"),
-                T.bool(False), T.bool(False), 16, 16, 16, T.bool(False)))
+            T.evaluate(
+                T.call_extern("handle", "tl.tpu.gemm", buffer_to_tile_region(lhs_and_out, "r"),
+                              buffer_to_tile_region(rhs, "r"),
+                              buffer_to_tile_region(lhs_and_out, "w"), T.bool(False), T.bool(False),
+                              16, 16, 16, T.bool(False)))
 
-    with pytest.raises(
-            tvm.error.TVMError,
-            match="output/accumulator C must use storage distinct"):
+    with pytest.raises(tvm.error.TVMError, match="output/accumulator C must use storage distinct"):
         tilelang.lower(
             aliased_gemm,
             target=_target(programming_model),
@@ -448,12 +419,11 @@ def test_native_exp_rejects_transposed_coefficient_shape():
             work0 = T.alloc_shared((4, 32), "float16")
             work1 = T.alloc_shared((4, 32), "float16")
             coeff = T.alloc_shared((32, 64), "float16")
-            T.evaluate(T.call_extern(
-                "handle", "tl.tpukernel.exp",
-                buffer_to_tile_region(out, "rw"),
-                buffer_to_tile_region(work0, "rw"),
-                buffer_to_tile_region(work1, "rw"),
-                buffer_to_tile_region(coeff, "rw")))
+            T.evaluate(
+                T.call_extern("handle", "tl.tpukernel.exp", buffer_to_tile_region(out, "rw"),
+                              buffer_to_tile_region(work0,
+                                                    "rw"), buffer_to_tile_region(work1, "rw"),
+                              buffer_to_tile_region(coeff, "rw")))
 
     with pytest.raises(tvm.error.TVMError, match="coefficient buffer must have shape"):
         tilelang.lower(
@@ -465,22 +435,21 @@ def test_native_exp_rejects_transposed_coefficient_shape():
 
 @pytest.mark.parametrize("view_kind", ("elem_offset", "explicit_strides"))
 def test_global_descriptor_rejects_unrepresented_buffer_views(view_kind):
-    pointer_type = tvm.ir.PointerType(
-        tvm.ir.PrimType("float32"), "global")
+    pointer_type = tvm.ir.PointerType(tvm.ir.PrimType("float32"), "global")
     data = tvm.tir.Var("data", pointer_type)
-    kwargs = {"elem_offset": 1} if view_kind == "elem_offset" else {
-        "strides": [1]
-    }
-    view = tvm.tir.decl_buffer(
-        (8,), "float32", name="view", data=data, scope="global", **kwargs)
+    kwargs = {"elem_offset": 1} if view_kind == "elem_offset" else {"strides": [1]}
+    view = tvm.tir.decl_buffer((8,), "float32", name="view", data=data, scope="global", **kwargs)
     function = tvm.tir.PrimFunc(
-        [data], tvm.tir.Evaluate(0), buffer_map={data: view},
+        [data],
+        tvm.tir.Evaluate(0),
+        buffer_map={
+            data: view
+        },
     ).with_attr("global_symbol", "global_buffer_view")
     native_codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
     with pytest.raises(
-            tvm.error.TVMError,
-            match="must be a canonical zero-offset contiguous Buffer"):
+            tvm.error.TVMError, match="must be a canonical zero-offset contiguous Buffer"):
         native_codegen(
             tvm.IRModule({"global_buffer_view": function}),
             tvm.target.Target(_target()),
@@ -488,40 +457,36 @@ def test_global_descriptor_rejects_unrepresented_buffer_views(view_kind):
 
 
 def test_local_copy_rejects_nonzero_channel_minimum():
-    global_pointer = tvm.ir.PointerType(
-        tvm.ir.PrimType("float32"), "global")
+    global_pointer = tvm.ir.PointerType(tvm.ir.PrimType("float32"), "global")
     source_data = tvm.tir.Var("source", global_pointer)
-    source = tvm.tir.decl_buffer(
-        (1, 2, 32), "float32", name="source", data=source_data,
-        scope="global")
-    local_pointer = tvm.ir.PointerType(
-        tvm.ir.PrimType("float32"), "shared")
+    source = tvm.tir.decl_buffer((1, 2, 32),
+                                 "float32",
+                                 name="source",
+                                 data=source_data,
+                                 scope="global")
+    local_pointer = tvm.ir.PointerType(tvm.ir.PrimType("float32"), "shared")
     tile_data = tvm.tir.Var("tile", local_pointer)
-    tile = tvm.tir.decl_buffer(
-        (1, 2, 32), "float32", name="tile", data=tile_data,
-        scope="shared")
+    tile = tvm.tir.decl_buffer((1, 2, 32), "float32", name="tile", data=tile_data, scope="shared")
 
     def region(buffer, indices, access_mask, extents):
-        return tvm.tir.call_intrin(
-            "handle", tvm.tir.op.Op.get("tl.region"),
-            tvm.tir.BufferLoad(buffer, indices), access_mask, *extents)
+        return tvm.tir.call_intrin("handle", tvm.tir.op.Op.get("tl.region"),
+                                   tvm.tir.BufferLoad(buffer, indices), access_mask, *extents)
 
-    copy = tvm.tir.call_extern(
-        "handle", "tl.tpu.copy",
-        region(source, [0, 0, 0], 1, [1, 1, 32]),
-        region(tile, [0, 1, 0], 2, [1, 1, 32]))
-    body = tvm.tir.Allocate(
-        tile_data, "float32", [1, 2, 32], tvm.tir.IntImm("bool", 1),
-        tvm.tir.DeclBuffer(tile, tvm.tir.Evaluate(copy)))
+    copy = tvm.tir.call_extern("handle", "tl.tpu.copy", region(source, [0, 0, 0], 1, [1, 1, 32]),
+                               region(tile, [0, 1, 0], 2, [1, 1, 32]))
+    body = tvm.tir.Allocate(tile_data, "float32", [1, 2, 32], tvm.tir.IntImm("bool", 1),
+                            tvm.tir.DeclBuffer(tile, tvm.tir.Evaluate(copy)))
     function = tvm.tir.PrimFunc(
-        [source_data], body, buffer_map={source_data: source},
-    ).with_attr("global_symbol", "local_channel_slice").with_attr(
-        "tilelang.tpu.lmem.address.tile", tvm.tir.IntImm("int64", 0))
+        [source_data],
+        body,
+        buffer_map={
+            source_data: source
+        },
+    ).with_attr("global_symbol", "local_channel_slice").with_attr("tilelang.tpu.lmem.address.tile",
+                                                                  tvm.tir.IntImm("int64", 0))
     native_codegen = tvm._ffi.get_global_func("target.build.tilelang_tpu")
 
-    with pytest.raises(
-            tvm.error.TVMError,
-            match="local C-axis minimum must be zero"):
+    with pytest.raises(tvm.error.TVMError, match="local C-axis minimum must be zero"):
         native_codegen(
             tvm.IRModule({"local_channel_slice": function}),
             tvm.target.Target(_target()),
@@ -529,37 +494,41 @@ def test_local_copy_rejects_nonzero_channel_minimum():
 
 
 def test_global_descriptor_identity_does_not_depend_on_buffer_name():
-    global_pointer = tvm.ir.PointerType(
-        tvm.ir.PrimType("float32"), "global")
+    global_pointer = tvm.ir.PointerType(tvm.ir.PrimType("float32"), "global")
     source_data = tvm.tir.Var("source_data", global_pointer)
     unused_data = tvm.tir.Var("unused_data", global_pointer)
-    source = tvm.tir.decl_buffer(
-        (4,), "float32", name="duplicate", data=source_data, scope="global")
-    unused = tvm.tir.decl_buffer(
-        (8,), "float32", name="duplicate", data=unused_data, scope="global")
+    source = tvm.tir.decl_buffer((4,),
+                                 "float32",
+                                 name="duplicate",
+                                 data=source_data,
+                                 scope="global")
+    unused = tvm.tir.decl_buffer((8,),
+                                 "float32",
+                                 name="duplicate",
+                                 data=unused_data,
+                                 scope="global")
 
-    local_pointer = tvm.ir.PointerType(
-        tvm.ir.PrimType("float32"), "shared")
+    local_pointer = tvm.ir.PointerType(tvm.ir.PrimType("float32"), "shared")
     tile_data = tvm.tir.Var("tile", local_pointer)
-    tile = tvm.tir.decl_buffer(
-        (4,), "float32", name="tile_buffer", data=tile_data, scope="shared")
+    tile = tvm.tir.decl_buffer((4,), "float32", name="tile_buffer", data=tile_data, scope="shared")
 
     def region(buffer, access_mask, extent):
-        return tvm.tir.call_intrin(
-            "handle", tvm.tir.op.Op.get("tl.region"),
-            tvm.tir.BufferLoad(buffer, [0]), access_mask, extent)
+        return tvm.tir.call_intrin("handle", tvm.tir.op.Op.get("tl.region"),
+                                   tvm.tir.BufferLoad(buffer, [0]), access_mask, extent)
 
-    copy = tvm.tir.call_extern(
-        "handle", "tl.tpu.copy",
-        region(source, 1, 4), region(tile, 2, 4))
-    body = tvm.tir.Allocate(
-        tile_data, "float32", [4], tvm.tir.IntImm("bool", 1),
-        tvm.tir.DeclBuffer(tile, tvm.tir.Evaluate(copy)))
+    copy = tvm.tir.call_extern("handle", "tl.tpu.copy", region(source, 1, 4), region(tile, 2, 4))
+    body = tvm.tir.Allocate(tile_data, "float32", [4], tvm.tir.IntImm("bool", 1),
+                            tvm.tir.DeclBuffer(tile, tvm.tir.Evaluate(copy)))
     function = tvm.tir.PrimFunc(
-        [source_data, unused_data], body,
-        buffer_map={source_data: source, unused_data: unused},
-    ).with_attr("global_symbol", "duplicate_buffer_names").with_attr(
-        "tilelang.tpu.lmem.address.tile", tvm.tir.IntImm("int64", 0))
+        [source_data, unused_data],
+        body,
+        buffer_map={
+            source_data: source,
+            unused_data: unused
+        },
+    ).with_attr("global_symbol",
+                "duplicate_buffer_names").with_attr("tilelang.tpu.lmem.address.tile",
+                                                    tvm.tir.IntImm("int64", 0))
 
     source_code = tvm._ffi.get_global_func("target.build.tilelang_tpu")(
         tvm.IRModule({"duplicate_buffer_names": function}),

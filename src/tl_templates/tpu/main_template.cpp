@@ -1,3 +1,4 @@
+// clang-format off
 #include <tpuv7_rt.h>
 #ifdef TILELANG_TPU_PCIE_PROFILING
 #include <tpuDNN.h>
@@ -356,3 +357,4 @@ extern "C" int tilelang_tpu_run(void** args) {{
 #endif
   return status;
 }}
+// clang-format on

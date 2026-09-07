@@ -65,15 +65,18 @@ def is_hip_target(target: Target) -> bool:
 def is_cpu_target(target: Target) -> bool:
     return target.kind.name in ["c"]
 
+
 def is_tpu_target(target: Target) -> bool:
     if isinstance(target, str):
         tokens = target.strip().split(maxsplit=1)
         return bool(tokens) and tokens[0] == "tpu"
     return target.kind.name == "tpu"
 
+
 def get_tpu_template_dir() -> str:
     current_dir = os.path.dirname(os.path.abspath(__file__))
     return os.path.abspath(os.path.join(current_dir, "../../../src/tl_templates/tpu"))
+
 
 def get_annotated_mod(
     func_or_mod: Union[tir.PrimFunc, tvm.IRModule],

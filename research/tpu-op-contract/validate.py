@@ -12,12 +12,12 @@ import argparse
 import ast
 import json
 import re
+import subprocess
 import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
-
+from typing import Any, Iterable, Optional
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
@@ -26,15 +26,42 @@ SCHEMA_PATH = HERE / "schema.json"
 ABSOLUTE_PATH = re.compile(r"^(?:/|[A-Za-z]:[\\/])")
 GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
 SEMANTIC_EXTERN = re.compile(r"tl\.(?:tpu|tpukernel)\.[A-Za-z0-9_]+")
+RUNTIME_CASE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*/[A-Za-z0-9._-]+$")
+SUPPORTED_SCHEMA_KEYWORDS = {
+    "$schema",
+    "$id",
+    "$defs",
+    "$ref",
+    "title",
+    "description",
+    "type",
+    "const",
+    "enum",
+    "properties",
+    "required",
+    "additionalProperties",
+    "propertyNames",
+    "dependentRequired",
+    "items",
+    "minItems",
+    "uniqueItems",
+    "minProperties",
+    "minLength",
+    "minimum",
+    "pattern",
+    "format",
+    "allOf",
+    "if",
+    "then",
+    "not",
+}
 REQUIRED_STAGES = {
     "declared",
     "codegen_passed",
     "cmodel_numeric_passed",
     "pcie_numeric_passed",
 }
-STAGE_STATUSES = {
-    "passed", "historical_passed", "failed", "unverified", "not_applicable"
-}
+STAGE_STATUSES = {"passed", "historical_passed", "failed", "unverified", "not_applicable"}
 SUPPORT_STATUSES = {"supported", "unsupported", "unverified", "experimental"}
 IMPLEMENTATION_CONFORMANCES = {
     "conforming",
@@ -62,12 +89,8 @@ CONSTRAINT_STATUSES = {"enforced", "documented", "unverified", "known_gap"}
 CONSTRAINT_CATEGORIES = {
     "dtype", "shape", "layout", "memory", "value", "aliasing", "target", "scheduling"
 }
-CONSTRAINT_PHASES = {
-    "frontend", "lowering", "codegen", "compile", "runtime", "not_enforced"
-}
-FAILURE_PHASES = {
-    "frontend", "lowering", "codegen", "compile", "runtime", "test_supervisor"
-}
+CONSTRAINT_PHASES = {"frontend", "lowering", "codegen", "compile", "runtime", "not_enforced"}
+FAILURE_PHASES = {"frontend", "lowering", "codegen", "compile", "runtime", "test_supervisor"}
 FAILURE_ACTIONS = {
     "reject", "abort_compile", "abort_run", "terminate_process_group_and_skip_remaining"
 }
@@ -97,6 +120,115 @@ class SchemaDefinitionError(ContractError):
     """The schema itself is unsupported or malformed, not an instance mismatch."""
 
 
+def _validate_schema_definition(schema: Any,
+                                root: Optional[dict[str, Any]] = None,
+                                path: str = "schema") -> None:
+    """Fail closed on every schema node, including branches unused by the instance."""
+
+    if not isinstance(schema, dict):
+        raise SchemaDefinitionError(f"{path} must be an object")
+    if root is None:
+        root = schema
+
+    unknown = set(schema) - SUPPORTED_SCHEMA_KEYWORDS
+    if unknown:
+        raise SchemaDefinitionError(
+            f"schema uses unsupported keywords at {path}: {sorted(unknown)}")
+
+    for keyword in ("$schema", "$id", "title", "description"):
+        if keyword in schema and not isinstance(schema[keyword], str):
+            raise SchemaDefinitionError(f"{path}.{keyword} must be a string")
+
+    reference = schema.get("$ref")
+    if "$ref" in schema:
+        if not isinstance(reference, str) or not reference.startswith("#/$defs/"):
+            raise SchemaDefinitionError(f"schema has unsupported reference {reference!r} at {path}")
+        name = reference[len("#/$defs/"):]
+        definitions = root.get("$defs")
+        if (not name or not isinstance(definitions, dict) or
+                not isinstance(definitions.get(name), dict)):
+            raise SchemaDefinitionError(f"schema reference {reference!r} is unresolved at {path}")
+
+    expected_type = schema.get("type")
+    if ("type" in schema and
+        (not isinstance(expected_type, str) or
+         expected_type not in {"object", "array", "string", "integer", "boolean"})):
+        raise SchemaDefinitionError(f"schema has unsupported type {expected_type!r} at {path}")
+
+    definitions = schema.get("$defs")
+    if "$defs" in schema:
+        if not isinstance(definitions, dict):
+            raise SchemaDefinitionError(f"{path}.$defs must be an object")
+        for name, child in definitions.items():
+            if not isinstance(name, str) or not name:
+                raise SchemaDefinitionError(f"{path}.$defs has an invalid name")
+            _validate_schema_definition(child, root, f"{path}.$defs.{name}")
+
+    properties = schema.get("properties")
+    if "properties" in schema:
+        if not isinstance(properties, dict):
+            raise SchemaDefinitionError(f"{path}.properties must be an object")
+        for name, child in properties.items():
+            if not isinstance(name, str):
+                raise SchemaDefinitionError(f"{path}.properties has a non-string name")
+            _validate_schema_definition(child, root, f"{path}.properties.{name}")
+
+    additional = schema.get("additionalProperties")
+    if ("additionalProperties" in schema and not isinstance(additional, (bool, dict))):
+        raise SchemaDefinitionError(f"{path}.additionalProperties must be a boolean or object")
+    if isinstance(additional, dict):
+        _validate_schema_definition(additional, root, f"{path}.additionalProperties")
+
+    for keyword in ("propertyNames", "items", "if", "then", "not"):
+        if keyword in schema:
+            _validate_schema_definition(schema[keyword], root, f"{path}.{keyword}")
+
+    all_of = schema.get("allOf")
+    if "allOf" in schema:
+        if not isinstance(all_of, list) or not all_of:
+            raise SchemaDefinitionError(f"{path}.allOf must be a non-empty array")
+        for index, child in enumerate(all_of):
+            _validate_schema_definition(child, root, f"{path}.allOf[{index}]")
+
+    for keyword in ("required", "enum"):
+        value = schema.get(keyword)
+        if keyword in schema and not isinstance(value, list):
+            raise SchemaDefinitionError(f"{path}.{keyword} must be an array")
+    required = schema.get("required")
+    if isinstance(required, list) and (any(not isinstance(item, str) for item in required) or
+                                       len(required) != len(set(required))):
+        raise SchemaDefinitionError(f"{path}.required must contain unique string names")
+
+    dependencies = schema.get("dependentRequired")
+    if "dependentRequired" in schema:
+        if not isinstance(dependencies, dict):
+            raise SchemaDefinitionError(f"{path}.dependentRequired must be an object")
+        for name, dependents in dependencies.items():
+            if (not isinstance(name, str) or not isinstance(dependents, list) or
+                    any(not isinstance(item, str) for item in dependents) or
+                    len(dependents) != len(set(dependents))):
+                raise SchemaDefinitionError(
+                    f"{path}.dependentRequired entries must be unique string arrays")
+
+    for keyword in ("minItems", "minProperties", "minLength", "minimum"):
+        value = schema.get(keyword)
+        if keyword in schema and (isinstance(value, bool) or not isinstance(value, int) or
+                                  value < 0):
+            raise SchemaDefinitionError(f"{path}.{keyword} must be a non-negative integer")
+    if "uniqueItems" in schema and not isinstance(schema["uniqueItems"], bool):
+        raise SchemaDefinitionError(f"{path}.uniqueItems must be a boolean")
+    pattern = schema.get("pattern")
+    if "pattern" in schema:
+        if not isinstance(pattern, str):
+            raise SchemaDefinitionError(f"{path}.pattern must be a string")
+        try:
+            re.compile(pattern)
+        except re.error as error:
+            raise SchemaDefinitionError(f"{path}.pattern is invalid: {error}") from error
+    if "format" in schema and schema["format"] != "date-time":
+        raise SchemaDefinitionError(f"{path}.format uses unsupported value {schema['format']!r}")
+
+
 def _json_schema_matches(value: Any, schema: dict[str, Any], root: dict[str, Any],
                          path: str) -> bool:
     try:
@@ -118,14 +250,10 @@ def _validate_json_schema(value: Any, schema: dict[str, Any], root: dict[str, An
     keywords must be added here before they are introduced in the schema.
     """
 
-    supported = {
-        "$schema", "$id", "$defs", "$ref", "title", "description",
-        "type", "const", "enum", "properties", "required",
-        "additionalProperties", "propertyNames", "dependentRequired",
-        "items", "minItems", "uniqueItems", "minProperties", "minLength",
-        "minimum", "pattern", "format", "allOf", "if", "then", "not",
-    }
-    unknown = set(schema) - supported
+    if schema is root:
+        _validate_schema_definition(root)
+
+    unknown = set(schema) - SUPPORTED_SCHEMA_KEYWORDS
     if unknown:
         raise SchemaDefinitionError(
             f"schema uses unsupported keywords at {path}: {sorted(unknown)}")
@@ -133,13 +261,11 @@ def _validate_json_schema(value: Any, schema: dict[str, Any], root: dict[str, An
     reference = schema.get("$ref")
     if reference is not None:
         if not isinstance(reference, str) or not reference.startswith("#/$defs/"):
-            raise SchemaDefinitionError(
-                f"schema has unsupported reference {reference!r}")
-        name = reference.removeprefix("#/$defs/")
+            raise SchemaDefinitionError(f"schema has unsupported reference {reference!r}")
+        name = reference[len("#/$defs/"):]
         definition = root.get("$defs", {}).get(name)
         if not isinstance(definition, dict):
-            raise SchemaDefinitionError(
-                f"schema reference {reference!r} is unresolved")
+            raise SchemaDefinitionError(f"schema reference {reference!r} is unresolved")
         _validate_json_schema(value, definition, root, path)
 
     for child in schema.get("allOf", []):
@@ -164,17 +290,14 @@ def _validate_json_schema(value: Any, schema: dict[str, Any], root: dict[str, An
     if expected_type is not None:
         predicate = type_matches.get(expected_type)
         if predicate is None:
-            raise SchemaDefinitionError(
-                f"schema has unsupported type {expected_type!r}")
+            raise SchemaDefinitionError(f"schema has unsupported type {expected_type!r}")
         if not predicate(value):
             raise ContractError(f"{path} must have JSON type {expected_type}")
 
-    if "const" in schema and (
-            type(value) is not type(schema["const"]) or value != schema["const"]):
+    if "const" in schema and (type(value) is not type(schema["const"]) or value != schema["const"]):
         raise ContractError(f"{path} does not equal its schema constant")
     if "enum" in schema and not any(
-            type(value) is type(candidate) and value == candidate
-            for candidate in schema["enum"]):
+            type(value) is type(candidate) and value == candidate for candidate in schema["enum"]):
         raise ContractError(f"{path} is outside its schema enum")
 
     if isinstance(value, dict):
@@ -203,9 +326,8 @@ def _validate_json_schema(value: Any, schema: dict[str, Any], root: dict[str, An
             if dependency in value:
                 missing_dependents = set(dependents) - set(value)
                 if missing_dependents:
-                    raise ContractError(
-                        f"{path} field {dependency!r} requires "
-                        f"{sorted(missing_dependents)}")
+                    raise ContractError(f"{path} field {dependency!r} requires "
+                                        f"{sorted(missing_dependents)}")
 
     if isinstance(value, list):
         minimum_items = schema.get("minItems")
@@ -234,9 +356,9 @@ def _validate_json_schema(value: Any, schema: dict[str, Any], root: dict[str, An
             _validate_timestamp(path, value)
 
     minimum = schema.get("minimum")
-    if minimum is not None and isinstance(value, int) and not isinstance(value, bool):
-        if value < minimum:
-            raise ContractError(f"{path} is below its schema minimum")
+    if (minimum is not None and isinstance(value, int) and not isinstance(value, bool) and
+            value < minimum):
+        raise ContractError(f"{path} is below its schema minimum")
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -294,6 +416,32 @@ def _check_portable_path(label: str, value: Any, *, symbolic: bool = False) -> N
         raise ContractError(f"{label} escapes its declared source root: {value}")
 
 
+def _require_ancestor_commit(label: str, revision: str) -> None:
+    """Require a locally available commit that belongs to the checked-out history."""
+
+    object_check = subprocess.run(
+        ["git", "cat-file", "-e", f"{revision}^{{commit}}"],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if object_check.returncode != 0:
+        raise ContractError(
+            f"{label} commit {revision} is unavailable; fetch the validated history")
+    ancestor_check = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", revision, "HEAD"],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if ancestor_check.returncode == 1:
+        raise ContractError(f"{label} commit {revision} is not an ancestor of HEAD")
+    if ancestor_check.returncode != 0:
+        raise ContractError(f"cannot determine whether {label} commit {revision} belongs to HEAD")
+
+
 def _evidence_refs(owner: str, ids: Any, evidence: dict[str, dict[str, Any]]) -> None:
     if not isinstance(ids, list):
         raise ContractError(f"{owner}.evidence_ids must be an array")
@@ -321,15 +469,19 @@ def _validate_timestamp(label: str, value: Any) -> None:
         raise ContractError(f"{label} must include a UTC offset")
 
 
-def _validate_runtime_report(
-        evidence_id: str, artifact: dict[str, Any], expectation: Any) -> None:
+def _validate_runtime_report(evidence_id: str, artifact: dict[str, Any], expectation: Any) -> None:
     """Apply the evidence row's exact assertions to a local runtime summary."""
 
     if not isinstance(expectation, dict):
         raise ContractError(f"evidence {evidence_id}.runtime_expectation must be an object")
     required = {
-        "runtime_mode", "complete", "case_count", "all_cases_passed",
-        "claim_targets", "capability_ids", "target_case_counts",
+        "runtime_mode",
+        "complete",
+        "case_count",
+        "all_cases_passed",
+        "claim_targets",
+        "capability_ids",
+        "target_case_counts",
     }
     allowed = required | {"required_case_ids"}
     if not required <= set(expectation) or set(expectation) - allowed:
@@ -345,11 +497,12 @@ def _validate_runtime_report(
         raise ContractError(f"evidence {evidence_id} has invalid expected case count")
     if expectation.get("all_cases_passed") is not True:
         raise ContractError(f"evidence {evidence_id} must expect all cases passed")
-    claim_targets = set(_validate_string_list(
-        f"evidence {evidence_id}.runtime_expectation.claim_targets",
-        expectation.get("claim_targets"),
-        nonempty=True,
-    ))
+    claim_targets = set(
+        _validate_string_list(
+            f"evidence {evidence_id}.runtime_expectation.claim_targets",
+            expectation.get("claim_targets"),
+            nonempty=True,
+        ))
     _validate_string_list(
         f"evidence {evidence_id}.runtime_expectation.capability_ids",
         expectation.get("capability_ids"),
@@ -373,16 +526,15 @@ def _validate_runtime_report(
                 raise ContractError(f"evidence {evidence_id} has malformed cases")
             parts = case_key.split("/", 2)
             if len(parts) < 3:
-                raise ContractError(
-                    f"evidence {evidence_id} case key lacks chip/backend identity")
+                raise ContractError(f"evidence {evidence_id} case key lacks chip/backend identity")
             target_counts[f"{parts[0]}.{parts[1]}"] += 1
             actual_case_ids.add(case_key)
             records.append(record)
     elif isinstance(results, list):
         records = []
         programming_model = artifact.get("programming_model")
-        _require_nonempty_string(
-            f"evidence {evidence_id}.artifact.programming_model", programming_model)
+        _require_nonempty_string(f"evidence {evidence_id}.artifact.programming_model",
+                                 programming_model)
         for record in results:
             if not isinstance(record, dict):
                 raise ContractError(f"evidence {evidence_id} has malformed results")
@@ -406,31 +558,29 @@ def _validate_runtime_report(
     if any(record.get("status") != "passed" for record in records):
         raise ContractError(f"evidence {evidence_id} local artifact has a non-passing case")
     expected_targets = expectation.get("target_case_counts")
-    if (not isinstance(expected_targets, dict) or not expected_targets
-            or any(not isinstance(key, str) or not key for key in expected_targets)
-            or any(isinstance(value, bool) or not isinstance(value, int) or value < 1
-                   for value in expected_targets.values())):
-        raise ContractError(
-            f"evidence {evidence_id} has invalid expected target counts")
+    if (not isinstance(expected_targets, dict) or not expected_targets or
+            any(not isinstance(key, str) or not key for key in expected_targets) or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+                for value in expected_targets.values())):
+        raise ContractError(f"evidence {evidence_id} has invalid expected target counts")
     if dict(target_counts) != expected_targets:
         raise ContractError(
             f"evidence {evidence_id} target counts disagree with its local artifact; "
             f"expected={expected_targets}, actual={dict(target_counts)}")
     if not claim_targets <= set(expected_targets):
-        raise ContractError(
-            f"evidence {evidence_id} claims targets absent from its case counts")
+        raise ContractError(f"evidence {evidence_id} claims targets absent from its case counts")
     required_case_ids = expectation.get("required_case_ids")
     if required_case_ids is not None:
-        requested = set(_validate_string_list(
-            f"evidence {evidence_id}.runtime_expectation.required_case_ids",
-            required_case_ids,
-            nonempty=True,
-        ))
+        requested = set(
+            _validate_string_list(
+                f"evidence {evidence_id}.runtime_expectation.required_case_ids",
+                required_case_ids,
+                nonempty=True,
+            ))
         missing = requested - actual_case_ids
         if missing:
-            raise ContractError(
-                f"evidence {evidence_id} local artifact lacks required cases "
-                f"{sorted(missing)}")
+            raise ContractError(f"evidence {evidence_id} local artifact lacks required cases "
+                                f"{sorted(missing)}")
 
 
 def _validate_string_list(label: str, value: Any, *, nonempty: bool = False) -> list[str]:
@@ -463,13 +613,14 @@ def _extract_python_frozenset(path: Path, assignment: str) -> set[str]:
     for node in tree.body:
         if not isinstance(node, ast.Assign):
             continue
-        if not any(isinstance(target, ast.Name) and target.id == assignment
-                   for target in node.targets):
+        if not any(
+                isinstance(target, ast.Name) and target.id == assignment
+                for target in node.targets):
             continue
         value = node.value
-        if (not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name)
-                or value.func.id != "frozenset" or len(value.args) != 1
-                or not isinstance(value.args[0], ast.Set)):
+        if (not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name) or
+                value.func.id != "frozenset" or len(value.args) != 1 or
+                not isinstance(value.args[0], ast.Set)):
             raise ContractError(f"{assignment} must remain a literal frozenset")
         result: set[str] = set()
         for element in value.args[0].elts:
@@ -484,29 +635,31 @@ def _extract_python_chip_specs(path: Path) -> dict[str, dict[str, Any]]:
     """Read the literal fields that define ``TPU_CHIP_SPECS`` without imports."""
 
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    value: ast.expr | None = None
+    value: Optional[ast.expr] = None
     for node in tree.body:
-        if (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
-                and node.target.id == "TPU_CHIP_SPECS"):
+        if (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and
+                node.target.id == "TPU_CHIP_SPECS"):
             value = node.value
             break
-        if (isinstance(node, ast.Assign)
-                and any(isinstance(target, ast.Name)
-                        and target.id == "TPU_CHIP_SPECS" for target in node.targets)):
+        if (isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "TPU_CHIP_SPECS"
+                for target in node.targets)):
             value = node.value
             break
-    if (not isinstance(value, ast.Call) or len(value.args) != 1
-            or not isinstance(value.args[0], ast.Dict)):
+    if (not isinstance(value, ast.Call) or len(value.args) != 1 or
+            not isinstance(value.args[0], ast.Dict)):
         raise ContractError("TPU_CHIP_SPECS must remain a literal mapping constructor")
 
     result: dict[str, dict[str, Any]] = {}
-    for key_node, spec_node in zip(
-            value.args[0].keys, value.args[0].values):
-        if (not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str)
-                or not isinstance(spec_node, ast.Call)):
+    for key_node, spec_node in zip(value.args[0].keys, value.args[0].values):
+        if (not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str) or
+                not isinstance(spec_node, ast.Call)):
             raise ContractError("TPU_CHIP_SPECS contains a non-literal chip entry")
-        fields = {keyword.arg: ast.literal_eval(keyword.value)
-                  for keyword in spec_node.keywords if keyword.arg is not None}
+        fields = {
+            keyword.arg: ast.literal_eval(keyword.value)
+            for keyword in spec_node.keywords
+            if keyword.arg is not None
+        }
         required = {"name", "ppl_arch", "physical_core_count", "programming_models"}
         if not required <= fields.keys():
             raise ContractError(
@@ -532,8 +685,8 @@ def _check_exact_set(label: str, expected: set[str], actual: set[str]) -> None:
 def _validate_effect_operands(operation_id: str, operation: dict[str, Any]) -> None:
     """Keep the machine contract's operand roles internally self-consistent."""
 
-    parameters = _unique_named_index(
-        f"parameter in operation {operation_id}", operation.get("parameters", []))
+    parameters = _unique_named_index(f"parameter in operation {operation_id}",
+                                     operation.get("parameters", []))
     effects = operation.get("effects")
     if not isinstance(effects, dict):
         raise ContractError(f"operation {operation_id} has no effects object")
@@ -563,9 +716,9 @@ def _validate_effect_operands(operation_id: str, operation: dict[str, Any]) -> N
                 if direction not in allowed_directions:
                     raise ContractError(
                         f"{owner}.{access} conflicts with {operand!r} direction {direction!r}")
-        if (access_sets["reads"] & access_sets["writes"]
-                or access_sets["reads"] & access_sets["read_writes"]
-                or access_sets["writes"] & access_sets["read_writes"]):
+        if (access_sets["reads"] & access_sets["writes"] or
+                access_sets["reads"] & access_sets["read_writes"] or
+                access_sets["writes"] & access_sets["read_writes"]):
             raise ContractError(f"{owner} assigns one operand to multiple access classes")
 
     check_group(f"operation {operation_id}.effects", effects)
@@ -585,37 +738,32 @@ def _validate_targets(targets: dict[str, dict[str, Any]]) -> None:
     specs = _extract_python_chip_specs(REPO_ROOT / "tilelang/engine/tpu_config.py")
     programming_models = {"tpukernel", "rv"}
     expected_ids = {
-        f"{chip}.{programming_model}"
-        for chip in specs
-        for programming_model in programming_models
+        f"{chip}.{programming_model}" for chip in specs for programming_model in programming_models
     }
-    _check_exact_set("contract targets vs TPU_CHIP_SPECS cartesian pairs", expected_ids, set(targets))
+    _check_exact_set("contract targets vs TPU_CHIP_SPECS cartesian pairs", expected_ids,
+                     set(targets))
 
     for target_id, target in targets.items():
         chip = target.get("chip")
         programming_model = target.get("backend")
         if target_id != f"{chip}.{programming_model}":
-            raise ContractError(
-                f"target id {target_id!r} disagrees with chip/backend fields")
+            raise ContractError(f"target id {target_id!r} disagrees with chip/backend fields")
         spec = specs[chip]
         applicable = programming_model in set(spec["programming_models"])
         if target.get("applicable") is not applicable:
-            raise ContractError(
-                f"target {target_id} applicability disagrees with TPU_CHIP_SPECS")
+            raise ContractError(f"target {target_id} applicability disagrees with TPU_CHIP_SPECS")
         if applicable:
             if target.get("ppl_arch") != spec["ppl_arch"]:
                 raise ContractError(f"target {target_id} has stale ppl_arch")
             if target.get("physical_core_count") != spec["physical_core_count"]:
                 raise ContractError(f"target {target_id} has stale physical_core_count")
         elif "ppl_arch" in target or "physical_core_count" in target:
-            raise ContractError(
-                f"inapplicable target {target_id} must not expose runtime metadata")
+            raise ContractError(f"inapplicable target {target_id} must not expose runtime metadata")
 
 
 def _validate_implementation_sets(operations: dict[str, dict[str, Any]]) -> None:
     internal_symbols = [
-        symbol
-        for operation in operations.values()
+        symbol for operation in operations.values()
         for symbol in operation.get("internal_symbols", [])
     ]
     if len(internal_symbols) != len(set(internal_symbols)):
@@ -625,8 +773,7 @@ def _validate_implementation_sets(operations: dict[str, dict[str, Any]]) -> None
     lower_path = REPO_ROOT / "tilelang/engine/lower.py"
     lower_set = (
         _extract_python_frozenset(lower_path, "_PORTABLE_TPU_EXTERNS")
-        | _extract_python_frozenset(lower_path, "_TPUKERNEL_EXTERNS")
-    )
+        | _extract_python_frozenset(lower_path, "_TPUKERNEL_EXTERNS"))
     _check_exact_set("contract vs lower.py closed extern set", contract_set, lower_set)
 
     frontend_set = _semantic_externs(REPO_ROOT / "tilelang/language/customize.py")
@@ -637,8 +784,7 @@ def _validate_implementation_sets(operations: dict[str, dict[str, Any]]) -> None
 
     codegen_set = (
         _semantic_externs(REPO_ROOT / "src/target/codegen_tpu_common.cc")
-        | _semantic_externs(REPO_ROOT / "src/target/codegen_tpukernel.cc")
-    )
+        | _semantic_externs(REPO_ROOT / "src/target/codegen_tpukernel.cc"))
     _check_exact_set("contract vs TPU codegen dispatch set", contract_set, codegen_set)
 
     frontend_path = REPO_ROOT / "tilelang/language/customize.py"
@@ -649,10 +795,11 @@ def _validate_implementation_sets(operations: dict[str, dict[str, Any]]) -> None
     }
     for operation in operations.values():
         for symbol in operation.get("frontend_symbols", []):
-            function_name = symbol.removeprefix("T.")
+            function_name = symbol[len("T."):]
             if function_name not in frontend_defs:
                 raise ContractError(
-                    f"{operation['id']} frontend symbol {symbol!r} has no definition in customize.py")
+                    f"{operation['id']} frontend symbol {symbol!r} has no definition in customize.py"
+                )
 
 
 def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, int, int]:
@@ -662,10 +809,9 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
     contract = _load_json(CONTRACT_PATH)
     _validate_json_schema(contract, schema, schema, "contract")
     if set(contract) != TOP_LEVEL_FIELDS:
-        raise ContractError(
-            "contract top-level fields mismatch; "
-            f"missing={sorted(TOP_LEVEL_FIELDS - set(contract))}, "
-            f"extra={sorted(set(contract) - TOP_LEVEL_FIELDS)}")
+        raise ContractError("contract top-level fields mismatch; "
+                            f"missing={sorted(TOP_LEVEL_FIELDS - set(contract))}, "
+                            f"extra={sorted(set(contract) - TOP_LEVEL_FIELDS)}")
     if contract.get("$schema") != "./schema.json":
         raise ContractError("contract.$schema must be './schema.json'")
     if contract.get("schema_version") != "1.2.0":
@@ -674,10 +820,10 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
         raise ContractError("contract.contract_id is not canonical")
     _validate_timestamp("contract.reviewed_at", contract.get("reviewed_at"))
     validated_source_revision = contract.get("validated_source_revision")
-    if (not isinstance(validated_source_revision, str)
-            or GIT_REVISION.fullmatch(validated_source_revision) is None):
-        raise ContractError(
-            "validated_source_revision must be a full lowercase Git revision")
+    if (not isinstance(validated_source_revision, str) or
+            GIT_REVISION.fullmatch(validated_source_revision) is None):
+        raise ContractError("validated_source_revision must be a full lowercase Git revision")
+    _require_ancestor_commit("validated_source_revision", validated_source_revision)
 
     source_roots = contract.get("source_roots")
     if not isinstance(source_roots, dict) or not source_roots:
@@ -687,11 +833,10 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
             raise ContractError(f"source root {root_id!r} must be an object")
         _check_portable_path(f"source_roots.{root_id}.path", root.get("path"), symbolic=True)
     artifacts_root = source_roots.get("artifacts")
-    if (not isinstance(artifacts_root, dict)
-            or artifacts_root.get("path") != "research/artifacts"
-            or artifacts_root.get("tracked") is not False):
-        raise ContractError(
-            "source_roots.artifacts must identify ignored research/artifacts")
+    if (not isinstance(artifacts_root, dict) or
+            artifacts_root.get("path") != "research/artifacts" or
+            artifacts_root.get("tracked") is not False):
+        raise ContractError("source_roots.artifacts must identify ignored research/artifacts")
 
     targets = _unique_index("target", contract.get("targets", []))
     operations = _unique_index("operation", contract.get("operations", []))
@@ -702,10 +847,8 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
     vocabulary = contract.get("vocabulary")
     if not isinstance(vocabulary, dict):
         raise ContractError("vocabulary must be an object")
-    for field, expected in (
-            ("support_status", SUPPORT_STATUSES),
-            ("stage_status", STAGE_STATUSES),
-            ("implementation_conformance", IMPLEMENTATION_CONFORMANCES)):
+    for field, expected in (("support_status", SUPPORT_STATUSES), ("stage_status", STAGE_STATUSES),
+                            ("implementation_conformance", IMPLEMENTATION_CONFORMANCES)):
         values = vocabulary.get(field)
         if not isinstance(values, dict):
             raise ContractError(f"vocabulary.{field} must be an object")
@@ -726,32 +869,27 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
     )
 
     for invariant_id, invariant in invariants.items():
-        applicable_operations = set(_validate_string_list(
-            f"invariant {invariant_id}.applies_to_operations",
-            invariant.get("applies_to_operations"), nonempty=True))
+        applicable_operations = set(
+            _validate_string_list(
+                f"invariant {invariant_id}.applies_to_operations",
+                invariant.get("applies_to_operations"),
+                nonempty=True))
         unknown_operations = applicable_operations - set(operations)
         if unknown_operations:
-            raise ContractError(
-                f"invariant {invariant_id} references unknown operations "
-                f"{sorted(unknown_operations)}")
+            raise ContractError(f"invariant {invariant_id} references unknown operations "
+                                f"{sorted(unknown_operations)}")
         if invariant.get("status") not in CONSTRAINT_STATUSES:
-            raise ContractError(
-                f"invariant {invariant_id} has invalid status "
-                f"{invariant.get('status')!r}")
+            raise ContractError(f"invariant {invariant_id} has invalid status "
+                                f"{invariant.get('status')!r}")
         if invariant.get("enforced_at") not in CONSTRAINT_PHASES:
-            raise ContractError(
-                f"invariant {invariant_id} has invalid enforcement phase "
-                f"{invariant.get('enforced_at')!r}")
+            raise ContractError(f"invariant {invariant_id} has invalid enforcement phase "
+                                f"{invariant.get('enforced_at')!r}")
         if invariant.get("category") not in CONSTRAINT_CATEGORIES:
-            raise ContractError(
-                f"invariant {invariant_id} has invalid category "
-                f"{invariant.get('category')!r}")
+            raise ContractError(f"invariant {invariant_id} has invalid category "
+                                f"{invariant.get('category')!r}")
         for field in ("expression", "description"):
-            _require_nonempty_string(
-                f"invariant {invariant_id}.{field}", invariant.get(field))
-        _evidence_refs(
-            f"invariant {invariant_id}",
-            invariant.get("evidence_ids", []), evidence)
+            _require_nonempty_string(f"invariant {invariant_id}.{field}", invariant.get(field))
+        _evidence_refs(f"invariant {invariant_id}", invariant.get("evidence_ids", []), evidence)
 
     for target_id, target in targets.items():
         _evidence_refs(f"target {target_id}", target.get("evidence_ids", []), evidence)
@@ -761,9 +899,8 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
         if root_id not in source_roots:
             raise ContractError(f"evidence {evidence_id} uses unknown source root {root_id!r}")
         if evidence_id.startswith("artifact.") and root_id != "artifacts":
-            raise ContractError(
-                f"ignored runtime evidence {evidence_id} must use the untracked "
-                "artifacts source root")
+            raise ContractError(f"ignored runtime evidence {evidence_id} must use the untracked "
+                                "artifacts source root")
         if root_id == "artifacts" and not evidence_id.startswith("artifact."):
             raise ContractError(
                 f"non-artifact evidence {evidence_id} cannot use the artifacts source root")
@@ -778,10 +915,11 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
         source_revision = item.get("source_revision")
         identity_source = item.get("identity_source")
         if source_revision is not None:
-            if (not isinstance(source_revision, str)
-                    or GIT_REVISION.fullmatch(source_revision) is None):
+            if (not isinstance(source_revision, str) or
+                    GIT_REVISION.fullmatch(source_revision) is None):
                 raise ContractError(
                     f"evidence {evidence_id}.source_revision is not a full Git revision")
+            _require_ancestor_commit(f"evidence {evidence_id}.source_revision", source_revision)
             if identity_source not in {"runner_recorded", "operator_recorded"}:
                 raise ContractError(
                     f"evidence {evidence_id} has invalid identity_source {identity_source!r}")
@@ -791,64 +929,87 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
         root = source_roots[root_id]
         runtime_expectation = item.get("runtime_expectation")
         if identity_source == "runner_recorded" and runtime_expectation is None:
-            raise ContractError(
-                f"runner-recorded evidence {evidence_id} lacks runtime_expectation")
+            raise ContractError(f"runner-recorded evidence {evidence_id} lacks runtime_expectation")
         if runtime_expectation is not None and item.get("kind") != "runtime_report":
-            raise ContractError(
-                f"non-runtime evidence {evidence_id} has runtime_expectation")
+            raise ContractError(f"non-runtime evidence {evidence_id} has runtime_expectation")
         if runtime_expectation is not None:
-            claim_targets = set(_validate_string_list(
-                f"evidence {evidence_id}.runtime_expectation.claim_targets",
-                runtime_expectation.get("claim_targets"), nonempty=True))
+            claim_targets = set(
+                _validate_string_list(
+                    f"evidence {evidence_id}.runtime_expectation.claim_targets",
+                    runtime_expectation.get("claim_targets"),
+                    nonempty=True))
             unknown_targets = claim_targets - set(targets)
             if unknown_targets:
-                raise ContractError(
-                    f"evidence {evidence_id} claims unknown targets "
-                    f"{sorted(unknown_targets)}")
+                raise ContractError(f"evidence {evidence_id} claims unknown targets "
+                                    f"{sorted(unknown_targets)}")
             inapplicable_targets = {
-                target_id for target_id in claim_targets
-                if not targets[target_id].get("applicable")
+                target_id for target_id in claim_targets if not targets[target_id].get("applicable")
             }
             if inapplicable_targets:
-                raise ContractError(
-                    f"evidence {evidence_id} claims inapplicable targets "
-                    f"{sorted(inapplicable_targets)}")
+                raise ContractError(f"evidence {evidence_id} claims inapplicable targets "
+                                    f"{sorted(inapplicable_targets)}")
             target_case_counts = runtime_expectation.get("target_case_counts")
-            if (not isinstance(target_case_counts, dict) or not target_case_counts
-                    or any(not isinstance(key, str) or not key
-                           for key in target_case_counts)
-                    or any(isinstance(value, bool) or not isinstance(value, int)
-                           or value < 1 for value in target_case_counts.values())):
-                raise ContractError(
-                    f"evidence {evidence_id} has invalid expected target counts")
+            if (not isinstance(target_case_counts, dict) or not target_case_counts or
+                    any(not isinstance(key, str) or not key for key in target_case_counts) or any(
+                        isinstance(value, bool) or not isinstance(value, int) or value < 1
+                        for value in target_case_counts.values())):
+                raise ContractError(f"evidence {evidence_id} has invalid expected target counts")
             unknown_count_targets = set(target_case_counts) - set(targets)
             if unknown_count_targets:
-                raise ContractError(
-                    f"evidence {evidence_id} counts unknown targets "
-                    f"{sorted(unknown_count_targets)}")
+                raise ContractError(f"evidence {evidence_id} counts unknown targets "
+                                    f"{sorted(unknown_count_targets)}")
             inapplicable_count_targets = {
                 target_id for target_id in target_case_counts
                 if not targets[target_id].get("applicable")
             }
             if inapplicable_count_targets:
-                raise ContractError(
-                    f"evidence {evidence_id} counts inapplicable targets "
-                    f"{sorted(inapplicable_count_targets)}")
+                raise ContractError(f"evidence {evidence_id} counts inapplicable targets "
+                                    f"{sorted(inapplicable_count_targets)}")
             if not claim_targets <= set(target_case_counts):
-                raise ContractError(
-                    f"evidence {evidence_id} claims targets absent from its "
-                    "expected case counts")
-            claimed_capabilities = set(_validate_string_list(
-                f"evidence {evidence_id}.runtime_expectation.capability_ids",
-                runtime_expectation.get("capability_ids"), nonempty=True))
+                raise ContractError(f"evidence {evidence_id} claims targets absent from its "
+                                    "expected case counts")
+            case_count = runtime_expectation.get("case_count")
+            if (isinstance(case_count, bool) or not isinstance(case_count, int) or
+                    case_count != sum(target_case_counts.values())):
+                raise ContractError(f"evidence {evidence_id} case_count disagrees with its "
+                                    "expected target case counts")
+            required_case_ids = runtime_expectation.get("required_case_ids")
+            if required_case_ids is not None:
+                required_counts: Counter[str] = Counter()
+                for case_id in _validate_string_list(
+                        f"evidence {evidence_id}.runtime_expectation.required_case_ids",
+                        required_case_ids,
+                        nonempty=True):
+                    if RUNTIME_CASE_ID.fullmatch(case_id) is None:
+                        raise ContractError(
+                            f"evidence {evidence_id} has malformed required case id "
+                            f"{case_id!r}")
+                    chip, backend, _ = case_id.split("/")
+                    case_target = f"{chip}.{backend}"
+                    if case_target not in claim_targets:
+                        raise ContractError(f"evidence {evidence_id} required case {case_id!r} "
+                                            "does not belong to a claimed target")
+                    required_counts[case_target] += 1
+                excessive_required_cases = {
+                    target_id: required_count
+                    for target_id, required_count in required_counts.items()
+                    if required_count > target_case_counts[target_id]
+                }
+                if excessive_required_cases:
+                    raise ContractError(
+                        f"evidence {evidence_id} requires more cases than its target "
+                        f"counts permit: {excessive_required_cases}")
+            claimed_capabilities = set(
+                _validate_string_list(
+                    f"evidence {evidence_id}.runtime_expectation.capability_ids",
+                    runtime_expectation.get("capability_ids"),
+                    nonempty=True))
             unknown_capabilities = claimed_capabilities - set(capabilities)
             if unknown_capabilities:
-                raise ContractError(
-                    f"evidence {evidence_id} claims unknown capabilities "
-                    f"{sorted(unknown_capabilities)}")
+                raise ContractError(f"evidence {evidence_id} claims unknown capabilities "
+                                    f"{sorted(unknown_capabilities)}")
             incompatible_claims = {
-                f"{target_id}/{capability_id}"
-                for target_id in claim_targets
+                f"{target_id}/{capability_id}" for target_id in claim_targets
                 for capability_id in claimed_capabilities
                 if target_id not in capabilities[capability_id].get("target_results", {})
             }
@@ -860,29 +1021,26 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
             artifact_path = REPO_ROOT / root["path"] / item["path"]
             if not artifact_path.is_file():
                 if require_local_artifacts:
-                    raise ContractError(
-                        f"required local artifact is missing: "
-                        f"{artifact_path.relative_to(REPO_ROOT)}")
+                    raise ContractError(f"required local artifact is missing: "
+                                        f"{artifact_path.relative_to(REPO_ROOT)}")
             else:
                 artifact = _load_json(artifact_path)
-                if (identity_source == "runner_recorded"
-                        and artifact.get("git_commit") != source_revision):
-                    raise ContractError(
-                        f"evidence {evidence_id} source_revision disagrees with "
-                        f"{artifact_path.relative_to(REPO_ROOT)}")
-                if (identity_source == "runner_recorded"
-                        and artifact.get("implementation_worktree_dirty") is not False):
-                    raise ContractError(
-                        f"evidence {evidence_id} was not recorded from a clean "
-                        "implementation worktree")
-                if (identity_source == "runner_recorded"
-                        and artifact.get("source_identity_scope")
+                if (identity_source == "runner_recorded" and
+                        artifact.get("git_commit") != source_revision):
+                    raise ContractError(f"evidence {evidence_id} source_revision disagrees with "
+                                        f"{artifact_path.relative_to(REPO_ROOT)}")
+                if (identity_source == "runner_recorded" and
+                        artifact.get("implementation_worktree_dirty") is not False):
+                    raise ContractError(f"evidence {evidence_id} was not recorded from a clean "
+                                        "implementation worktree")
+                if (identity_source == "runner_recorded" and artifact.get("source_identity_scope")
                         != "tracked files excluding research/**"):
                     raise ContractError(
                         f"evidence {evidence_id} has an unknown implementation identity scope")
                 _validate_runtime_report(evidence_id, artifact, runtime_expectation)
         if root.get("tracked") and item.get("kind") in {
-                "source", "test_source", "test_report", "review_note"}:
+                "source", "test_source", "test_report", "review_note"
+        }:
             path = REPO_ROOT / root["path"] / item["path"]
             if not path.is_file():
                 raise ContractError(f"tracked evidence is missing: {path.relative_to(REPO_ROOT)}")
@@ -898,19 +1056,23 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
         _require_nonempty_string(f"operation {operation_id}.semantics", operation.get("semantics"))
         _validate_string_list(
             f"operation {operation_id}.frontend_symbols",
-            operation.get("frontend_symbols"), nonempty=True)
+            operation.get("frontend_symbols"),
+            nonempty=True)
         _validate_string_list(
             f"operation {operation_id}.internal_symbols",
-            operation.get("internal_symbols"), nonempty=True)
-        backends = set(_validate_string_list(
-            f"operation {operation_id}.backend_applicability",
-            operation.get("backend_applicability"), nonempty=True))
+            operation.get("internal_symbols"),
+            nonempty=True)
+        backends = set(
+            _validate_string_list(
+                f"operation {operation_id}.backend_applicability",
+                operation.get("backend_applicability"),
+                nonempty=True))
         if not backends <= BACKENDS:
             raise ContractError(
                 f"operation {operation_id} has unknown backends {sorted(backends - BACKENDS)}")
         _validate_effect_operands(operation_id, operation)
-        constraints = _unique_index(
-            f"constraint in operation {operation_id}", operation.get("constraints", []))
+        constraints = _unique_index(f"constraint in operation {operation_id}",
+                                    operation.get("constraints", []))
         for constraint_id, constraint in constraints.items():
             if not constraint_id.startswith(f"{operation_id}."):
                 raise ContractError(
@@ -919,16 +1081,14 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
                 raise ContractError(
                     f"constraint {constraint_id} has invalid status {constraint.get('status')!r}")
             if constraint.get("enforced_at") not in CONSTRAINT_PHASES:
-                raise ContractError(
-                    f"constraint {constraint_id} has invalid enforcement phase "
-                    f"{constraint.get('enforced_at')!r}")
+                raise ContractError(f"constraint {constraint_id} has invalid enforcement phase "
+                                    f"{constraint.get('enforced_at')!r}")
             for field in ("category", "expression", "description"):
-                _require_nonempty_string(
-                    f"constraint {constraint_id}.{field}", constraint.get(field))
+                _require_nonempty_string(f"constraint {constraint_id}.{field}",
+                                         constraint.get(field))
             if constraint.get("category") not in CONSTRAINT_CATEGORIES:
-                raise ContractError(
-                    f"constraint {constraint_id} has invalid category "
-                    f"{constraint.get('category')!r}")
+                raise ContractError(f"constraint {constraint_id} has invalid category "
+                                    f"{constraint.get('category')!r}")
             _evidence_refs(
                 f"constraint {operation_id}/{constraint_id}",
                 constraint.get("evidence_ids", []),
@@ -943,8 +1103,7 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
                     f"operation {operation_id}.failure_policy[{index}] must be an object")
             for field in ("condition", "diagnostic"):
                 _require_nonempty_string(
-                    f"operation {operation_id}.failure_policy[{index}].{field}",
-                    policy.get(field))
+                    f"operation {operation_id}.failure_policy[{index}].{field}", policy.get(field))
             if policy.get("phase") not in FAILURE_PHASES:
                 raise ContractError(
                     f"operation {operation_id}.failure_policy[{index}] has invalid phase")
@@ -956,15 +1115,13 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
                     f"operation {operation_id}.failure_policy[{index}] has invalid conformance")
 
     for capability_id, capability in capabilities.items():
-        _evidence_refs(
-            f"capability {capability_id}", capability.get("evidence_ids", []), evidence)
+        _evidence_refs(f"capability {capability_id}", capability.get("evidence_ids", []), evidence)
         operation_id = capability.get("operation_id")
         if operation_id not in operations:
             raise ContractError(
                 f"capability {capability_id} references unknown operation {operation_id!r}")
         if not capability_id.startswith(f"{operation_id}."):
-            raise ContractError(
-                f"capability {capability_id} must use its operation id as a prefix")
+            raise ContractError(f"capability {capability_id} must use its operation id as a prefix")
         _require_nonempty_string(f"capability {capability_id}.variant", capability.get("variant"))
         bindings = capability.get("dtype_bindings")
         if not isinstance(bindings, list) or not bindings:
@@ -973,10 +1130,11 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
         for index, binding in enumerate(bindings):
             if not isinstance(binding, dict) or not binding:
                 raise ContractError(
-                    f"capability {capability_id}.dtype_bindings[{index}] must be a non-empty object")
+                    f"capability {capability_id}.dtype_bindings[{index}] must be a non-empty object"
+                )
             for role, dtype in binding.items():
-                _require_nonempty_string(
-                    f"capability {capability_id}.dtype_bindings[{index}] role", role)
+                _require_nonempty_string(f"capability {capability_id}.dtype_bindings[{index}] role",
+                                         role)
                 if dtype not in DTYPES:
                     raise ContractError(
                         f"capability {capability_id}.dtype_bindings[{index}] has unknown "
@@ -1003,10 +1161,8 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
         if not isinstance(results, dict) or not results:
             raise ContractError(f"capability {capability_id} has no target_results")
         expected_targets = {
-            target_id
-            for target_id, target in targets.items()
-            if target.get("applicable")
-            and target.get("backend") in operations[operation_id].get("backend_applicability", [])
+            target_id for target_id, target in targets.items() if target.get("applicable") and
+            target.get("backend") in operations[operation_id].get("backend_applicability", [])
         }
         _check_exact_set(
             f"capability {capability_id} target coverage",
@@ -1032,8 +1188,7 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
             if unknown_stages:
                 raise ContractError(
                     f"{capability_id}/{target_id} has unknown stages {sorted(unknown_stages)}")
-            _require_nonempty_string(
-                f"{capability_id}/{target_id}.reason", result.get("reason"))
+            _require_nonempty_string(f"{capability_id}/{target_id}.reason", result.get("reason"))
             for stage_name, stage in verification.items():
                 if not isinstance(stage, dict):
                     raise ContractError(
@@ -1044,10 +1199,10 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
                         f"{capability_id}/{target_id}/{stage_name} has invalid status {status!r}")
                 ids = stage.get("evidence_ids", [])
                 _evidence_refs(f"{capability_id}/{target_id}/{stage_name}", ids, evidence)
-                _require_nonempty_string(
-                    f"{capability_id}/{target_id}/{stage_name}.scope", stage.get("scope"))
-                _require_nonempty_string(
-                    f"{capability_id}/{target_id}/{stage_name}.reason", stage.get("reason"))
+                _require_nonempty_string(f"{capability_id}/{target_id}/{stage_name}.scope",
+                                         stage.get("scope"))
+                _require_nonempty_string(f"{capability_id}/{target_id}/{stage_name}.reason",
+                                         stage.get("reason"))
                 if status in {"passed", "historical_passed", "failed"} and not ids:
                     raise ContractError(
                         f"{capability_id}/{target_id}/{stage_name} is {status} without evidence")
@@ -1055,35 +1210,31 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
                     raise ContractError(
                         f"{capability_id}/{target_id}/{stage_name} uses historical_passed; "
                         "only stale PCIe evidence may use that non-authorizing status")
-                if (status == "historical_passed"
-                        and not stage.get("scope", "").startswith("Historical ")):
-                    raise ContractError(
-                        f"{capability_id}/{target_id}/{stage_name} must label its "
-                        "non-authorizing scope as Historical")
+                if (status == "historical_passed" and
+                        not stage.get("scope", "").startswith("Historical ")):
+                    raise ContractError(f"{capability_id}/{target_id}/{stage_name} must label its "
+                                        "non-authorizing scope as Historical")
                 if stage_name in {"cmodel_numeric_passed", "pcie_numeric_passed"}:
-                    expected_runtime_mode = (
-                        "cmodel" if stage_name == "cmodel_numeric_passed" else "pcie")
+                    expected_runtime_mode = ("cmodel"
+                                             if stage_name == "cmodel_numeric_passed" else "pcie")
                     qualifying_runtime_ids = [
                         evidence_id for evidence_id in ids
-                        if evidence[evidence_id].get("kind") == "runtime_report"
-                        and evidence[evidence_id].get("runtime_expectation", {}).get(
-                            "runtime_mode") == expected_runtime_mode
-                        and target_id in evidence[evidence_id].get(
-                            "runtime_expectation", {}).get("claim_targets", [])
-                        and capability_id in evidence[evidence_id].get(
-                            "runtime_expectation", {}).get("capability_ids", [])
+                        if evidence[evidence_id].get("kind") == "runtime_report" and
+                        evidence[evidence_id].get("runtime_expectation", {}).get(
+                            "runtime_mode") == expected_runtime_mode and
+                        target_id in evidence[evidence_id].get("runtime_expectation", {}).get(
+                            "claim_targets", []) and capability_id in evidence[evidence_id].get(
+                                "runtime_expectation", {}).get("capability_ids", [])
                     ]
                     current_runtime_ids = [
                         evidence_id for evidence_id in qualifying_runtime_ids
-                        if evidence[evidence_id].get("source_revision")
-                        == validated_source_revision
+                        if evidence[evidence_id].get("source_revision") == validated_source_revision
                         and evidence[evidence_id].get("identity_source") == "runner_recorded"
                     ]
                     if status == "passed" and not current_runtime_ids:
-                        raise ContractError(
-                            f"{capability_id}/{target_id}/{stage_name} is passed "
-                            "without runner-recorded evidence for "
-                            "validated_source_revision")
+                        raise ContractError(f"{capability_id}/{target_id}/{stage_name} is passed "
+                                            "without runner-recorded evidence for "
+                                            "validated_source_revision")
                     if status == "historical_passed":
                         if not qualifying_runtime_ids:
                             raise ContractError(
@@ -1093,44 +1244,44 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
                             raise ContractError(
                                 f"{capability_id}/{target_id}/{stage_name} is historical "
                                 "despite current runner-recorded evidence")
-                if (stage_name == "declared" and status in {"passed", "failed"}
-                        and "src.frontend" not in ids):
-                    raise ContractError(
-                        f"{capability_id}/{target_id}/declared is {status} without "
-                        "src.frontend evidence")
+                if (stage_name == "declared" and status in {"passed", "failed"} and
+                        "src.frontend" not in ids):
+                    raise ContractError(f"{capability_id}/{target_id}/declared is {status} without "
+                                        "src.frontend evidence")
             declared_statuses.add(verification["declared"]["status"])
             support_status = result.get("support_status")
             if support_status not in SUPPORT_STATUSES:
-                raise ContractError(
-                    f"{capability_id}/{target_id} has invalid support_status "
-                    f"{support_status!r}")
+                raise ContractError(f"{capability_id}/{target_id} has invalid support_status "
+                                    f"{support_status!r}")
             conformance = result.get("implementation_conformance")
             if conformance not in IMPLEMENTATION_CONFORMANCES:
                 raise ContractError(
                     f"{capability_id}/{target_id} has invalid implementation_conformance "
                     f"{conformance!r}")
-            if (support_status == "supported"
-                    and verification["codegen_passed"]["status"] != "passed"):
-                raise ContractError(f"{capability_id}/{target_id} is supported without codegen proof")
-            if (support_status == "unverified"
-                    and verification["codegen_passed"]["status"] != "unverified"):
+            if (support_status == "supported" and
+                    verification["codegen_passed"]["status"] != "passed"):
+                raise ContractError(
+                    f"{capability_id}/{target_id} is supported without codegen proof")
+            if (support_status == "unverified" and
+                    verification["codegen_passed"]["status"] != "unverified"):
                 raise ContractError(
                     f"{capability_id}/{target_id} is unverified but its codegen stage is "
                     f"{verification['codegen_passed']['status']!r}")
-            if (support_status == "unsupported"
-                    and verification["declared"]["status"] != "failed"
-                    and verification["codegen_passed"]["status"] != "failed"):
+            if (support_status == "unsupported" and
+                    verification["declared"]["status"] != "failed" and
+                    verification["codegen_passed"]["status"] != "failed"):
                 raise ContractError(
                     f"{capability_id}/{target_id} is unsupported without a frontend or "
                     "codegen rejection")
-            if (verification["cmodel_numeric_passed"]["status"] == "passed"
-                    and verification["codegen_passed"]["status"] != "passed"):
-                raise ContractError(f"{capability_id}/{target_id} passes CModel without codegen proof")
-            if (verification["pcie_numeric_passed"]["status"] == "passed"
-                    and verification["cmodel_numeric_passed"]["status"] != "passed"):
+            if (verification["cmodel_numeric_passed"]["status"] == "passed" and
+                    verification["codegen_passed"]["status"] != "passed"):
+                raise ContractError(
+                    f"{capability_id}/{target_id} passes CModel without codegen proof")
+            if (verification["pcie_numeric_passed"]["status"] == "passed" and
+                    verification["cmodel_numeric_passed"]["status"] != "passed"):
                 raise ContractError(f"{capability_id}/{target_id} passes PCIe without CModel proof")
-            if (verification["pcie_numeric_passed"]["status"] == "historical_passed"
-                    and verification["cmodel_numeric_passed"]["status"] != "passed"):
+            if (verification["pcie_numeric_passed"]["status"] == "historical_passed" and
+                    verification["cmodel_numeric_passed"]["status"] != "passed"):
                 raise ContractError(
                     f"{capability_id}/{target_id} has historical PCIe evidence without "
                     "current CModel proof")
@@ -1147,9 +1298,8 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
                             f"{capability_id}/{target_id} has non-applicable codegen but "
                             f"{numeric_stage} is {verification[numeric_stage]['status']!r}")
         if len(declared_statuses) != 1:
-            raise ContractError(
-                f"{capability_id} has target-dependent frontend declared statuses: "
-                f"{sorted(declared_statuses)}")
+            raise ContractError(f"{capability_id} has target-dependent frontend declared statuses: "
+                                f"{sorted(declared_statuses)}")
 
     # Lock the two easy-to-misstate characterization results.
     for capability in capabilities.values():
@@ -1157,13 +1307,14 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
             continue
         sg = capability["target_results"].get("sg2260e.tpukernel")
         bm = capability["target_results"].get("bm1690.tpukernel")
-        if (not sg or sg["support_status"] != "unsupported"
-                or sg["verification"]["codegen_passed"]["status"] != "failed"
-                or sg["verification"]["cmodel_numeric_passed"]["status"] != "not_applicable"
-                or sg["verification"]["pcie_numeric_passed"]["status"] != "not_applicable"):
-            raise ContractError(f"{capability['id']} must keep SG2260E topk compile-time unsupported")
-        if (not bm or bm["support_status"] != "supported"
-                or bm["verification"]["cmodel_numeric_passed"]["status"] != "passed"):
+        if (not sg or sg["support_status"] != "unsupported" or
+                sg["verification"]["codegen_passed"]["status"] != "failed" or
+                sg["verification"]["cmodel_numeric_passed"]["status"] != "not_applicable" or
+                sg["verification"]["pcie_numeric_passed"]["status"] != "not_applicable"):
+            raise ContractError(
+                f"{capability['id']} must keep SG2260E topk compile-time unsupported")
+        if (not bm or bm["support_status"] != "supported" or
+                bm["verification"]["cmodel_numeric_passed"]["status"] != "passed"):
             raise ContractError(f"{capability['id']} must retain BM1690 CModel verification")
 
     scalar = capabilities.get("scalar.add-mul-fp8")
@@ -1171,8 +1322,8 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
         raise ContractError("missing scalar.add-mul-fp8 capability")
     for target_id in ("bm1690.tpukernel", "sg2260e.tpukernel"):
         result = scalar["target_results"].get(target_id)
-        if (not result or result["support_status"] != "supported"
-                or result["verification"]["cmodel_numeric_passed"]["status"] != "passed"):
+        if (not result or result["support_status"] != "supported" or
+                result["verification"]["cmodel_numeric_passed"]["status"] != "passed"):
             raise ContractError(
                 f"{target_id} FP8 scalar must reflect the valid generic-API CModel result")
 
@@ -1180,9 +1331,8 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
     bf16_to_fp16 = capabilities.get("copy.cast-bf16-to-fp16")
     if fp16_to_bf16 is None or bf16_to_fp16 is None:
         raise ContractError("FP16/BF16 RV conversion directions must remain separate selectors")
-    if (fp16_to_bf16["target_results"]["sg2260e.rv"]["support_status"] != "supported"
-            or bf16_to_fp16["target_results"]["sg2260e.rv"]["support_status"]
-            != "unverified"):
+    if (fp16_to_bf16["target_results"]["sg2260e.rv"]["support_status"] != "supported" or
+            bf16_to_fp16["target_results"]["sg2260e.rv"]["support_status"] != "unverified"):
         raise ContractError(
             "RV FP16-to-BF16 has source proof, while BF16-to-FP16 must remain unverified")
 
@@ -1191,39 +1341,34 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
         raise ContractError("missing gemm.nt-accumulate capability")
     for target_id in ("bm1690.tpukernel", "sg2260e.tpukernel"):
         result = nt_accumulate["target_results"].get(target_id)
-        if (not result or result["support_status"] != "unsupported"
-                or result["verification"]["declared"]["status"] != "passed"
-                or result["verification"]["codegen_passed"]["status"] != "failed"
-                or result["verification"]["cmodel_numeric_passed"]["status"]
-                != "not_applicable"
-                or result["verification"]["pcie_numeric_passed"]["status"]
-                != "not_applicable"):
+        if (not result or result["support_status"] != "unsupported" or
+                result["verification"]["declared"]["status"] != "passed" or
+                result["verification"]["codegen_passed"]["status"] != "failed" or
+                result["verification"]["cmodel_numeric_passed"]["status"] != "not_applicable" or
+                result["verification"]["pcie_numeric_passed"]["status"] != "not_applicable"):
             raise ContractError(
                 f"{target_id} base-float NT accumulation must remain a target-codegen "
                 "rejection, not a frontend rejection")
     rv_nt = nt_accumulate["target_results"].get("sg2260e.rv")
-    if (not rv_nt or rv_nt["support_status"] != "supported"
-            or rv_nt["verification"]["declared"]["status"] != "passed"
-            or rv_nt["verification"]["codegen_passed"]["status"] != "passed"
-            or rv_nt["verification"]["cmodel_numeric_passed"]["status"] != "unverified"
-            or rv_nt["verification"]["pcie_numeric_passed"]["status"] != "unverified"):
+    if (not rv_nt or rv_nt["support_status"] != "supported" or
+            rv_nt["verification"]["declared"]["status"] != "passed" or
+            rv_nt["verification"]["codegen_passed"]["status"] != "passed" or
+            rv_nt["verification"]["cmodel_numeric_passed"]["status"] != "unverified" or
+            rv_nt["verification"]["pcie_numeric_passed"]["status"] != "unverified"):
         raise ContractError(
             "SG2260E RV base-float NT accumulation has source-selection proof only; "
             "numeric stages must remain unverified")
 
-    for capability_id in (
-            "gemm.nn-overwrite-base-fp32", "gemm.nt-overwrite-base-fp32"):
+    for capability_id in ("gemm.nn-overwrite-base-fp32", "gemm.nt-overwrite-base-fp32"):
         capability = capabilities.get(capability_id)
         if capability is None:
             raise ContractError(f"missing accepted-but-unverified selector {capability_id}")
         for target_id, result in capability["target_results"].items():
-            if (result["support_status"] != "unverified"
-                    or result["verification"]["declared"]["status"] != "passed"
-                    or result["verification"]["codegen_passed"]["status"] != "unverified"
-                    or result["verification"]["cmodel_numeric_passed"]["status"]
-                    != "unverified"
-                    or result["verification"]["pcie_numeric_passed"]["status"]
-                    != "unverified"):
+            if (result["support_status"] != "unverified" or
+                    result["verification"]["declared"]["status"] != "passed" or
+                    result["verification"]["codegen_passed"]["status"] != "unverified" or
+                    result["verification"]["cmodel_numeric_passed"]["status"] != "unverified" or
+                    result["verification"]["pcie_numeric_passed"]["status"] != "unverified"):
                 raise ContractError(
                     f"{capability_id}/{target_id} is admitted by source but lacks exact "
                     "lowering and numerical evidence")
@@ -1241,24 +1386,23 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
             for constraint in operation.get("constraints", [])
         },
         {
-            constraint_id
-            for capability in capabilities.values()
+            constraint_id for capability in capabilities.values()
             for constraint_id in capability.get("constraints", [])
         },
     )
 
-    contract_without_evidence = {
-        key: value for key, value in contract.items() if key != "evidence"
-    }
+    contract_without_evidence = {key: value for key, value in contract.items() if key != "evidence"}
     referenced_evidence = _collect_evidence_refs(contract_without_evidence)
     _check_exact_set("evidence entries vs referenced evidence", set(evidence), referenced_evidence)
 
     _validate_implementation_sets(operations)
-    applicable_targets = sum(
-        target.get("applicable") is True for target in targets.values())
+    applicable_targets = sum(target.get("applicable") is True for target in targets.values())
     return (
-        len(targets), applicable_targets, len(operations),
-        len(capabilities), len(evidence),
+        len(targets),
+        applicable_targets,
+        len(operations),
+        len(capabilities),
+        len(evidence),
     )
 
 
@@ -1277,12 +1421,10 @@ def main() -> int:
     except ContractError as error:
         print(f"contract validation failed: {error}", file=sys.stderr)
         return 1
-    print(
-        "contract validation passed: "
-        f"{target_entries} target entries ({applicable_targets} applicable), "
-        f"{operations} operations, "
-        f"{capabilities} capabilities, {evidence} evidence entries"
-    )
+    print("contract validation passed: "
+          f"{target_entries} target entries ({applicable_targets} applicable), "
+          f"{operations} operations, "
+          f"{capabilities} capabilities, {evidence} evidence entries")
     return 0
 
 

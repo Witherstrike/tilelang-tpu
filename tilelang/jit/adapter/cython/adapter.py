@@ -29,10 +29,11 @@ import hashlib
 import os
 from pathlib import Path
 import logging
-import numpy as np
+
 logger = logging.getLogger(__name__)
 
 current = os.path.dirname(os.path.abspath(__file__))
+
 
 def get_cython_compiler() -> Optional[str]:
     """Return the path to the Cython compiler.
@@ -204,9 +205,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.tpu_runtime = None
         if is_tpu_target(self.target):
             if tpu_target is None or tpu_runtime is None:
-                raise ValueError(
-                    "TPU adapter requires target and runtime configuration "
-                    "from the compiled artifact")
+                raise ValueError("TPU adapter requires target and runtime configuration "
+                                 "from the compiled artifact")
             self.tpu_target = tpu_target
             self.tpu_runtime = tpu_runtime
         elif tpu_target is not None or tpu_runtime is not None:
@@ -228,8 +228,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.lib = self.lib_generator.load_lib()
         if is_tpu_target(self.target):
             # The TPU host ABI is not a normal Cython ``call`` wrapper.
-            self.func = make_tpu_forward(
-                self.lib, self.params, self.result_idx, self.dynamic_symbolic_map)
+            self.func = make_tpu_forward(self.lib, self.params, self.result_idx,
+                                         self.dynamic_symbolic_map)
         else:
             self.lib.get_last_error.restype = ctypes.c_char_p
             result = self.lib.init()
@@ -282,9 +282,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.tpu_runtime = None
         if is_tpu_target(adapter.target):
             if tpu_target is None or tpu_runtime is None:
-                raise ValueError(
-                    "TPU adapter requires target and runtime configuration "
-                    "from the compiled artifact")
+                raise ValueError("TPU adapter requires target and runtime configuration "
+                                 "from the compiled artifact")
             adapter.tpu_target = tpu_target
             adapter.tpu_runtime = tpu_runtime
         elif tpu_target is not None or tpu_runtime is not None:
@@ -298,8 +297,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
 
         if is_tpu_target(adapter.target):
-            adapter.func = make_tpu_forward(
-                adapter.lib, adapter.params, adapter.result_idx, adapter.dynamic_symbolic_map)
+            adapter.func = make_tpu_forward(adapter.lib, adapter.params, adapter.result_idx,
+                                            adapter.dynamic_symbolic_map)
             return adapter
 
         adapter.lib.get_last_error.restype = ctypes.c_char_p

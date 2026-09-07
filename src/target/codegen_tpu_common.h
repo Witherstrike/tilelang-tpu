@@ -42,7 +42,8 @@ namespace codegen {
 
 class CodeGenTileLangTPU final : public CodeGenC {
 public:
-  CodeGenTileLangTPU(std::string target_chip, std::string target_programming_model);
+  CodeGenTileLangTPU(std::string target_chip,
+                     std::string target_programming_model);
   std::string Finish();
   // CodeGenC overrides required by the TPU source ABI.
   void PrintFuncPrefix(std::ostream &os) final;
@@ -119,20 +120,17 @@ private:
                   DataType c_dtype, bool transpose_a, bool transpose_b,
                   bool accumulate, int64_t m, int64_t n, int64_t k);
   void EmitTPUKernelElementwise(const std::string &operation,
-                                const std::string &dst,
-                                const std::string &src0,
+                                const std::string &dst, const std::string &src0,
                                 const std::string &src1, DataType dtype,
                                 const std::vector<int> &src0_shape,
                                 const std::vector<int> &src1_shape);
-  void EmitTPUKernelScalar(const std::string &operation,
-                           const std::string &dst,
+  void EmitTPUKernelScalar(const std::string &operation, const std::string &dst,
                            const std::string &src, DataType dtype,
                            double value);
-  void EmitRVElementwise(const std::string &operation,
-                         const std::string &dst, const std::string &src0,
-                         const std::string &src1, DataType dst_dtype,
-                         DataType src0_dtype, DataType src1_dtype,
-                         const std::vector<int> &dst_shape,
+  void EmitRVElementwise(const std::string &operation, const std::string &dst,
+                         const std::string &src0, const std::string &src1,
+                         DataType dst_dtype, DataType src0_dtype,
+                         DataType src1_dtype, const std::vector<int> &dst_shape,
                          const std::vector<int> &src0_shape,
                          const std::vector<int> &src1_shape);
   void EmitRVDescriptor(const std::string &tensor, int register_id,
@@ -141,8 +139,7 @@ private:
   // Returns false only when op_name is not a registered TPU-Kernel semantic
   // operation. Operand validation and instruction selection are owned by the
   // TPU-Kernel translation unit.
-  bool TryEmitTPUKernelSemantic(const CallNode *op,
-                                const std::string &op_name);
+  bool TryEmitTPUKernelSemantic(const CallNode *op, const std::string &op_name);
 
   // Handle volatile loads.
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
@@ -154,11 +151,11 @@ private:
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangTPU *p);
   std::string AllocLocalVarID(const tir::VarNode *v);
-  SemanticTensorOperand ParseWholeBufferRegion(
-      const PrimExpr &expr, const std::string &context,
-      int expected_access_mask) const;
-  const std::vector<int> &DescriptorShape4(
-      const VarNode *data_var, const std::string &context) const;
+  SemanticTensorOperand ParseWholeBufferRegion(const PrimExpr &expr,
+                                               const std::string &context,
+                                               int expected_access_mask) const;
+  const std::vector<int> &DescriptorShape4(const VarNode *data_var,
+                                           const std::string &context) const;
   size_t DescriptorRank(const VarNode *data_var,
                         const std::string &context) const;
   // Global semantic operands carry Buffer::data variables, while generated

@@ -13,10 +13,8 @@ from pathlib import Path
 
 import pytest
 
-
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-_SEMANTIC_EXTERN = re.compile(
-    r'"(tl\.(?:tpu|tpukernel)\.[a-z0-9_]+)"')
+_SEMANTIC_EXTERN = re.compile(r'"(tl\.(?:tpu|tpukernel)\.[a-z0-9_]+)"')
 
 _PORTABLE_EXTERNS = {
     "tl.tpu.add",
@@ -60,13 +58,38 @@ def _contract_validator_module():
     return module
 
 
+def _validate_contract_without_local_artifacts(monkeypatch, validator, schema, contract):
+    """Exercise the checks that remain authoritative in a fresh clone."""
+
+    real_load = validator._load_json
+    real_is_file = validator.Path.is_file
+    artifacts_root = validator.REPO_ROOT / "research/artifacts"
+
+    def load_contract_override(path):
+        if path == validator.CONTRACT_PATH:
+            return contract
+        if path == validator.SCHEMA_PATH:
+            return schema
+        return real_load(path)
+
+    def hide_local_artifacts(path):
+        try:
+            path.relative_to(artifacts_root)
+        except ValueError:
+            return real_is_file(path)
+        return False
+
+    monkeypatch.setattr(validator, "_load_json", load_contract_override)
+    monkeypatch.setattr(validator.Path, "is_file", hide_local_artifacts)
+    return validator.validate()
+
+
 def _literal_assignment(relative_path, name):
     path = _REPOSITORY_ROOT / relative_path
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in tree.body:
         if (isinstance(node, ast.Assign) and
-                any(isinstance(target, ast.Name) and target.id == name
-                    for target in node.targets)):
+                any(isinstance(target, ast.Name) and target.id == name for target in node.targets)):
             return ast.literal_eval(node.value)
     raise AssertionError(f"missing literal assignment {name} in {relative_path}")
 
@@ -78,14 +101,11 @@ def test_semantic_extern_registry_is_isomorphic_across_compiler_layers():
     assert _semantic_externs("tilelang/language/customize.py") == expected
     assert _semantic_externs("tilelang/engine/lower.py") == expected
     assert _semantic_externs("src/transform/address_assign.cc") == expected
-    assert _semantic_externs(
-        "src/target/codegen_tpu_common.cc") == _PORTABLE_EXTERNS
-    assert _semantic_externs(
-        "src/target/codegen_tpukernel.cc") == _TPUKERNEL_EXTERNS
+    assert _semantic_externs("src/target/codegen_tpu_common.cc") == _PORTABLE_EXTERNS
+    assert _semantic_externs("src/target/codegen_tpukernel.cc") == _TPUKERNEL_EXTERNS
 
     contract_externs = {
-        symbol
-        for operation in _machine_contract()["operations"]
+        symbol for operation in _machine_contract()["operations"]
         for symbol in operation["internal_symbols"]
     }
     assert contract_externs == expected
@@ -93,12 +113,12 @@ def test_semantic_extern_registry_is_isomorphic_across_compiler_layers():
 
 def test_every_semantic_extern_has_exact_region_operand_positions():
     expected = _PORTABLE_EXTERNS | _TPUKERNEL_EXTERNS
-    positions = _literal_assignment(
-        "tilelang/engine/lower.py", "_TPU_SEMANTIC_REGION_ARGS")
+    positions = _literal_assignment("tilelang/engine/lower.py", "_TPU_SEMANTIC_REGION_ARGS")
 
     assert set(positions) == expected
-    assert all(tuple(indices) == tuple(range(1, len(indices) + 1))
-               for indices in positions.values())
+    assert all(
+        tuple(indices) == tuple(range(1,
+                                      len(indices) + 1)) for indices in positions.values())
 
 
 def test_machine_contract_standard_library_validator():
@@ -132,19 +152,75 @@ def test_machine_contract_schema_is_applied_by_standard_library_validator():
 
     missing_target_counts = copy.deepcopy(contract)
     next(item for item in missing_target_counts["evidence"]
-         if "runtime_expectation" in item)["runtime_expectation"].pop(
-             "target_case_counts")
+         if "runtime_expectation" in item)["runtime_expectation"].pop("target_case_counts")
     with pytest.raises(validator.ContractError, match="lacks required fields"):
-        validator._validate_json_schema(
-            missing_target_counts, schema, schema, "contract")
+        validator._validate_json_schema(missing_target_counts, schema, schema, "contract")
 
     unsupported_nested_schema = copy.deepcopy(schema)
-    unsupported_nested_schema["properties"]["source_roots"][
-        "additionalProperties"]["properties"]["path"]["not"][
-            "futureKeyword"] = True
+    unsupported_nested_schema["properties"]["source_roots"]["additionalProperties"]["properties"][
+        "path"]["not"]["futureKeyword"] = True
     with pytest.raises(validator.SchemaDefinitionError, match="unsupported keywords"):
-        validator._validate_json_schema(
-            contract, unsupported_nested_schema, unsupported_nested_schema, "contract")
+        validator._validate_json_schema(contract, unsupported_nested_schema,
+                                        unsupported_nested_schema, "contract")
+
+
+@pytest.mark.parametrize(
+    "mutate_schema",
+    [
+        lambda schema: schema["$defs"].update({"unusedFuture": {
+            "futureKeyword": True
+        }}),
+        lambda schema: schema["properties"].update({"unusedFuture": {
+            "futureKeyword": True
+        }}),
+        lambda schema: schema["$defs"]["target"]["allOf"][0].update({"if": []}),
+    ],
+)
+def test_machine_contract_schema_definition_fails_closed(mutate_schema):
+    validator = _contract_validator_module()
+    schema = validator._load_json(validator.SCHEMA_PATH)
+    contract = _machine_contract()
+    mutate_schema(schema)
+
+    with pytest.raises(validator.SchemaDefinitionError):
+        validator._validate_json_schema(contract, schema, schema, "contract")
+
+
+def test_runtime_case_counts_are_static_without_local_artifacts(monkeypatch):
+    validator = _contract_validator_module()
+    schema = validator._load_json(validator.SCHEMA_PATH)
+    contract = _machine_contract()
+    runtime_evidence = next(item for item in contract["evidence"] if "runtime_expectation" in item)
+    runtime_evidence["runtime_expectation"]["case_count"] += 1
+
+    with pytest.raises(validator.ContractError, match="case_count disagrees"):
+        _validate_contract_without_local_artifacts(monkeypatch, validator, schema, contract)
+
+
+def test_required_runtime_case_belongs_to_a_claimed_target_without_artifacts(monkeypatch):
+    validator = _contract_validator_module()
+    schema = validator._load_json(validator.SCHEMA_PATH)
+    contract = _machine_contract()
+    runtime_evidence = next(
+        item for item in contract["evidence"] if item["id"] == "artifact.cmodel-rv-core-region-abi")
+    runtime_evidence["runtime_expectation"]["required_case_ids"] = ["bm1690/tpukernel/matmul"]
+
+    with pytest.raises(validator.ContractError, match="claimed target"):
+        _validate_contract_without_local_artifacts(monkeypatch, validator, schema, contract)
+
+
+def test_validated_revision_must_exist_without_local_artifacts(monkeypatch):
+    validator = _contract_validator_module()
+    schema = validator._load_json(validator.SCHEMA_PATH)
+    contract = _machine_contract()
+    phantom_revision = "0" * 40
+    contract["validated_source_revision"] = phantom_revision
+    for evidence in contract["evidence"]:
+        if evidence.get("identity_source") == "runner_recorded":
+            evidence["source_revision"] = phantom_revision
+
+    with pytest.raises(validator.ContractError, match="commit .* is unavailable"):
+        _validate_contract_without_local_artifacts(monkeypatch, validator, schema, contract)
 
 
 def test_numeric_stage_cannot_borrow_another_target_runtime_artifact(monkeypatch):
@@ -152,11 +228,8 @@ def test_numeric_stage_cannot_borrow_another_target_runtime_artifact(monkeypatch
     schema = validator._load_json(validator.SCHEMA_PATH)
     contract = _machine_contract()
     capability = next(
-        item for item in contract["capabilities"]
-        if item["id"] == "add.fp32-equal.numeric"
-    )
-    stage = capability["target_results"]["sg2260e.rv"]["verification"][
-        "cmodel_numeric_passed"]
+        item for item in contract["capabilities"] if item["id"] == "add.fp32-equal.numeric")
+    stage = capability["target_results"]["sg2260e.rv"]["verification"]["cmodel_numeric_passed"]
     stage["evidence_ids"] = ["test.numeric-worker", "artifact.cmodel-fp8-final"]
 
     real_load = validator._load_json
@@ -177,8 +250,7 @@ def test_numeric_stage_cannot_borrow_same_target_wrong_capability(monkeypatch):
     validator = _contract_validator_module()
     schema = validator._load_json(validator.SCHEMA_PATH)
     contract = _machine_contract()
-    capability = next(
-        item for item in contract["capabilities"] if item["id"] == "exp.float")
+    capability = next(item for item in contract["capabilities"] if item["id"] == "exp.float")
     stage = capability["target_results"]["sg2260e.tpukernel"]["verification"][
         "cmodel_numeric_passed"]
     stage["evidence_ids"] = ["test.tpukernel-ops-worker", "artifact.cmodel-core"]
@@ -206,14 +278,11 @@ def test_numeric_stage_cannot_borrow_same_target_wrong_capability(monkeypatch):
         ("capability_ids", "exp.float", "claims incompatible target/capability pairs"),
     ],
 )
-def test_runtime_evidence_claims_form_a_closed_contract_set(
-        monkeypatch, field, phantom, message):
+def test_runtime_evidence_claims_form_a_closed_contract_set(monkeypatch, field, phantom, message):
     validator = _contract_validator_module()
     schema = validator._load_json(validator.SCHEMA_PATH)
     contract = _machine_contract()
-    runtime_evidence = next(
-        item for item in contract["evidence"] if "runtime_expectation" in item
-    )
+    runtime_evidence = next(item for item in contract["evidence"] if "runtime_expectation" in item)
     runtime_evidence["runtime_expectation"][field].append(phantom)
 
     real_load = validator._load_json
@@ -234,14 +303,11 @@ def test_historical_pcie_scope_is_explicitly_non_authorizing(monkeypatch):
     validator = _contract_validator_module()
     schema = validator._load_json(validator.SCHEMA_PATH)
     contract = _machine_contract()
-    stage = next(
-        result["verification"]["pcie_numeric_passed"]
-        for capability in contract["capabilities"]
-        for result in capability["target_results"].values()
-        if result["verification"]["pcie_numeric_passed"]["status"]
-        == "historical_passed"
-    )
-    stage["scope"] = stage["scope"].removeprefix("Historical ")
+    stage = next(result["verification"]["pcie_numeric_passed"]
+                 for capability in contract["capabilities"]
+                 for result in capability["target_results"].values()
+                 if result["verification"]["pcie_numeric_passed"]["status"] == "historical_passed")
+    stage["scope"] = stage["scope"][len("Historical "):]
 
     real_load = validator._load_json
 

@@ -6,6 +6,7 @@ import tilelang.language as T
 
 T.copy = T.ppl_copy
 
+
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H):
     scale = (1.0 / (dim + pe_dim))**0.5
     dtype = "float16"
@@ -16,29 +17,29 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
     @T.prim_func
     def main(
-        Q: T.Tensor([batch, heads, 1, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, 1, pe_dim], dtype),
-        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        Output: T.Tensor([batch, heads, 1, dim], dtype),
+            Q: T.Tensor([batch, heads, 1, dim], dtype),
+            Q_pe: T.Tensor([batch, heads, 1, pe_dim], dtype),
+            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+            Output: T.Tensor([batch, heads, 1, dim], dtype),
     ):
         with T.Kernel(batch, T.ceildiv(heads, VALID_BLOCK_H), is_cpu=True) as (bx, by):
             # --- allocate buffers ---
-            Q_shared    = T.alloc_shared([VALID_BLOCK_H, dim], dtype)
+            Q_shared = T.alloc_shared([VALID_BLOCK_H, dim], dtype)
             Q_pe_shared = T.alloc_shared([VALID_BLOCK_H, pe_dim], dtype)
-            KV_shared   = T.alloc_shared([block_N, dim], dtype)
+            KV_shared = T.alloc_shared([block_N, dim], dtype)
             K_pe_shared = T.alloc_shared([block_N, pe_dim], dtype)
-            S_shared    = T.alloc_shared([VALID_BLOCK_H, block_N], dtype)
-            O_shared    = T.alloc_shared([VALID_BLOCK_H, dim], dtype)
+            S_shared = T.alloc_shared([VALID_BLOCK_H, block_N], dtype)
+            O_shared = T.alloc_shared([VALID_BLOCK_H, dim], dtype)
 
-            acc_s           = T.alloc_shared([VALID_BLOCK_H, block_N], accum_dtype)
-            acc_s_pe        = T.alloc_shared([VALID_BLOCK_H, block_N], accum_dtype)
-            acc_o           = T.alloc_shared([VALID_BLOCK_H, dim], accum_dtype)
-            scores_max      = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
+            acc_s = T.alloc_shared([VALID_BLOCK_H, block_N], accum_dtype)
+            acc_s_pe = T.alloc_shared([VALID_BLOCK_H, block_N], accum_dtype)
+            acc_o = T.alloc_shared([VALID_BLOCK_H, dim], accum_dtype)
+            scores_max = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
             scores_max_prev = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
-            scores_scale    = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
-            scores_sum      = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
-            logsum          = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
+            scores_scale = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
+            scores_sum = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
+            logsum = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
 
             # --- head mapping ---
             cur_kv_head = by // (kv_group_num // VALID_BLOCK_H)
@@ -53,20 +54,16 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             T.ppl_fill(scores_max, -T.infinity(accum_dtype))
 
             loop_range = T.ceildiv(seqlen_kv, block_N)
-            for k in T.Pipelined(loop_range, num_stages=2): # num_stages=2, k<126
+            for k in T.Pipelined(loop_range, num_stages=2):  # num_stages=2, k<126
                 # 1) load K / K_pe tile
-                T.copy(KV [bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], KV_shared)
+                T.copy(KV[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], KV_shared)
                 T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
 
                 # 2) scores tile = Q@K^T + Q_pe@K_pe^T
                 T.ppl_fill(acc_s, T.float32(0))
-                T.ppl_gemm(
-                    Q_shared, KV_shared, acc_s,
-                    transpose_B=True, accumulate=False)
+                T.ppl_gemm(Q_shared, KV_shared, acc_s, transpose_B=True, accumulate=False)
                 T.ppl_fill(acc_s_pe, T.float32(0))
-                T.ppl_gemm(
-                    Q_pe_shared, K_pe_shared, acc_s_pe,
-                    transpose_B=True, accumulate=False)
+                T.ppl_gemm(Q_pe_shared, K_pe_shared, acc_s_pe, transpose_B=True, accumulate=False)
                 T.ppl_add(acc_s, acc_s, acc_s_pe)
 
                 # 3) online softmax (row-wise)
@@ -78,7 +75,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 #     scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                 prev_scaled = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
                 curr_scaled = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
-                T.ppl_mul_C(prev_scaled, scores_max_prev, scale)  # prev_scaled = scores_max_prev * scale
+                T.ppl_mul_C(prev_scaled, scores_max_prev,
+                            scale)  # prev_scaled = scores_max_prev * scale
                 T.ppl_mul_C(curr_scaled, scores_max, scale)  # curr_scaled = scores_max * scale
                 T.ppl_subtract(scores_scale, prev_scaled, curr_scaled)
                 work0 = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
@@ -88,7 +86,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
                 # for i, j in T.Parallel(VALID_BLOCK_H, block_N):
                 #     acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-                scores_scaled  = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
+                scores_scaled = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
                 T.ppl_mul_C(acc_s, acc_s, scale)  # acc_s *= scale
                 T.ppl_mul_C(scores_scaled, scores_max, scale)  # scores_scaled = scores_max * scale
                 T.ppl_subtract(acc_s, acc_s, scores_scaled)
@@ -103,7 +101,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 #     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
                 T.ppl_mul(logsum, logsum, scores_scale)
                 T.ppl_add(logsum, logsum, scores_sum)
-
 
                 # for i, j in T.Parallel(VALID_BLOCK_H, dim):
                 #     acc_o[i, j] *= scores_scale[i]

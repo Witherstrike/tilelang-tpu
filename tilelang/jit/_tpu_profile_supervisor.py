@@ -17,12 +17,12 @@ did not export the source checkout through ``PYTHONPATH``.
 
 from __future__ import annotations
 
+from contextlib import suppress
 import os
 import signal
 import subprocess
 import sys
 from typing import Optional, Sequence
-
 
 _child: Optional[subprocess.Popen] = None
 _PR_SET_PDEATHSIG = 1
@@ -31,13 +31,11 @@ _PR_SET_PDEATHSIG = 1
 def _stop_child_group(signum: int, _frame: object) -> None:
     """Kill this private worker process group before the helper exits."""
 
-    try:
+    with suppress(ProcessLookupError):
         # The target deliberately inherits this supervisor's process group.
         # This also catches ordinary compiler/AutoRunner descendants, whereas
         # PR_SET_PDEATHSIG alone only reaches the direct supervisor process.
         os.killpg(os.getpgrp(), signal.SIGKILL)
-    except ProcessLookupError:
-        pass
     # Do not run Python cleanup handlers after a parent-death event.  In
     # particular, waiting for arbitrary CModel/PerfAI children here would
     # defeat the outer watchdog's termination guarantee.

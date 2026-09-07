@@ -47,8 +47,7 @@ class PPLLayout:
 
         return get_tpu_chip_spec(self.chip).ppl_compile_definitions
 
-    def pcie_runtime_lib(
-            self, environment: Optional[Mapping[str, str]] = None) -> Path:
+    def pcie_runtime_lib(self, environment: Optional[Mapping[str, str]] = None) -> Path:
         """Resolve the installed board runtime, never the SDK CModel runtime.
 
         PPL 1.7 compiles against headers in ``deps/`` but prepends the installed
@@ -65,21 +64,19 @@ class PPLLayout:
         )
         runtime_lib = Path(raw_path).expanduser().resolve()
         if runtime_lib == self.runtime_lib.resolve():
-            raise ValueError(
-                "TILELANG_TPU_PCIE_RUNTIME_PATH resolves to PPL's SDK CModel "
-                "runtime. PCIe must use the installed TPUv7 board runtime.")
+            raise ValueError("TILELANG_TPU_PCIE_RUNTIME_PATH resolves to PPL's SDK CModel "
+                             "runtime. PCIe must use the installed TPUv7 board runtime.")
         runtime_so = runtime_lib / "libtpuv7_rt.so"
         if not runtime_so.is_file():
-            raise FileNotFoundError(
-                "TPUv7 PCIe board runtime is missing; expected "
-                f"{runtime_so}. Install the matching TPUv7 driver runtime or "
-                "set TILELANG_TPU_PCIE_RUNTIME_PATH to its lib directory.")
+            raise FileNotFoundError("TPUv7 PCIe board runtime is missing; expected "
+                                    f"{runtime_so}. Install the matching TPUv7 driver runtime or "
+                                    "set TILELANG_TPU_PCIE_RUNTIME_PATH to its lib directory.")
         return runtime_lib
 
     def runtime_identity_for(
-            self,
-            runtime_mode: str,
-            environment: Optional[Mapping[str, str]] = None,
+        self,
+        runtime_mode: str,
+        environment: Optional[Mapping[str, str]] = None,
     ) -> Tuple[str, str, str]:
         """Return the SDK/runtime identity for one validated host mode."""
 
@@ -89,9 +86,7 @@ class PPLLayout:
             runtime_lib = self.pcie_runtime_lib(environment)
         else:
             raise ValueError(f"Unsupported TPU runtime mode: {runtime_mode!r}")
-        return tuple(
-            str(path.resolve())
-            for path in (self.root, runtime_lib, self.backend_lib))
+        return tuple(str(path.resolve()) for path in (self.root, runtime_lib, self.backend_lib))
 
     @property
     def include_dirs(self) -> Tuple[Path, ...]:
@@ -104,8 +99,11 @@ class PPLLayout:
         )
 
     def include_dirs_for(
-            self, runtime_mode: str, *, profiling: bool = False,
-            environment: Optional[Mapping[str, str]] = None,
+        self,
+        runtime_mode: str,
+        *,
+        profiling: bool = False,
+        environment: Optional[Mapping[str, str]] = None,
     ) -> Tuple[Path, ...]:
         """Return validated includes for one concrete build configuration."""
 
@@ -132,10 +130,10 @@ class PPLLayout:
         )
 
     def require_runtime(
-            self,
-            runtime_mode: str,
-            *,
-            environment: Optional[Mapping[str, str]] = None,
+        self,
+        runtime_mode: str,
+        *,
+        environment: Optional[Mapping[str, str]] = None,
     ) -> "PPLLayout":
         """Validate only the artifacts needed by one host runtime mode."""
 
@@ -173,10 +171,10 @@ class PPLLayout:
         raise AssertionError("validated TPU runtime mode was not handled")
 
     def require_profiling(
-            self,
-            runtime_mode: str,
-            *,
-            environment: Optional[Mapping[str, str]] = None,
+        self,
+        runtime_mode: str,
+        *,
+        environment: Optional[Mapping[str, str]] = None,
     ) -> "PPLLayout":
         """Validate extra vendor artifacts used by instruction profiling.
 
@@ -210,8 +208,7 @@ class PPLLayout:
         """Return the RVT header or explain why the RV target is invalid."""
         spec = get_tpu_chip_spec(self.chip)
         if not spec.supports("rv"):
-            raise ValueError(
-                f"TPU chip {spec.name!r} does not support the RV programming model")
+            raise ValueError(f"TPU chip {spec.name!r} does not support the RV programming model")
         header = self.rvt_api_header
         if not header.is_file():
             raise FileNotFoundError(
@@ -226,28 +223,24 @@ class PPLLayout:
         delayed until a PCIe build.  More than one candidate is an ambiguity,
         not a reason to silently select an arbitrary SDK revision.
         """
-        candidates = tuple(sorted(
-            self.toolchains_root.glob("*/bin/riscv64-unknown-linux-gnu-gcc")))
+        candidates = tuple(sorted(self.toolchains_root.glob("*/bin/riscv64-unknown-linux-gnu-gcc")))
         if not candidates:
-            raise FileNotFoundError(
-                "PPL PCIe cross compiler is missing; expected "
-                f"riscv64-unknown-linux-gnu-gcc under {self.toolchains_root}")
+            raise FileNotFoundError("PPL PCIe cross compiler is missing; expected "
+                                    f"riscv64-unknown-linux-gnu-gcc under {self.toolchains_root}")
         if len(candidates) != 1:
             rendered = "\n  ".join(str(candidate) for candidate in candidates)
             raise ValueError(
-                "PPL PCIe cross compiler selection is ambiguous; expected one candidate:\n  "
-                + rendered)
+                "PPL PCIe cross compiler selection is ambiguous; expected one candidate:\n  " +
+                rendered)
         return candidates[0]
 
 
-def _require_paths(
-        layout: PPLLayout, requirement_group: str,
-        required: Mapping[str, Path]) -> PPLLayout:
+def _require_paths(layout: PPLLayout, requirement_group: str, required: Mapping[str,
+                                                                                Path]) -> PPLLayout:
     missing = [f"{name}: {path}" for name, path in required.items() if not path.exists()]
     if missing:
-        raise FileNotFoundError(
-            f"Incomplete PPL 1.7 {requirement_group} requirements:\n  "
-            + "\n  ".join(missing))
+        raise FileNotFoundError(f"Incomplete PPL 1.7 {requirement_group} requirements:\n  " +
+                                "\n  ".join(missing))
     return layout
 
 
@@ -263,10 +256,8 @@ def resolve_ppl_layout(ppl_root: str, chip: str) -> PPLLayout:
     root = Path(ppl_root).expanduser().resolve()
     chip_map_path = root / "deps/chip/chip_map.json"
     if not chip_map_path.is_file():
-        raise FileNotFoundError(
-            "PPL 1.7 SDK layout is required; expected chip map at "
-            f"{chip_map_path}."
-        )
+        raise FileNotFoundError("PPL 1.7 SDK layout is required; expected chip map at "
+                                f"{chip_map_path}.")
 
     try:
         chip_map = json.loads(chip_map_path.read_text(encoding="utf-8"))
@@ -279,9 +270,8 @@ def resolve_ppl_layout(ppl_root: str, chip: str) -> PPLLayout:
     if not isinstance(arch, str):
         raise ValueError(f"Invalid architecture for chip {chip!r} in {chip_map_path}")
     if arch != chip_spec.ppl_arch:
-        raise ValueError(
-            "PPL SDK chip map disagrees with TileLang's validated capability "
-            f"for {chip!r}: expected {chip_spec.ppl_arch!r}, got {arch!r}")
+        raise ValueError("PPL SDK chip map disagrees with TileLang's validated capability "
+                         f"for {chip!r}: expected {chip_spec.ppl_arch!r}, got {arch!r}")
 
     chip_root = root / "deps/chip" / arch
     runtime_root = root / "deps/runtime/tpuv7-runtime"

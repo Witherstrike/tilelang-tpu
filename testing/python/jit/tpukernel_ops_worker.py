@@ -13,6 +13,8 @@ This file is an executable worker, not a pytest test.  Use
 supervision.
 """
 
+from __future__ import annotations
+
 import argparse
 from dataclasses import asdict, dataclass, field
 import json
@@ -20,9 +22,8 @@ import math
 import os
 import time
 import traceback
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional, Union
 import zlib
-
 
 _CHIPS = ("sg2260e", "bm1690")
 _CORE_COUNTS = {"sg2260e": 4, "bm1690": 8}
@@ -57,13 +58,15 @@ def build_case_specs() -> tuple[CaseSpec, ...]:
 
     cases: list[CaseSpec] = []
 
-    def add(operation: str, dtype: str, variant: str = "dense", *,
+    def add(operation: str,
+            dtype: str,
+            variant: str = "dense",
+            *,
             supported_chips: tuple[str, ...] = _CHIPS,
             **parameters: Any) -> None:
         suffix = f".{variant}" if variant else ""
         case_id = f"{operation}.{dtype}{suffix}"
-        cases.append(CaseSpec(
-            case_id, operation, dtype, parameters, supported_chips))
+        cases.append(CaseSpec(case_id, operation, dtype, parameters, supported_chips))
 
     for dtype in _FLOAT_DTYPES:
         add(
@@ -94,11 +97,8 @@ def build_case_specs() -> tuple[CaseSpec, ...]:
         direct_global=False,
         shape=(2, 3, 17),
     )
-    for src_dtype, dst_dtype in (
-            ("float16", "float32"),
-            ("bfloat16", "float32"),
-            ("float32", "float16"),
-            ("float32", "bfloat16")):
+    for src_dtype, dst_dtype in (("float16", "float32"), ("bfloat16", "float32"),
+                                 ("float32", "float16"), ("float32", "bfloat16")):
         add(
             "copy",
             dst_dtype,
@@ -165,18 +165,12 @@ def build_case_specs() -> tuple[CaseSpec, ...]:
     # SG2260E's PPL 1.7 tpub_7_1_e runtime explicitly rejects the HAU sort
     # primitive.  Keep these probes in the shared registry, but schedule them
     # only for BM1690; a source-only compiler test verifies the SG rejection.
-    add("topk", "float32", "descending", supported_chips=("bm1690",),
-        descended=True)
-    add("topk", "float32", "ascending", supported_chips=("bm1690",),
-        descended=False)
-    add("topk", "int32", "descending", supported_chips=("bm1690",),
-        descended=True)
-    add("topk", "uint32", "descending", supported_chips=("bm1690",),
-        descended=True)
-    add("topk", "int32", "ascending", supported_chips=("bm1690",),
-        descended=False)
-    add("topk", "uint32", "ascending", supported_chips=("bm1690",),
-        descended=False)
+    add("topk", "float32", "descending", supported_chips=("bm1690",), descended=True)
+    add("topk", "float32", "ascending", supported_chips=("bm1690",), descended=False)
+    add("topk", "int32", "descending", supported_chips=("bm1690",), descended=True)
+    add("topk", "uint32", "descending", supported_chips=("bm1690",), descended=True)
+    add("topk", "int32", "ascending", supported_chips=("bm1690",), descended=False)
+    add("topk", "uint32", "ascending", supported_chips=("bm1690",), descended=False)
 
     case_ids = [case.case_id for case in cases]
     if len(case_ids) != len(set(case_ids)):
@@ -205,7 +199,7 @@ def _json_sample(tensor: Any) -> list[Any]:
     ]
 
 
-def _json_max(tensor: Any) -> float | None:
+def _json_max(tensor: Any) -> Optional[float]:
     if tensor.numel() == 0:
         return 0.0
     if not bool(tensor.isfinite().all().item()):
@@ -239,8 +233,7 @@ def _validate_worker_session(args: argparse.Namespace) -> None:
     }
     for name, value in expected.items():
         if os.environ.get(name) != value:
-            raise RuntimeError(
-                f"numerical worker requires runner-owned {name}={value!r}")
+            raise RuntimeError(f"numerical worker requires runner-owned {name}={value!r}")
     if os.environ.get("TILELANG_TPU_BENCHMARK_RUNS") != "0":
         raise RuntimeError("numerical worker requires exactly one TileLang launch")
 
@@ -255,16 +248,13 @@ def _validate_worker_session(args: argparse.Namespace) -> None:
         if "TPU_RT_CORE_NUM" in os.environ:
             raise RuntimeError("PCIe numerical worker inherited CModel core topology")
     else:
-        for name in (
-                "TILELANG_TPU_NUMERIC_ALLOW_PCIE",
-                "TILELANG_TPU_ALLOW_PCIE_LOAD",
-                "TILELANG_TPU_DEVICE_ID"):
+        for name in ("TILELANG_TPU_NUMERIC_ALLOW_PCIE", "TILELANG_TPU_ALLOW_PCIE_LOAD",
+                     "TILELANG_TPU_DEVICE_ID"):
             if name in os.environ:
                 raise RuntimeError(f"CModel numerical worker inherited forbidden {name}")
         expected_cores = str(_CORE_COUNTS[args.chip])
         if os.environ.get("TPU_RT_CORE_NUM") != expected_cores:
-            raise RuntimeError(
-                f"CModel numerical worker requires TPU_RT_CORE_NUM={expected_cores}")
+            raise RuntimeError(f"CModel numerical worker requires TPU_RT_CORE_NUM={expected_cores}")
 
 
 def _seed_for(case_id: str) -> int:
@@ -278,8 +268,12 @@ def _torch_dtype(torch: Any, dtype: str) -> Any:
         raise RuntimeError(f"this PyTorch does not expose dtype {dtype!r}") from error
 
 
-def _random_float(torch: Any, shape: tuple[int, ...], dtype: str,
-                  generator: Any, *, positive: bool = False) -> Any:
+def _random_float(torch: Any,
+                  shape: tuple[int, ...],
+                  dtype: str,
+                  generator: Any,
+                  *,
+                  positive: bool = False) -> Any:
     if positive:
         base = torch.rand(shape, generator=generator, dtype=torch.float32) * 1.5 + 0.5
     else:
@@ -287,17 +281,27 @@ def _random_float(torch: Any, shape: tuple[int, ...], dtype: str,
     return base.to(_torch_dtype(torch, dtype)).contiguous()
 
 
-def _comparison(actual: Any, expected: Any, *, atol: float, rtol: float,
+def _comparison(actual: Any,
+                expected: Any,
+                *,
+                atol: float,
+                rtol: float,
                 exact: bool = False) -> dict[str, Any]:
     if tuple(actual.shape) != tuple(expected.shape):
         raise NumericalMismatch(
             f"shape mismatch: actual={tuple(actual.shape)}, expected={tuple(expected.shape)}",
-            {"actual_shape": list(actual.shape), "expected_shape": list(expected.shape)},
+            {
+                "actual_shape": list(actual.shape),
+                "expected_shape": list(expected.shape)
+            },
         )
     if actual.dtype != expected.dtype:
         raise NumericalMismatch(
             f"dtype mismatch: actual={actual.dtype}, expected={expected.dtype}",
-            {"actual_dtype": str(actual.dtype), "expected_dtype": str(expected.dtype)},
+            {
+                "actual_dtype": str(actual.dtype),
+                "expected_dtype": str(expected.dtype)
+            },
         )
 
     if exact:
@@ -382,9 +386,12 @@ def _tolerance(dtype: str, operation: str) -> tuple[float, float]:
     return base
 
 
-def _compile_and_launch(tilelang: Any, prim_func: Any, arguments: tuple[Any, ...],
-                        chip: str, runtime_mode: str,
-                        out_idx: int | list[int] = -1) -> dict[str, float]:
+def _compile_and_launch(tilelang: Any,
+                        prim_func: Any,
+                        arguments: tuple[Any, ...],
+                        chip: str,
+                        runtime_mode: str,
+                        out_idx: Union[int, list[int]] = -1) -> dict[str, float]:
     target = f"tpu -mcpu={chip} -tpu-programming-model=tpukernel"
     compile_begin = time.monotonic()
     kernel = tilelang.compile(
@@ -403,8 +410,7 @@ def _compile_and_launch(tilelang: Any, prim_func: Any, arguments: tuple[Any, ...
     }
 
 
-def _run_copy(spec: CaseSpec, chip: str, runtime_mode: str,
-              tilelang: Any, T: Any, torch: Any,
+def _run_copy(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
               generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
     shape = tuple(int(extent) for extent in spec.parameters.get("shape", (4, 32)))
     src_dtype = str(spec.parameters["src_dtype"])
@@ -412,9 +418,7 @@ def _run_copy(spec: CaseSpec, chip: str, runtime_mode: str,
     direct_global = bool(spec.parameters["direct_global"])
 
     @T.prim_func
-    def kernel(
-            src: T.Tensor(shape, src_dtype),
-            dst: T.Tensor(shape, dst_dtype)):
+    def kernel(src: T.Tensor(shape, src_dtype), dst: T.Tensor(shape, dst_dtype)):
         with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
             if direct_global:
                 T.ppl_copy(src, dst)
@@ -442,8 +446,7 @@ def _run_copy(spec: CaseSpec, chip: str, runtime_mode: str,
     return _comparison(dst, expected, atol=0.0, rtol=0.0, exact=True), timing
 
 
-def _run_fill(spec: CaseSpec, chip: str, runtime_mode: str,
-              tilelang: Any, T: Any, torch: Any,
+def _run_fill(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
               _generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
     shape = (4, 32)
     dtype = spec.dtype
@@ -462,19 +465,16 @@ def _run_fill(spec: CaseSpec, chip: str, runtime_mode: str,
     return _comparison(dst, expected, atol=0.0, rtol=0.0, exact=True), timing
 
 
-def _run_elementwise(spec: CaseSpec, chip: str, runtime_mode: str,
-                     tilelang: Any, T: Any, torch: Any,
-                     generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
+def _run_elementwise(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any,
+                     torch: Any, generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
     shape = (4, 32)
     rhs_shape = (4, 1) if spec.parameters.get("broadcast_rhs") else shape
     dtype = spec.dtype
     operation = spec.operation
 
     @T.prim_func
-    def kernel(
-            lhs: T.Tensor(shape, dtype),
-            rhs: T.Tensor(rhs_shape, dtype),
-            dst: T.Tensor(shape, dtype)):
+    def kernel(lhs: T.Tensor(shape, dtype), rhs: T.Tensor(rhs_shape, dtype),
+               dst: T.Tensor(shape, dtype)):
         with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
             lhs_local = T.alloc_shared(shape, dtype)
             rhs_local = T.alloc_shared(rhs_shape, dtype)
@@ -492,8 +492,7 @@ def _run_elementwise(spec: CaseSpec, chip: str, runtime_mode: str,
             T.ppl_copy(dst_local, dst)
 
     lhs = _random_float(torch, shape, dtype, generator)
-    rhs = _random_float(
-        torch, rhs_shape, dtype, generator, positive=operation == "div")
+    rhs = _random_float(torch, rhs_shape, dtype, generator, positive=operation == "div")
     dst = torch.zeros(shape, dtype=_torch_dtype(torch, dtype))
     timing = _compile_and_launch(tilelang, kernel, (lhs, rhs, dst), chip, runtime_mode)
     lhs_f32 = lhs.float()
@@ -511,8 +510,7 @@ def _run_elementwise(spec: CaseSpec, chip: str, runtime_mode: str,
     return _comparison(dst, expected, atol=atol, rtol=rtol), timing
 
 
-def _run_scalar(spec: CaseSpec, chip: str, runtime_mode: str,
-                tilelang: Any, T: Any, torch: Any,
+def _run_scalar(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
                 generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
     shape = (4, 32)
     dtype = spec.dtype
@@ -540,8 +538,7 @@ def _run_scalar(spec: CaseSpec, chip: str, runtime_mode: str,
     return _comparison(dst, expected, atol=atol, rtol=rtol), timing
 
 
-def _run_gemm(spec: CaseSpec, chip: str, runtime_mode: str,
-              tilelang: Any, T: Any, torch: Any,
+def _run_gemm(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
               generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
     m, n, k = 16, 16, 16
     dtype = spec.dtype
@@ -552,10 +549,8 @@ def _run_gemm(spec: CaseSpec, chip: str, runtime_mode: str,
     initial = 0.5
 
     @T.prim_func
-    def kernel(
-            a: T.Tensor((m, k), dtype),
-            b: T.Tensor(b_shape, dtype),
-            c: T.Tensor((m, n), c_dtype)):
+    def kernel(a: T.Tensor((m, k), dtype), b: T.Tensor(b_shape, dtype), c: T.Tensor((m, n),
+                                                                                    c_dtype)):
         with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
             a_local = T.alloc_shared((m, k), dtype)
             b_local = T.alloc_shared(b_shape, dtype)
@@ -589,8 +584,7 @@ def _run_gemm(spec: CaseSpec, chip: str, runtime_mode: str,
     return _comparison(c, expected, atol=atol, rtol=rtol), timing
 
 
-def _run_exp(spec: CaseSpec, chip: str, runtime_mode: str,
-             tilelang: Any, T: Any, torch: Any,
+def _run_exp(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
              generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
     shape = (4, 32)
     dtype = spec.dtype
@@ -607,7 +601,9 @@ def _run_exp(spec: CaseSpec, chip: str, runtime_mode: str,
             T.ppl_copy(value, dst)
 
     src = torch.clamp(
-        _random_float(torch, shape, dtype, generator).float(), -2.0, 2.0,
+        _random_float(torch, shape, dtype, generator).float(),
+        -2.0,
+        2.0,
     ).to(_torch_dtype(torch, dtype))
     dst = torch.zeros_like(src)
     timing = _compile_and_launch(tilelang, kernel, (src, dst), chip, runtime_mode)
@@ -616,16 +612,13 @@ def _run_exp(spec: CaseSpec, chip: str, runtime_mode: str,
     return _comparison(dst, expected, atol=atol, rtol=rtol), timing
 
 
-def _run_sigmoid(spec: CaseSpec, chip: str, runtime_mode: str,
-                 tilelang: Any, T: Any, torch: Any,
+def _run_sigmoid(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
                  generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
     shape = (4, 32)
     dtype = spec.dtype
 
     @T.prim_func
-    def kernel(
-            src: T.Tensor(shape, dtype),
-            dst: T.Tensor(shape, dtype)):
+    def kernel(src: T.Tensor(shape, dtype), dst: T.Tensor(shape, dtype)):
         with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
             src_local = T.alloc_shared(shape, dtype)
             dst_local = T.alloc_shared(shape, dtype)
@@ -637,7 +630,9 @@ def _run_sigmoid(spec: CaseSpec, chip: str, runtime_mode: str,
             T.ppl_copy(dst_local, dst)
 
     src = torch.clamp(
-        _random_float(torch, shape, dtype, generator).float(), -8.0, 8.0,
+        _random_float(torch, shape, dtype, generator).float(),
+        -8.0,
+        8.0,
     ).to(_torch_dtype(torch, dtype))
     dst = torch.zeros_like(src)
     timing = _compile_and_launch(tilelang, kernel, (src, dst), chip, runtime_mode)
@@ -646,8 +641,7 @@ def _run_sigmoid(spec: CaseSpec, chip: str, runtime_mode: str,
     return _comparison(dst, expected, atol=atol, rtol=rtol), timing
 
 
-def _run_reduction(spec: CaseSpec, chip: str, runtime_mode: str,
-                   tilelang: Any, T: Any, torch: Any,
+def _run_reduction(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
                    generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
     rows = 65
     width = int(spec.parameters["width"])
@@ -655,9 +649,7 @@ def _run_reduction(spec: CaseSpec, chip: str, runtime_mode: str,
     operation = spec.operation
 
     @T.prim_func
-    def kernel(
-            src: T.Tensor((rows, width), dtype),
-            dst: T.Tensor((rows, 1), dtype)):
+    def kernel(src: T.Tensor((rows, width), dtype), dst: T.Tensor((rows, 1), dtype)):
         with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
             src_local = T.alloc_shared((rows, width), dtype)
             dst_local = T.alloc_shared((rows, 1), dtype)
@@ -686,16 +678,13 @@ def _run_reduction(spec: CaseSpec, chip: str, runtime_mode: str,
     return metrics, timing
 
 
-def _run_rsqrt(spec: CaseSpec, chip: str, runtime_mode: str,
-               tilelang: Any, T: Any, torch: Any,
+def _run_rsqrt(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
                generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
     shape = (4, 32)
     dtype = spec.dtype
 
     @T.prim_func
-    def kernel(
-            src: T.Tensor(shape, dtype),
-            dst: T.Tensor(shape, dtype)):
+    def kernel(src: T.Tensor(shape, dtype), dst: T.Tensor(shape, dtype)):
         with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
             src_local = T.alloc_shared(shape, dtype)
             dst_local = T.alloc_shared(shape, dtype)
@@ -711,19 +700,15 @@ def _run_rsqrt(spec: CaseSpec, chip: str, runtime_mode: str,
     return _comparison(dst, expected, atol=atol, rtol=rtol), timing
 
 
-def _run_rope(spec: CaseSpec, chip: str, runtime_mode: str,
-              tilelang: Any, T: Any, torch: Any,
+def _run_rope(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
               generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
     shape = (4, 32)
     dtype = spec.dtype
 
     @T.prim_func
-    def kernel(
-            even0: T.Tensor(shape, dtype),
-            even1: T.Tensor(shape, dtype),
-            odd0: T.Tensor(shape, dtype),
-            odd1: T.Tensor(shape, dtype),
-            dst: T.Tensor(shape, dtype)):
+    def kernel(even0: T.Tensor(shape, dtype), even1: T.Tensor(shape, dtype),
+               odd0: T.Tensor(shape, dtype), odd1: T.Tensor(shape,
+                                                            dtype), dst: T.Tensor(shape, dtype)):
         with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
             even0_local = T.alloc_shared(shape, dtype)
             even1_local = T.alloc_shared(shape, dtype)
@@ -734,15 +719,12 @@ def _run_rope(spec: CaseSpec, chip: str, runtime_mode: str,
             T.ppl_copy(even1, even1_local)
             T.ppl_copy(odd0, odd0_local)
             T.ppl_copy(odd1, odd1_local)
-            T.ppl_rope_add(
-                dst_local, even0_local, even1_local, odd0_local, odd1_local)
+            T.ppl_rope_add(dst_local, even0_local, even1_local, odd0_local, odd1_local)
             T.ppl_copy(dst_local, dst)
 
-    inputs = tuple(
-        _random_float(torch, shape, dtype, generator) for _ in range(4))
+    inputs = tuple(_random_float(torch, shape, dtype, generator) for _ in range(4))
     dst = torch.zeros(shape, dtype=_torch_dtype(torch, dtype))
-    timing = _compile_and_launch(
-        tilelang, kernel, (*inputs, dst), chip, runtime_mode)
+    timing = _compile_and_launch(tilelang, kernel, (*inputs, dst), chip, runtime_mode)
     even0, even1, odd0, odd1 = inputs
     expected_f32 = torch.empty(shape, dtype=torch.float32)
     expected_f32[:, 0::2] = even0.float()[:, 0::2] + even1.float()[:, 1::2]
@@ -752,17 +734,14 @@ def _run_rope(spec: CaseSpec, chip: str, runtime_mode: str,
     return _comparison(dst, expected, atol=atol, rtol=rtol), timing
 
 
-def _run_gather(spec: CaseSpec, chip: str, runtime_mode: str,
-                tilelang: Any, T: Any, torch: Any,
+def _run_gather(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
                 generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
     rows, width, count = 17, 32, 7
     dtype = spec.dtype
 
     @T.prim_func
-    def kernel(
-            Param: T.Tensor((rows, width), dtype),
-            Index: T.Tensor((count, 1), "uint32"),
-            Output: T.Tensor((count, width), dtype)):
+    def kernel(Param: T.Tensor((rows, width), dtype), Index: T.Tensor((count, 1), "uint32"),
+               Output: T.Tensor((count, width), dtype)):
         with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
             T.ppl_gather(Output, Param, Index, rows)
 
@@ -770,24 +749,20 @@ def _run_gather(spec: CaseSpec, chip: str, runtime_mode: str,
     index_i32 = torch.tensor([16, 0, 8, 3, 12, 1, 15], dtype=torch.int32).view(count, 1)
     index_u32 = index_i32.view(torch.uint32)
     dst = torch.zeros((count, width), dtype=_torch_dtype(torch, dtype))
-    timing = _compile_and_launch(
-        tilelang, kernel, (param, index_u32, dst), chip, runtime_mode)
+    timing = _compile_and_launch(tilelang, kernel, (param, index_u32, dst), chip, runtime_mode)
     expected = param[index_i32.long().reshape(-1)]
     return _comparison(dst, expected, atol=0.0, rtol=0.0, exact=True), timing
 
 
-def _run_topk(spec: CaseSpec, chip: str, runtime_mode: str,
-              tilelang: Any, T: Any, torch: Any,
+def _run_topk(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any, T: Any, torch: Any,
               generator: Any) -> tuple[dict[str, Any], dict[str, float]]:
     length, k = 257, 11
     dtype = spec.dtype
     descended = bool(spec.parameters["descended"])
 
     @T.prim_func
-    def kernel(
-            src: T.Tensor((length,), dtype),
-            dst_data: T.Tensor((k,), dtype),
-            dst_idx: T.Tensor((k,), "int32")):
+    def kernel(src: T.Tensor((length,), dtype), dst_data: T.Tensor((k,), dtype), dst_idx: T.Tensor(
+        (k,), "int32")):
         with T.Kernel(1, 1, is_cpu=True) as (_bx, _by):
             T.ppl_topk(dst_data, dst_idx, src, k, descended, length)
 
@@ -808,21 +783,17 @@ def _run_topk(spec: CaseSpec, chip: str, runtime_mode: str,
     dst_data = torch.zeros(k, dtype=_torch_dtype(torch, dtype))
     dst_idx = torch.zeros(k, dtype=torch.int32)
     timing = _compile_and_launch(
-        tilelang, kernel, (src, dst_data, dst_idx), chip, runtime_mode,
-        out_idx=[1, 2])
+        tilelang, kernel, (src, dst_data, dst_idx), chip, runtime_mode, out_idx=[1, 2])
     values = reference_values.tolist()
     ordered_indices = sorted(
         range(length),
-        key=lambda index: (
-            -values[index] if descended else values[index], index),
+        key=lambda index: (-values[index] if descended else values[index], index),
     )
     expected_idx64 = torch.tensor(ordered_indices[:k], dtype=torch.int64)
     expected_idx = expected_idx64.to(torch.int32)
     expected_data = src[expected_idx64]
-    data_metrics = _comparison(
-        dst_data, expected_data, atol=0.0, rtol=0.0, exact=True)
-    index_metrics = _comparison(
-        dst_idx, expected_idx, atol=0.0, rtol=0.0, exact=True)
+    data_metrics = _comparison(dst_data, expected_data, atol=0.0, rtol=0.0, exact=True)
+    index_metrics = _comparison(dst_idx, expected_idx, atol=0.0, rtol=0.0, exact=True)
     return {
         "valid_prefix_length": k,
         "stable_ties_checked": True,
@@ -862,8 +833,7 @@ def _run_case(spec: CaseSpec, chip: str, runtime_mode: str) -> dict[str, Any]:
         "topk": _run_topk,
     }
     runner = dispatch[spec.operation]
-    metrics, timing = runner(
-        spec, chip, runtime_mode, tilelang, T, torch, generator)
+    metrics, timing = runner(spec, chip, runtime_mode, tilelang, T, torch, generator)
     return {
         "status": "passed",
         "case": spec.to_json(),
@@ -879,8 +849,8 @@ def _run_case(spec: CaseSpec, chip: str, runtime_mode: str) -> dict[str, Any]:
 
 def _emit_result(payload: Mapping[str, Any]) -> None:
     print(
-        _RESULT_PREFIX + json.dumps(
-            payload, sort_keys=True, separators=(",", ":"), allow_nan=False),
+        _RESULT_PREFIX +
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False),
         flush=True,
     )
 
@@ -888,12 +858,13 @@ def _emit_result(payload: Mapping[str, Any]) -> None:
 def main() -> int:
     args = _parse_args()
     if args.list_cases:
-        print(json.dumps(
-            [case.to_json() for case in build_case_specs()],
-            indent=2,
-            sort_keys=True,
-            allow_nan=False,
-        ))
+        print(
+            json.dumps(
+                [case.to_json() for case in build_case_specs()],
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            ))
         return 0
 
     assert args.case_id is not None

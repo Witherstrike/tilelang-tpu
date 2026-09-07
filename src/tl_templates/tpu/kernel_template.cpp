@@ -1,3 +1,4 @@
+// clang-format off
 #include "kernel.h"
 #include <ppl_mem.h>
 #include <cstdio>
@@ -52,3 +53,4 @@ int {function_name}({func_params}) {{
   }}
   return 0;
 }}
+// clang-format on

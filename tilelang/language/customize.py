@@ -8,7 +8,6 @@ from tvm.tir import PrimExpr, Buffer, BufferRegion, BufferLoad
 from typing import List, Union
 from .copy import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
 
-
 _TPU_LOCAL_SCOPES = {"shared", "shared.dyn", "local", "local.fragment"}
 _TPU_BASE_FLOAT_DTYPES = {"float16", "bfloat16", "float32"}
 _TPU_FP8_DTYPES = {"e4m3_float8", "e5m2_float8"}
@@ -30,11 +29,9 @@ def _tpu_tensor_region(buffer, access_type):
 def _static_positive_dim(operation, value):
     static_value = value if isinstance(value, int) else getattr(value, "value", None)
     if isinstance(static_value, bool) or not isinstance(static_value, int):
-        raise ValueError(
-            f"{operation} requires static integer dimensions, got {value}")
+        raise ValueError(f"{operation} requires static integer dimensions, got {value}")
     if static_value <= 0:
-        raise ValueError(
-            f"{operation} requires positive dimensions, got {static_value}")
+        raise ValueError(f"{operation} requires positive dimensions, got {static_value}")
     return static_value
 
 
@@ -42,29 +39,25 @@ def _require_descriptor_shape(operation, value):
     """Validate one tensor shape before it becomes a TPUv7 ``dim4``."""
     rank = len(value.shape)
     if rank < 1 or rank > 4:
-        raise ValueError(
-            f"{operation} supports descriptor ranks 1 through 4, got rank {rank}")
+        raise ValueError(f"{operation} supports descriptor ranks 1 through 4, got rank {rank}")
     for axis, dim in enumerate(value.shape):
         extent = _static_positive_dim(f"{operation} axis {axis}", dim)
         if extent > _TPUV7_DESCRIPTOR_DIM_MAX:
-            raise ValueError(
-                f"{operation} axis {axis} extent {extent} exceeds the TPUv7 "
-                f"descriptor limit {_TPUV7_DESCRIPTOR_DIM_MAX}")
+            raise ValueError(f"{operation} axis {axis} extent {extent} exceeds the TPUv7 "
+                             f"descriptor limit {_TPUV7_DESCRIPTOR_DIM_MAX}")
 
 
 def _require_local_buffer(name, value):
     _require_buffer(name, value)
     if value.scope() not in _TPU_LOCAL_SCOPES:
-        raise ValueError(
-            f"{name} must reside in TPU local memory, got scope={value.scope()!r}")
+        raise ValueError(f"{name} must reside in TPU local memory, got scope={value.scope()!r}")
     _require_descriptor_shape(name, value)
 
 
 def _require_global_buffer(name, value):
     _require_buffer(name, value)
     if value.scope() != "global":
-        raise ValueError(
-            f"{name} must reside in global memory, got scope={value.scope()!r}")
+        raise ValueError(f"{name} must reside in global memory, got scope={value.scope()!r}")
 
 
 def _require_rank(name, value, rank):
@@ -82,8 +75,7 @@ def _require_dtype(name, value, supported):
 def _require_same_dtype(operation, *buffers):
     dtypes = {str(buffer.dtype) for buffer in buffers}
     if len(dtypes) != 1:
-        raise ValueError(
-            f"{operation} requires matching buffer dtypes, got {sorted(dtypes)}")
+        raise ValueError(f"{operation} requires matching buffer dtypes, got {sorted(dtypes)}")
 
 
 def _require_same_shape(operation, lhs, rhs):
@@ -106,23 +98,20 @@ def _require_elementwise_shapes(operation, out, lhs, rhs):
         ir.assert_structural_equal(rhs.shape[0], out.shape[0])
         ir.assert_structural_equal(rhs.shape[1], 1)
     except ValueError as error:
-        raise ValueError(
-            f"{operation} RHS must match {out.shape} or use W-broadcast "
-            f"({out.shape[0]}, 1), got {rhs.shape}") from error
+        raise ValueError(f"{operation} RHS must match {out.shape} or use W-broadcast "
+                         f"({out.shape[0]}, 1), got {rhs.shape}") from error
 
 
 def _require_storage_disjoint(operation, lhs_name, lhs, rhs_name, rhs):
     if lhs.data.same_as(rhs.data):
-        raise ValueError(
-            f"{operation} requires {lhs_name} and {rhs_name} to use distinct storage")
+        raise ValueError(f"{operation} requires {lhs_name} and {rhs_name} to use distinct storage")
 
 
 def _require_distinct_storage(operation, **buffers):
     items = list(buffers.items())
     for index, (lhs_name, lhs) in enumerate(items):
         for rhs_name, rhs in items[index + 1:]:
-            _require_storage_disjoint(
-                operation, lhs_name, lhs, rhs_name, rhs)
+            _require_storage_disjoint(operation, lhs_name, lhs, rhs_name, rhs)
 
 
 def _require_exp_hw_limit(operation, value):
@@ -133,9 +122,8 @@ def _require_exp_hw_limit(operation, value):
     ]
     hw = dims[-1] if len(dims) < 4 else dims[-2] * dims[-1]
     if hw > _TPUV7_DESCRIPTOR_DIM_MAX:
-        raise ValueError(
-            f"{operation} requires descriptor h*w <= {_TPUV7_DESCRIPTOR_DIM_MAX}, "
-            f"got {hw}")
+        raise ValueError(f"{operation} requires descriptor h*w <= {_TPUV7_DESCRIPTOR_DIM_MAX}, "
+                         f"got {hw}")
 
 
 def atomic_add(dst: Buffer, value: PrimExpr) -> PrimExpr:
@@ -267,9 +255,8 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, *, accumulate):
     _require_storage_disjoint("ppl_gemm", "C", C, "B", B)
     input_dtype = str(A.dtype)
     if input_dtype not in {"float16", "bfloat16"} | _TPU_FP8_DTYPES:
-        raise ValueError(
-            "ppl_gemm inputs must use float16, bfloat16, or FP8; "
-            f"got {A.dtype}")
+        raise ValueError("ppl_gemm inputs must use float16, bfloat16, or FP8; "
+                         f"got {A.dtype}")
     if not isinstance(transpose_A, bool) or not isinstance(transpose_B, bool):
         raise TypeError("ppl_gemm transpose_A and transpose_B must be Python bools")
     if not isinstance(accumulate, bool):
@@ -278,13 +265,10 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, *, accumulate):
         raise ValueError("ppl_gemm does not support transpose_A=True")
     if input_dtype in _TPU_FP8_DTYPES:
         if str(C.dtype) != "float32":
-            raise ValueError(
-                "ppl_gemm FP8 inputs require a float32 output/accumulator")
-    elif str(C.dtype) != "float32" and not (
-            not accumulate and str(C.dtype) == input_dtype):
-        raise ValueError(
-            "ppl_gemm requires a float32 C tile when accumulate=True; "
-            "overwrite mode also permits C to match the input dtype")
+            raise ValueError("ppl_gemm FP8 inputs require a float32 output/accumulator")
+    elif str(C.dtype) != "float32" and not (not accumulate and str(C.dtype) == input_dtype):
+        raise ValueError("ppl_gemm requires a float32 C tile when accumulate=True; "
+                         "overwrite mode also permits C to match the input dtype")
     Aptr = _tpu_tensor_region(A, "r")
     Bptr = _tpu_tensor_region(B, "r")
     Cptr = _tpu_tensor_region(C, "rw" if accumulate else "w")
@@ -296,9 +280,8 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, *, accumulate):
         ir.assert_structural_equal(K, K_B)
     except ValueError as error:
         raise ValueError(f"ppl_gemm K mismatch: A gives {K}, B gives {K_B}") from error
-    return T.call_extern(
-        "handle", "tl.tpu.gemm", Aptr, Bptr, Cptr,
-        transpose_A, transpose_B, M, N, K, accumulate)
+    return T.call_extern("handle", "tl.tpu.gemm", Aptr, Bptr, Cptr, transpose_A, transpose_B, M, N,
+                         K, accumulate)
 
 
 def ppl_copy(
@@ -328,8 +311,8 @@ def ppl_copy(
     """
 
     def _is_one(value):
-        return isinstance(value, int) and value == 1 or (
-            hasattr(value, "value") and value.value == 1)
+        return isinstance(value, int) and value == 1 or (hasattr(value, "value") and
+                                                         value.value == 1)
 
     def _merge_extent(src_value, dst_value):
         if _is_one(src_value):
@@ -351,13 +334,11 @@ def ppl_copy(
 
     supported_operands = (Buffer, BufferRegion, BufferLoad)
     if not isinstance(src, supported_operands):
-        raise TypeError(
-            "ppl_copy src must be a Buffer, BufferRegion, or BufferLoad, "
-            f"got {type(src).__name__}")
+        raise TypeError("ppl_copy src must be a Buffer, BufferRegion, or BufferLoad, "
+                        f"got {type(src).__name__}")
     if not isinstance(dst, supported_operands):
-        raise TypeError(
-            "ppl_copy dst must be a Buffer, BufferRegion, or BufferLoad, "
-            f"got {type(dst).__name__}")
+        raise TypeError("ppl_copy dst must be a Buffer, BufferRegion, or BufferLoad, "
+                        f"got {type(dst).__name__}")
 
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
@@ -368,8 +349,7 @@ def ppl_copy(
     src_extent = [1] * (rank - len(src_extent)) + src_extent
     dst_extent = [1] * (rank - len(dst_extent)) + dst_extent
     extent = [
-        _merge_extent(src_value, dst_value)
-        for src_value, dst_value in zip(src_extent, dst_extent)
+        _merge_extent(src_value, dst_value) for src_value, dst_value in zip(src_extent, dst_extent)
     ]
 
     def _to_region(data, access_type):
@@ -505,12 +485,9 @@ def ppl_mul(out, inp1, inp2):
 
 @T.macro
 def _ppl_exp_safe(out, work0, work1, coeff):
-    T.call_extern(
-        "handle", "tl.tpukernel.exp",
-        _tpu_tensor_region(out, "rw"),
-        _tpu_tensor_region(work0, "rw"),
-        _tpu_tensor_region(work1, "rw"),
-        _tpu_tensor_region(coeff, "rw"))
+    T.call_extern("handle", "tl.tpukernel.exp", _tpu_tensor_region(out, "rw"),
+                  _tpu_tensor_region(work0, "rw"), _tpu_tensor_region(work1, "rw"),
+                  _tpu_tensor_region(coeff, "rw"))
 
 
 def ppl_exp(out, work0, work1, coeff):
@@ -530,35 +507,28 @@ def ppl_exp(out, work0, work1, coeff):
         `tpu_bdc_load_fp_exp_coeff` and `tpu_bdc_fp_exp` contract, which no
         longer needs the legacy FP32 lookup-table buffer.
     """
-    for name, buffer in (("out", out), ("work0", work0), ("work1", work1),
-                         ("coeff", coeff)):
+    for name, buffer in (("out", out), ("work0", work0), ("work1", work1), ("coeff", coeff)):
         _require_local_buffer(name, buffer)
         _require_dtype(name, buffer, _TPU_BASE_FLOAT_DTYPES)
     _require_same_dtype("ppl_exp", out, work0, work1, coeff)
     _require_same_shape("ppl_exp", out, work0)
     _require_same_shape("ppl_exp", out, work1)
-    _require_distinct_storage(
-        "ppl_exp", out=out, work0=work0, work1=work1, coeff=coeff)
+    _require_distinct_storage("ppl_exp", out=out, work0=work0, work1=work1, coeff=coeff)
     _require_exp_hw_limit("ppl_exp", out)
     _require_rank("coeff", coeff, 2)
     try:
         ir.assert_structural_equal(coeff.shape[0], 64)
         ir.assert_structural_equal(coeff.shape[1], 32)
     except ValueError as error:
-        raise ValueError(
-            f"ppl_exp expects coeff shape (64, 32), got {coeff.shape}") from error
+        raise ValueError(f"ppl_exp expects coeff shape (64, 32), got {coeff.shape}") from error
     return _ppl_exp_safe(out, work0, work1, coeff)
 
 
 @T.macro
 def _ppl_sigmoid_safe(out, inp, work0, work1, coeff):
-    T.call_extern(
-        "handle", "tl.tpukernel.sigmoid",
-        _tpu_tensor_region(out, "rw"),
-        _tpu_tensor_region(inp, "r"),
-        _tpu_tensor_region(work0, "rw"),
-        _tpu_tensor_region(work1, "rw"),
-        _tpu_tensor_region(coeff, "rw"))
+    T.call_extern("handle", "tl.tpukernel.sigmoid", _tpu_tensor_region(out, "rw"),
+                  _tpu_tensor_region(inp, "r"), _tpu_tensor_region(work0, "rw"),
+                  _tpu_tensor_region(work1, "rw"), _tpu_tensor_region(coeff, "rw"))
 
 
 def ppl_sigmoid(out, inp, work0, work1, coeff):
@@ -569,8 +539,7 @@ def ppl_sigmoid(out, inp, work0, work1, coeff):
     and ``work1`` match ``out``; ``coeff`` has shape ``(64, 32)``.
     """
     buffers = (out, inp, work0, work1, coeff)
-    for name, buffer in zip(
-            ("out", "inp", "work0", "work1", "coeff"), buffers):
+    for name, buffer in zip(("out", "inp", "work0", "work1", "coeff"), buffers):
         _require_local_buffer(name, buffer)
         _require_dtype(name, buffer, _TPU_BASE_FLOAT_DTYPES)
     _require_same_dtype("ppl_sigmoid", *buffers)
@@ -578,8 +547,7 @@ def ppl_sigmoid(out, inp, work0, work1, coeff):
     _require_same_shape("ppl_sigmoid", out, work0)
     _require_same_shape("ppl_sigmoid", out, work1)
     _require_distinct_storage(
-        "ppl_sigmoid", out=out, inp=inp, work0=work0, work1=work1,
-        coeff=coeff)
+        "ppl_sigmoid", out=out, inp=inp, work0=work0, work1=work1, coeff=coeff)
     _require_exp_hw_limit("ppl_sigmoid", out)
     _require_rank("coeff", coeff, 2)
     try:
@@ -614,8 +582,7 @@ def ppl_gather(output, param, index, param_h):
     _require_rank("index", index, 2)
     for name, buffer in (("output", output), ("param", param), ("index", index)):
         _require_descriptor_shape(f"ppl_gather {name}", buffer)
-    _require_distinct_storage(
-        "ppl_gather", output=output, param=param, index=index)
+    _require_distinct_storage("ppl_gather", output=output, param=param, index=index)
     _require_same_dtype("ppl_gather payload", output, param)
     _require_dtype("output", output, _TPU_ELEMENTWISE_FLOAT_DTYPES)
     if str(index.dtype) != "uint32":
@@ -628,9 +595,8 @@ def ppl_gather(output, param, index, param_h):
         ir.assert_structural_equal(output.shape[0], index.shape[0])
         ir.assert_structural_equal(index.shape[1], 1)
     except ValueError as error:
-        raise ValueError(
-            "ppl_gather expects param=(param_h, width), output=(count, width), "
-            "and index=(count, 1)") from error
+        raise ValueError("ppl_gather expects param=(param_h, width), output=(count, width), "
+                         "and index=(count, 1)") from error
     outptr = _tpu_tensor_region(output, "w")
     paramptr = _tpu_tensor_region(param, "r")
     indexptr = _tpu_tensor_region(index, "r")
@@ -661,8 +627,7 @@ def ppl_topk(dst_data, dst_idx, src, K, descended, length):
     for name, buffer in (("dst_data", dst_data), ("dst_idx", dst_idx), ("src", src)):
         _require_rank(name, buffer, 1)
         _require_descriptor_shape(f"ppl_topk {name}", buffer)
-    _require_distinct_storage(
-        "ppl_topk", dst_data=dst_data, dst_idx=dst_idx, src=src)
+    _require_distinct_storage("ppl_topk", dst_data=dst_data, dst_idx=dst_idx, src=src)
     try:
         ir.assert_structural_equal(src.shape[0], length)
         ir.assert_structural_equal(dst_data.shape[0], K)
@@ -673,9 +638,8 @@ def ppl_topk(dst_data, dst_idx, src, K, descended, length):
     dst_data_ptr = _tpu_tensor_region(dst_data, "w")
     dst_idx_ptr = _tpu_tensor_region(dst_idx, "w")
     srcptr = _tpu_tensor_region(src, "r")
-    return T.call_extern(
-        "handle", "tl.tpukernel.topk", dst_data_ptr, dst_idx_ptr, srcptr,
-        K, descended, length)
+    return T.call_extern("handle", "tl.tpukernel.topk", dst_data_ptr, dst_idx_ptr, srcptr, K,
+                         descended, length)
 
 
 def ppl_rsqrt(out, inp):
@@ -811,12 +775,9 @@ def _tpu_reduce_sum_lowering(inp, out, dim, eu_elements):
         align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num
         stride = T.ceildiv(inp.shape[0], channel) * align_w
         # Delegate the hardware-specific sequence to TPU-Kernel codegen.
-        T.call_extern(
-            "handle", "tl.tpukernel.reduce_sum",
-            _tpu_tensor_region(inp, "rw"),
-            _tpu_tensor_region(out, "w"),
-            _tpu_tensor_region(tmp_buffer_sum, "rw"),
-            eu_num, align_w, stride)
+        T.call_extern("handle", "tl.tpukernel.reduce_sum", _tpu_tensor_region(inp, "rw"),
+                      _tpu_tensor_region(out, "w"), _tpu_tensor_region(tmp_buffer_sum, "rw"),
+                      eu_num, align_w, stride)
 
 
 def ppl_reduce_sum(inp, out, dim):
@@ -870,12 +831,9 @@ def _tpu_reduce_max_lowering(inp, out, dim, eu_elements):
         align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num
         stride = T.ceildiv(inp.shape[0], channel) * align_w
         # Delegate the hardware-specific sequence to TPU-Kernel codegen.
-        T.call_extern(
-            "handle", "tl.tpukernel.reduce_max",
-            _tpu_tensor_region(inp, "rw"),
-            _tpu_tensor_region(out, "w"),
-            _tpu_tensor_region(tmp_buffer_max, "rw"),
-            eu_num, align_w, stride)
+        T.call_extern("handle", "tl.tpukernel.reduce_max", _tpu_tensor_region(inp, "rw"),
+                      _tpu_tensor_region(out, "w"), _tpu_tensor_region(tmp_buffer_max, "rw"),
+                      eu_num, align_w, stride)
 
 
 def ppl_reduce_max(inp, out, dim):
@@ -940,8 +898,7 @@ def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
         The last dimension of `out` should be even.
     """
     buffers = (out, even_inp1, even_inp2, odd_inp1, odd_inp2)
-    for name, buffer in zip(
-            ("out", "even_inp1", "even_inp2", "odd_inp1", "odd_inp2"), buffers):
+    for name, buffer in zip(("out", "even_inp1", "even_inp2", "odd_inp1", "odd_inp2"), buffers):
         _require_local_buffer(name, buffer)
         _require_rank(name, buffer, 2)
         _require_dtype(name, buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
@@ -949,14 +906,12 @@ def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
     _require_same_dtype("ppl_rope_add", *buffers)
     if _static_positive_dim("ppl_rope_add W", out.shape[1]) % 2:
         raise ValueError("ppl_rope_add requires an even W dimension")
-    for name, buffer in zip(
-            ("even_inp1", "even_inp2", "odd_inp1", "odd_inp2"), buffers[1:]):
+    for name, buffer in zip(("even_inp1", "even_inp2", "odd_inp1", "odd_inp2"), buffers[1:]):
         _require_storage_disjoint("ppl_rope_add", "out", out, name, buffer)
     outptr = _tpu_tensor_region(out, "w")
     even_inpptr1 = _tpu_tensor_region(even_inp1, "r")
     even_inpptr2 = _tpu_tensor_region(even_inp2, "r")
     odd_inpptr1 = _tpu_tensor_region(odd_inp1, "r")
     odd_inpptr2 = _tpu_tensor_region(odd_inp2, "r")
-    return T.call_extern(
-        "handle", "tl.tpukernel.rope_add", outptr, even_inpptr1,
-        even_inpptr2, odd_inpptr1, odd_inpptr2)
+    return T.call_extern("handle", "tl.tpukernel.rope_add", outptr, even_inpptr1, even_inpptr2,
+                         odd_inpptr1, odd_inpptr2)

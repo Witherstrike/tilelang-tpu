@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, Mapping, Optional, Tuple
 
-
 TPUProgrammingModel = Literal["tpukernel", "rv"]
 TPURuntimeMode = Literal["pcie", "cmodel"]
 
@@ -41,20 +40,22 @@ class TPUChipSpec:
 # TileLang allocator/codegen. The different SDK architecture and physical core
 # count are represented here rather than inferred from a directory layout.
 TPU_CHIP_SPECS: Mapping[str, TPUChipSpec] = MappingProxyType({
-    "bm1690": TPUChipSpec(
-        name="bm1690",
-        ppl_arch="tpub_7_1",
-        ppl_compile_definitions=("__tpub_7_1__", "__sg2260__"),
-        physical_core_count=8,
-        programming_models=("tpukernel",),
-    ),
-    "sg2260e": TPUChipSpec(
-        name="sg2260e",
-        ppl_arch="tpub_7_1_e",
-        ppl_compile_definitions=("__tpub_7_1_e__", "__sg2260e__"),
-        physical_core_count=4,
-        programming_models=("tpukernel", "rv"),
-    ),
+    "bm1690":
+        TPUChipSpec(
+            name="bm1690",
+            ppl_arch="tpub_7_1",
+            ppl_compile_definitions=("__tpub_7_1__", "__sg2260__"),
+            physical_core_count=8,
+            programming_models=("tpukernel",),
+        ),
+    "sg2260e":
+        TPUChipSpec(
+            name="sg2260e",
+            ppl_arch="tpub_7_1_e",
+            ppl_compile_definitions=("__tpub_7_1_e__", "__sg2260e__"),
+            physical_core_count=4,
+            programming_models=("tpukernel", "rv"),
+        ),
 })
 
 
@@ -74,15 +75,13 @@ def get_tpu_chip_spec(chip: str) -> TPUChipSpec:
         return TPU_CHIP_SPECS[normalised]
     except KeyError as exc:
         supported = ", ".join(TPU_CHIP_SPECS)
-        raise ValueError(
-            f"Unsupported TPU chip {chip!r}; supported chips: {supported}") from exc
+        raise ValueError(f"Unsupported TPU chip {chip!r}; supported chips: {supported}") from exc
 
 
 def _validate_programming_model(programming_model: str) -> TPUProgrammingModel:
     if programming_model not in ("tpukernel", "rv"):
-        raise ValueError(
-            "Unsupported TPU programming model "
-            f"{programming_model!r}; expected 'tpukernel' or 'rv'")
+        raise ValueError("Unsupported TPU programming model "
+                         f"{programming_model!r}; expected 'tpukernel' or 'rv'")
     return programming_model
 
 
@@ -100,10 +99,9 @@ def get_tpu_target_chip(target: Any) -> Optional[str]:
     raw_mcpu = attrs.get("mcpu")
     mcpu_value = str(raw_mcpu).strip() if raw_mcpu is not None else ""
     if not mcpu_value or mcpu_value == "unknown":
-        raise ValueError(
-            "TPU target requires an explicit physical chip: "
-            "tpu -mcpu=<bm1690|sg2260e> "
-            "-tpu-programming-model=<tpukernel|rv>")
+        raise ValueError("TPU target requires an explicit physical chip: "
+                         "tpu -mcpu=<bm1690|sg2260e> "
+                         "-tpu-programming-model=<tpukernel|rv>")
     return get_tpu_chip_spec(mcpu_value).name
 
 
@@ -116,9 +114,8 @@ def get_tpu_target_programming_model(target: Any) -> Optional[TPUProgrammingMode
     raw_model = attrs.get("tpu-programming-model")
     model = str(raw_model).strip() if raw_model is not None else ""
     if not model or model == "unknown":
-        raise ValueError(
-            "TPU target requires an explicit programming model: "
-            "-tpu-programming-model=<tpukernel|rv>")
+        raise ValueError("TPU target requires an explicit programming model: "
+                         "-tpu-programming-model=<tpukernel|rv>")
     return _validate_programming_model(model)
 
 
@@ -134,9 +131,8 @@ class TPUTargetSpec:
         programming_model = _validate_programming_model(self.programming_model)
         if not spec.supports(programming_model):
             supported = ", ".join(spec.programming_models)
-            raise ValueError(
-                f"TPU chip {spec.name!r} does not support programming model "
-                f"{programming_model!r}; supported models: {supported}")
+            raise ValueError(f"TPU chip {spec.name!r} does not support programming model "
+                             f"{programming_model!r}; supported models: {supported}")
         object.__setattr__(self, "chip", spec.name)
         object.__setattr__(self, "programming_model", programming_model)
 
@@ -153,9 +149,8 @@ class TPURuntimeConfig:
 
     def __post_init__(self):
         if self.runtime_mode not in ("pcie", "cmodel"):
-            raise ValueError(
-                f"Unsupported TPU runtime mode {self.runtime_mode!r}; "
-                "expected 'pcie' or 'cmodel'")
+            raise ValueError(f"Unsupported TPU runtime mode {self.runtime_mode!r}; "
+                             "expected 'pcie' or 'cmodel'")
 
 
 def resolve_tpu_target(*, target: Any) -> TPUTargetSpec:
@@ -170,9 +165,7 @@ def resolve_tpu_target(*, target: Any) -> TPUTargetSpec:
     )
 
 
-def resolve_tpu_runtime(
-    *, runtime_mode: Optional[TPURuntimeMode] = None
-) -> TPURuntimeConfig:
+def resolve_tpu_runtime(*, runtime_mode: Optional[TPURuntimeMode] = None) -> TPURuntimeConfig:
     """Resolve host execution without changing the compiled device program.
 
     CModel is the fail-safe default: omitting a runtime choice must never

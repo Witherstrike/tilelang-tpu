@@ -1,7 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-
 import tilelang
 import tilelang.language as T
 
@@ -9,23 +8,20 @@ import tilelang.language as T
 def matmul(M, N, block_M, block_N, stage, dtype="float16", accum_dtype="float"):
 
     @T.prim_func
-    def main(
-            A: T.Tensor((M, N), dtype),
-    ):
-      with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
-        A_shared = T.alloc_shared((block_M, block_N), accum_dtype)
+    def main(A: T.Tensor((M, N), dtype),):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_N), accum_dtype)
 
-        T.ppl_fill(A_shared, T.float32(0))
+            T.ppl_fill(A_shared, T.float32(0))
 
-        T.copy(A_shared, A[by * block_M, bx * block_N])
+            T.copy(A_shared, A[by * block_M, bx * block_N])
 
     return main
 
 
 # func =  matmul(4096, 8192, 1024, 1024, 512, 128, 2)
-func =  matmul(T.symbolic("m"), T.symbolic("n"), 128, 128, 2)
+func = matmul(T.symbolic("m"), T.symbolic("n"), 128, 128, 2)
 mod = tilelang.lower(func)
-
 
 # for mm in range(64,4097,64):
 #     for nn in range(64, 1025, 64):
@@ -100,4 +96,3 @@ mod = tilelang.lower(func)
 
 #               with open(f"kernel_a/matmul_{mm}_{nn}_{kk}_{stages}.c", "w") as f:
 #                   f.write(mod)
-

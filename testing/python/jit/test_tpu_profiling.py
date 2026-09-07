@@ -3,6 +3,7 @@
 """Unit tests for the isolated PPL-style TPU instruction profile worker."""
 
 from pathlib import Path
+from contextlib import suppress
 import hashlib
 import importlib
 import json
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import time
 from types import SimpleNamespace
+from typing import Optional
 
 import pytest
 
@@ -20,6 +22,7 @@ from tilelang.engine.tpu_config import TPURuntimeConfig, TPUTargetSpec
 from tilelang.jit.adapter import tpu_profiling as tpu_profiling_module
 from tilelang.jit.adapter.tpu_profiling import (
     TPUInstructionProfiler,
+    TPUProfilingCommandError,
     TPUProfilingConfig,
     TPUProfilingError,
     TPUProfilingTimeoutError,
@@ -31,66 +34,59 @@ from tilelang.jit.adapter.tpu_profiling import (
 )
 
 
-def _fake_trace_worker(
-        label: str, programming_model: str = "tpukernel", sleep_s: float = 0.0):
+def _fake_trace_worker(label: str, programming_model: str = "tpukernel", sleep_s: float = 0.0):
     """A child command that models the CModel's relative FILE_DUMP_CMD output."""
 
-    source = (
-        "import os\n"
-        "import time\n"
-        "from pathlib import Path\n"
-        f"time.sleep({sleep_s!r})\n"
-        "label = os.environ['FILE_DUMP_CMD']\n"
-        "assert '/' not in label\n"
-        "assert os.environ['TPU_RT_CORE_NUM'] == '4'\n"
-        "assert os.environ['TILELANG_TPU_PROFILE_CHIP'] == 'sg2260e'\n"
-        "assert os.environ['TILELANG_TPU_PROFILE_PROGRAMMING_MODEL'] == "
-        f"'{programming_model}'\n"
-        "assert os.environ['TILELANG_TPU_PROFILE_RUNTIME_MODE'] == 'cmodel'\n"
-        "assert os.environ['TILELANG_TPU_BENCHMARK_RUNS'] == '0'\n"
-        "assert 'TILELANG_TPU_ALLOW_PCIE_LOAD' not in os.environ\n"
-        "assert 'TILELANG_TPU_ALLOW_PCIE_PROFILE' not in os.environ\n"
-        "assert 'TILELANG_TPU_DEVICE_ID' not in os.environ\n"
-        "Path(label + '-0-0.BD.0').write_bytes(b'raw-bd')\n"
-        "Path(label + '-0-0.GDMA.0').write_bytes(b'raw-gdma')\n"
-        "Path(label + '-0-0.BD.0.txt').write_text(\n"
-        "    'bd cmd_id=7 bd_func=15\\n', encoding='utf-8')\n"
-        "Path(label + '-0-0.GDMA.0.txt').write_text(\n"
-        "    'gdma cmd_id=9 gdma_func=6\\n', encoding='utf-8')\n"
-    )
+    source = ("import os\n"
+              "import time\n"
+              "from pathlib import Path\n"
+              f"time.sleep({sleep_s!r})\n"
+              "label = os.environ['FILE_DUMP_CMD']\n"
+              "assert '/' not in label\n"
+              "assert os.environ['TPU_RT_CORE_NUM'] == '4'\n"
+              "assert os.environ['TILELANG_TPU_PROFILE_CHIP'] == 'sg2260e'\n"
+              "assert os.environ['TILELANG_TPU_PROFILE_PROGRAMMING_MODEL'] == "
+              f"'{programming_model}'\n"
+              "assert os.environ['TILELANG_TPU_PROFILE_RUNTIME_MODE'] == 'cmodel'\n"
+              "assert os.environ['TILELANG_TPU_BENCHMARK_RUNS'] == '0'\n"
+              "assert 'TILELANG_TPU_ALLOW_PCIE_LOAD' not in os.environ\n"
+              "assert 'TILELANG_TPU_ALLOW_PCIE_PROFILE' not in os.environ\n"
+              "assert 'TILELANG_TPU_DEVICE_ID' not in os.environ\n"
+              "Path(label + '-0-0.BD.0').write_bytes(b'raw-bd')\n"
+              "Path(label + '-0-0.GDMA.0').write_bytes(b'raw-gdma')\n"
+              "Path(label + '-0-0.BD.0.txt').write_text(\n"
+              "    'bd cmd_id=7 bd_func=15\\n', encoding='utf-8')\n"
+              "Path(label + '-0-0.GDMA.0.txt').write_text(\n"
+              "    'gdma cmd_id=9 gdma_func=6\\n', encoding='utf-8')\n")
     return [sys.executable, "-c", source]
 
 
-def _fake_pcie_trace_worker(
-        programming_model: str = "tpukernel",
-        profile_name: str | None = "global.profile",
-        profile_payload: bytes = b"raw-pcie"):
+def _fake_pcie_trace_worker(programming_model: str = "tpukernel",
+                            profile_name: Optional[str] = "global.profile",
+                            profile_payload: bytes = b"raw-pcie"):
     """Model the environment and recorder artifact of one PCIe launch."""
 
     profile_write = ""
     if profile_name is not None:
-        profile_write = (
-            f"(profile / {profile_name!r}).write_bytes({profile_payload!r})\n")
-    source = (
-        "import os\n"
-        "from pathlib import Path\n"
-        "assert 'FILE_DUMP_CMD' not in os.environ\n"
-        "assert os.environ['TILELANG_TPU_PROFILE_SESSION'] == '1'\n"
-        "assert os.environ['TILELANG_TPU_PROFILE_CHIP'] == 'sg2260e'\n"
-        "assert os.environ['TILELANG_TPU_PROFILE_PROGRAMMING_MODEL'] == "
-        f"'{programming_model}'\n"
-        "assert os.environ['TILELANG_TPU_PROFILE_RUNTIME_MODE'] == 'pcie'\n"
-        "assert os.environ['TILELANG_TPU_BENCHMARK_RUNS'] == '0'\n"
-        "assert os.environ['TILELANG_TPU_ALLOW_PCIE_LOAD'] == '1'\n"
-        "assert os.environ['TILELANG_TPU_ALLOW_PCIE_PROFILE'] == '1'\n"
-        "assert os.environ['TILELANG_TPU_DEVICE_ID'] == '0'\n"
-        "assert os.environ['BMLIB_ENABLE_ALL_PROFILE'] == '1'\n"
-        "assert os.environ['PROFILE_RECORD_SIZE'] == '4096'\n"
-        "assert os.environ['PROFILE_BOOK_KEEPING'] == '1'\n"
-        "profile = Path('cdm_profile_data_dev0-0')\n"
-        "profile.mkdir()\n"
-        f"{profile_write}"
-    )
+        profile_write = (f"(profile / {profile_name!r}).write_bytes({profile_payload!r})\n")
+    source = ("import os\n"
+              "from pathlib import Path\n"
+              "assert 'FILE_DUMP_CMD' not in os.environ\n"
+              "assert os.environ['TILELANG_TPU_PROFILE_SESSION'] == '1'\n"
+              "assert os.environ['TILELANG_TPU_PROFILE_CHIP'] == 'sg2260e'\n"
+              "assert os.environ['TILELANG_TPU_PROFILE_PROGRAMMING_MODEL'] == "
+              f"'{programming_model}'\n"
+              "assert os.environ['TILELANG_TPU_PROFILE_RUNTIME_MODE'] == 'pcie'\n"
+              "assert os.environ['TILELANG_TPU_BENCHMARK_RUNS'] == '0'\n"
+              "assert os.environ['TILELANG_TPU_ALLOW_PCIE_LOAD'] == '1'\n"
+              "assert os.environ['TILELANG_TPU_ALLOW_PCIE_PROFILE'] == '1'\n"
+              "assert os.environ['TILELANG_TPU_DEVICE_ID'] == '0'\n"
+              "assert os.environ['BMLIB_ENABLE_ALL_PROFILE'] == '1'\n"
+              "assert os.environ['PROFILE_RECORD_SIZE'] == '4096'\n"
+              "assert os.environ['PROFILE_BOOK_KEEPING'] == '1'\n"
+              "profile = Path('cdm_profile_data_dev0-0')\n"
+              "profile.mkdir()\n"
+              f"{profile_write}")
     return [sys.executable, "-c", source]
 
 
@@ -124,8 +120,7 @@ def _create_fake_pcie_decoder_packages(root: Path) -> Path:
     return package_root
 
 
-def _create_fake_perfai(root: Path, expected_chip: str = "sg2260e",
-                        sleep_s: float = 0.0) -> Path:
+def _create_fake_perfai(root: Path, expected_chip: str = "sg2260e", sleep_s: float = 0.0) -> Path:
     perfai_root = root / "PerfAI"
     perfai_root.mkdir()
     runner = perfai_root / "AutoRunner.sh"
@@ -188,11 +183,9 @@ def test_cmodel_profile_worker_uses_a_private_cwd_and_keeps_raw_trace(tmp_path):
 
 def test_default_profile_output_is_discoverable_and_not_system_tmp(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    config = TPUProfilingConfig(
-        chip="sg2260e", label="local-output", postprocess=False)
+    config = TPUProfilingConfig(chip="sg2260e", label="local-output", postprocess=False)
 
-    report = TPUInstructionProfiler(config).run_cmodel(
-        _fake_trace_worker(config.label))
+    report = TPUInstructionProfiler(config).run_cmodel(_fake_trace_worker(config.label))
 
     assert report.output_dir.parent == (tmp_path / "tilelang-tpu-profiles").resolve()
 
@@ -251,8 +244,8 @@ def test_profile_parser_keeps_host_events_out_of_instruction_timings(tmp_path):
     timings = parse_perfai_instruction_timings(profile_data)
 
     assert len(timeline) == 2
-    assert [(item.engine, item.command_id, item.opcode, item.duration)
-            for item in timings] == [("bdc", 3, "tiu_mul", 5.0)]
+    assert [(item.engine, item.command_id, item.opcode, item.duration) for item in timings
+           ] == [("bdc", 3, "tiu_mul", 5.0)]
 
 
 def test_rv_profile_uses_the_vendor_perfai_target_spelling(tmp_path):
@@ -290,8 +283,7 @@ def test_profile_config_rejects_invalid_chip_model_and_nonfinite_timeout():
 
 
 @pytest.mark.parametrize("runtime_mode", ("cmodel", "pcie"))
-def test_profiler_preflights_only_the_selected_runtime_contract(
-        monkeypatch, runtime_mode):
+def test_profiler_preflights_only_the_selected_runtime_contract(monkeypatch, runtime_mode):
     calls = []
 
     class FakeLayout:
@@ -303,10 +295,8 @@ def test_profiler_preflights_only_the_selected_runtime_contract(
         calls.append((root, chip))
         return FakeLayout()
 
-    monkeypatch.setattr(
-        tpu_profiling_module, "resolve_ppl_layout", fake_resolve)
-    profiler = TPUInstructionProfiler(TPUProfilingConfig(
-        chip="sg2260e", runtime_mode=runtime_mode))
+    monkeypatch.setattr(tpu_profiling_module, "resolve_ppl_layout", fake_resolve)
+    profiler = TPUInstructionProfiler(TPUProfilingConfig(chip="sg2260e", runtime_mode=runtime_mode))
 
     profiler._validate_ppl_dependencies({"PPL_PROJECT_ROOT": "/ppl-1.7"})
 
@@ -342,7 +332,83 @@ def test_cmodel_profile_timeout_terminates_the_worker_process_group(tmp_path):
         TPUInstructionProfiler(config).run_cmodel(command)
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="process-group descendant cleanup is a Linux TPU safety contract",
+)
+@pytest.mark.parametrize("runtime_mode", ("cmodel", "pcie"))
+def test_profile_rejects_success_with_lingering_descendant(tmp_path, monkeypatch, runtime_mode):
+    """A successful supervisor leader may not leave an ordinary child alive."""
+
+    child_pid_path = tmp_path / f"{runtime_mode}-lingering-child-pid.txt"
+    child_ready_path = tmp_path / f"{runtime_mode}-lingering-child-ready.txt"
+    child_source = ("import os, signal, sys, time\n"
+                    "from pathlib import Path\n"
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+                    "time.sleep(30)\n")
+    worker_source = ("import os, subprocess, sys, time\n"
+                     "from pathlib import Path\n"
+                     f"child_source = {child_source!r}\n"
+                     "child = subprocess.Popen(\n"
+                     "    [sys.executable, '-c', child_source, "
+                     "os.environ['TILELANG_TEST_CHILD_READY']],\n"
+                     "    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+                     "ready = Path(os.environ['TILELANG_TEST_CHILD_READY'])\n"
+                     "while not ready.is_file():\n"
+                     "    time.sleep(0.01)\n"
+                     "Path(os.environ['TILELANG_TEST_CHILD_PID']).write_text(str(child.pid))\n"
+                     "if os.environ['TILELANG_TPU_PROFILE_RUNTIME_MODE'] == 'cmodel':\n"
+                     "    label = os.environ['FILE_DUMP_CMD']\n"
+                     "    Path(label + '-0-0.BD.0').write_bytes(b'raw-bd')\n"
+                     "else:\n"
+                     "    profile = Path('cdm_profile_data_dev0-0')\n"
+                     "    profile.mkdir()\n"
+                     "    (profile / 'global.profile').write_bytes(b'raw-pcie')\n")
+    environment = os.environ.copy()
+    environment.update({
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "TILELANG_TEST_CHILD_PID": str(child_pid_path),
+        "TILELANG_TEST_CHILD_READY": str(child_ready_path),
+    })
+    if runtime_mode == "pcie":
+        environment.update(_pcie_profile_environment())
+    monkeypatch.setattr(tpu_profiling_module, "_PROCESS_TERMINATION_GRACE_S", 0.05)
+    monkeypatch.setattr(tpu_profiling_module, "_PROCESS_KILL_GRACE_S", 0.5)
+
+    config = TPUProfilingConfig(
+        chip="sg2260e",
+        runtime_mode=runtime_mode,
+        output_dir=tmp_path / f"{runtime_mode}-profile",
+        timeout_s=3.0,
+        postprocess=False,
+    )
+    profiler = TPUInstructionProfiler(config)
+    run = profiler.run_cmodel if runtime_mode == "cmodel" else profiler.run_pcie
+
+    child_pid = None
+    try:
+        started = time.monotonic()
+        with pytest.raises(TPUProfilingCommandError, match="leaving a live descendant"):
+            run([sys.executable, "-c", worker_source], environment=environment)
+        elapsed = time.monotonic() - started
+        _wait_for_file(child_pid_path)
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+
+        assert elapsed < 2.0
+        deadline = time.monotonic() + 2.0
+        while _pid_is_running(child_pid):
+            if time.monotonic() >= deadline:
+                raise AssertionError("successful TPU profile worker left its child running")
+            time.sleep(0.02)
+    finally:
+        if child_pid is not None and _pid_is_running(child_pid):
+            with suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
+
+
 def test_kill_and_drain_remains_bounded_when_process_cannot_be_reaped(monkeypatch):
+
     class Pipe:
         closed = False
 
@@ -367,15 +433,11 @@ def test_kill_and_drain_remains_bounded_when_process_cannot_be_reaped(monkeypatc
                 "stuck", timeout, output="partial stdout", stderr="partial stderr")
 
     signals = []
-    monkeypatch.setattr(
-        tpu_profiling_module.os, "killpg",
-        lambda pid, signum: signals.append((pid, signum)))
-    monkeypatch.setattr(
-        tpu_profiling_module, "_PROCESS_TERMINATION_GRACE_S", 0.001)
-    monkeypatch.setattr(
-        tpu_profiling_module, "_PROCESS_KILL_GRACE_S", 0.001)
-    monkeypatch.setattr(
-        tpu_profiling_module, "_PROCESS_PIPE_DRAIN_S", 0.001)
+    monkeypatch.setattr(tpu_profiling_module.os, "killpg", lambda pid, signum: signals.append(
+        (pid, signum)))
+    monkeypatch.setattr(tpu_profiling_module, "_PROCESS_TERMINATION_GRACE_S", 0.001)
+    monkeypatch.setattr(tpu_profiling_module, "_PROCESS_KILL_GRACE_S", 0.001)
+    monkeypatch.setattr(tpu_profiling_module, "_PROCESS_PIPE_DRAIN_S", 0.001)
 
     process = StuckProcess()
     stdout, stderr = tpu_profiling_module._terminate_and_collect(process)
@@ -384,10 +446,11 @@ def test_kill_and_drain_remains_bounded_when_process_cannot_be_reaped(monkeypatc
     assert "partial stderr" in stderr
     assert "did not close its output pipes" in stderr
     assert "could not be reaped" in stderr
-    assert signals == [
+    assert [item for item in signals if item[1] != 0] == [
         (process.pid, signal.SIGTERM),
         (process.pid, signal.SIGKILL),
     ]
+    assert (process.pid, 0) in signals
     assert process.stdout.closed and process.stderr.closed
 
 
@@ -430,13 +493,11 @@ def test_profile_deadline_covers_perfai_lock_wait(tmp_path):
         [
             sys.executable,
             "-c",
-            (
-                    "import socket, sys, time; "
-                    "handle = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM); "
-                    "handle.bind('\\0tilelang-perfai-' + sys.argv[1]); "
-                    "print('locked', flush=True); time.sleep(30)"
-                ),
-                token,
+            ("import socket, sys, time; "
+             "handle = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM); "
+             "handle.bind('\\0tilelang-perfai-' + sys.argv[1]); "
+             "print('locked', flush=True); time.sleep(30)"),
+            token,
         ],
         stdout=subprocess.PIPE,
         text=True,
@@ -497,16 +558,13 @@ def test_parent_death_guard_kills_worker_and_ordinary_descendant(tmp_path):
     worker_pids_path = tmp_path / "worker-pids.txt"
     supervisor_pid_path = tmp_path / "supervisor-pid.txt"
     supervisor_path = (
-        Path(__file__).resolve().parents[3] / "tilelang" / "jit" /
-        "_tpu_profile_supervisor.py"
-    )
+        Path(__file__).resolve().parents[3] / "tilelang" / "jit" / "_tpu_profile_supervisor.py")
     target_source = (
         "import os, subprocess, sys, time\n"
         "from pathlib import Path\n"
         "grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
         "Path(sys.argv[1]).write_text(f'{os.getpid()} {grandchild.pid} {os.getpgrp()}')\n"
-        "time.sleep(30)\n"
-    )
+        "time.sleep(30)\n")
     controller_source = (
         "import os, subprocess, sys, time\n"
         "from pathlib import Path\n"
@@ -516,8 +574,7 @@ def test_parent_death_guard_kills_worker_and_ordinary_descendant(tmp_path):
         "    sys.executable, '-c', target_source, sys.argv[2],\n"
         "], start_new_session=True)\n"
         "Path(sys.argv[3]).write_text(str(supervisor.pid))\n"
-        "time.sleep(30)\n"
-    )
+        "time.sleep(30)\n")
     controller = subprocess.Popen([
         sys.executable,
         "-c",
@@ -532,7 +589,8 @@ def test_parent_death_guard_kills_worker_and_ordinary_descendant(tmp_path):
         _wait_for_file(worker_pids_path)
         supervisor_pid = int(supervisor_pid_path.read_text(encoding="utf-8"))
         worker_pid, descendant_pid, worker_pgid = map(
-            int, worker_pids_path.read_text(encoding="utf-8").split())
+            int,
+            worker_pids_path.read_text(encoding="utf-8").split())
         assert worker_pgid == supervisor_pid
         assert os.getpgid(descendant_pid) == supervisor_pid
 
@@ -548,10 +606,8 @@ def test_parent_death_guard_kills_worker_and_ordinary_descendant(tmp_path):
             controller.kill()
             controller.wait(timeout=5)
         if supervisor_pid is not None and _pid_is_running(supervisor_pid):
-            try:
+            with suppress(ProcessLookupError):
                 os.killpg(supervisor_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
 
 
 @pytest.mark.skipif(
@@ -569,20 +625,17 @@ def test_tpukernel_matrix_parent_death_guard_prevents_orphans(tmp_path):
         "from pathlib import Path\n"
         "grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
         "Path(sys.argv[1]).write_text(f'{os.getpid()} {grandchild.pid} {os.getpgrp()}')\n"
-        "time.sleep(30)\n"
-    )
-    controller_source = (
-        "import os, sys, time\n"
-        "from pathlib import Path\n"
-        "sys.path.insert(0, sys.argv[1])\n"
-        "from tpukernel_ops_matrix import _spawn_guarded_worker\n"
-        f"target_source = {target_source!r}\n"
-        "supervisor = _spawn_guarded_worker(\n"
-        "    [sys.executable, '-c', target_source, sys.argv[2]],\n"
-        "    cwd=Path(sys.argv[4]), environment=os.environ.copy())\n"
-        "Path(sys.argv[3]).write_text(str(supervisor.pid))\n"
-        "time.sleep(30)\n"
-    )
+        "time.sleep(30)\n")
+    controller_source = ("import os, sys, time\n"
+                         "from pathlib import Path\n"
+                         "sys.path.insert(0, sys.argv[1])\n"
+                         "from tpukernel_ops_matrix import _spawn_guarded_worker\n"
+                         f"target_source = {target_source!r}\n"
+                         "supervisor = _spawn_guarded_worker(\n"
+                         "    [sys.executable, '-c', target_source, sys.argv[2]],\n"
+                         "    cwd=Path(sys.argv[4]), environment=os.environ.copy())\n"
+                         "Path(sys.argv[3]).write_text(str(supervisor.pid))\n"
+                         "time.sleep(30)\n")
     controller_env = os.environ.copy()
     controller_env["PYTHONDONTWRITEBYTECODE"] = "1"
     controller = subprocess.Popen([
@@ -593,35 +646,33 @@ def test_tpukernel_matrix_parent_death_guard_prevents_orphans(tmp_path):
         str(worker_pids_path),
         str(supervisor_pid_path),
         str(tmp_path),
-    ], env=controller_env)
+    ],
+                                  env=controller_env)
     supervisor_pid = None
     try:
         _wait_for_file(supervisor_pid_path)
         _wait_for_file(worker_pids_path)
         supervisor_pid = int(supervisor_pid_path.read_text(encoding="utf-8"))
         worker_pid, descendant_pid, worker_pgid = map(
-            int, worker_pids_path.read_text(encoding="utf-8").split())
+            int,
+            worker_pids_path.read_text(encoding="utf-8").split())
         assert worker_pgid == supervisor_pid
         assert os.getpgid(descendant_pid) == supervisor_pid
 
         os.kill(controller.pid, signal.SIGKILL)
         controller.wait(timeout=5)
         deadline = time.monotonic() + 5
-        while any(_pid_is_running(pid) for pid in (
-                supervisor_pid, worker_pid, descendant_pid)):
+        while any(_pid_is_running(pid) for pid in (supervisor_pid, worker_pid, descendant_pid)):
             if time.monotonic() >= deadline:
-                raise AssertionError(
-                    "parent-death guard left a TPU numerical process running")
+                raise AssertionError("parent-death guard left a TPU numerical process running")
             time.sleep(0.02)
     finally:
         if controller.poll() is None:
             controller.kill()
             controller.wait(timeout=5)
         if supervisor_pid is not None and _pid_is_running(supervisor_pid):
-            try:
+            with suppress(ProcessLookupError):
                 os.killpg(supervisor_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
 
 
 @pytest.mark.skipif(
@@ -675,8 +726,8 @@ def test_tpukernel_matrix_timeout_has_bounded_pipe_drain(tmp_path, monkeypatch):
         )
         elapsed = time.monotonic() - started
         _wait_for_file(pid_path)
-        worker_pid, controlled_pid, escaped_pid = map(
-            int, pid_path.read_text(encoding="utf-8").split())
+        worker_pid, controlled_pid, escaped_pid = map(int,
+                                                      pid_path.read_text(encoding="utf-8").split())
 
         assert elapsed < 2.5
         assert result["timed_out"] is True
@@ -686,8 +737,7 @@ def test_tpukernel_matrix_timeout_has_bounded_pipe_drain(tmp_path, monkeypatch):
         deadline = time.monotonic() + 2
         while _pid_is_running(worker_pid) or _pid_is_running(controlled_pid):
             if time.monotonic() >= deadline:
-                raise AssertionError(
-                    "numerical timeout left an in-group worker process running")
+                raise AssertionError("numerical timeout left an in-group worker process running")
             time.sleep(0.02)
         # The deliberate start_new_session descendant is outside the private
         # group and keeps the inherited pipes open, which is what exercises the
@@ -695,18 +745,15 @@ def test_tpukernel_matrix_timeout_has_bounded_pipe_drain(tmp_path, monkeypatch):
         assert _pid_is_running(escaped_pid)
     finally:
         if escaped_pid is not None and _pid_is_running(escaped_pid):
-            try:
+            with suppress(ProcessLookupError):
                 os.killpg(escaped_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
 
 
 @pytest.mark.skipif(
     not sys.platform.startswith("linux"),
     reason="process-group descendant cleanup is a Linux TPU safety contract",
 )
-def test_tpukernel_matrix_rejects_success_with_lingering_descendant(
-        tmp_path, monkeypatch):
+def test_tpukernel_matrix_rejects_success_with_lingering_descendant(tmp_path, monkeypatch):
     """A nominally successful worker may not background an in-group child."""
 
     matrix_dir = Path(__file__).resolve().parent
@@ -716,13 +763,11 @@ def test_tpukernel_matrix_rejects_success_with_lingering_descendant(
     child_pid_path = tmp_path / "lingering-child-pid.txt"
     child_ready_path = tmp_path / "lingering-child-ready.txt"
     worker_path = tmp_path / "lingering-worker.py"
-    child_source = (
-        "import os, signal, sys, time\n"
-        "from pathlib import Path\n"
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
-        "time.sleep(30)\n"
-    )
+    child_source = ("import os, signal, sys, time\n"
+                    "from pathlib import Path\n"
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+                    "time.sleep(30)\n")
     worker_path.write_text(
         "import json, os, subprocess, sys, time\n"
         "from pathlib import Path\n"
@@ -771,20 +816,16 @@ def test_tpukernel_matrix_rejects_success_with_lingering_descendant(
         deadline = time.monotonic() + 2
         while _pid_is_running(child_pid):
             if time.monotonic() >= deadline:
-                raise AssertionError(
-                    "successful numerical worker left its child running")
+                raise AssertionError("successful numerical worker left its child running")
             time.sleep(0.02)
     finally:
         if child_pid is not None and _pid_is_running(child_pid):
-            try:
+            with suppress(ProcessLookupError):
                 os.kill(child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
 
 
 def test_pcie_profile_environment_requires_two_acknowledgements():
-    profiler = TPUInstructionProfiler(
-        TPUProfilingConfig(chip="sg2260e", runtime_mode="pcie"))
+    profiler = TPUInstructionProfiler(TPUProfilingConfig(chip="sg2260e", runtime_mode="pcie"))
 
     with pytest.raises(TPUProfilingError, match="ALLOW_PCIE_LOAD"):
         profiler.pcie_profile_environment_overrides({})
@@ -825,9 +866,7 @@ def test_pcie_profile_worker_isolated_and_keeps_raw_trace(tmp_path):
     )
 
     assert report.parser_status == "not-requested"
-    assert [path.name for path in report.raw_trace_files] == [
-        "cdm_profile_data_dev0-0"
-    ]
+    assert [path.name for path in report.raw_trace_files] == ["cdm_profile_data_dev0-0"]
     assert report.raw_instructions == ()
 
 
@@ -839,8 +878,8 @@ def test_pcie_profile_worker_isolated_and_keeps_raw_trace(tmp_path):
         ("unexpected.bin", b"raw-pcie"),
     ),
 )
-def test_pcie_profile_rejects_empty_or_unrecognized_raw_artifacts(
-        tmp_path, profile_name, profile_payload):
+def test_pcie_profile_rejects_empty_or_unrecognized_raw_artifacts(tmp_path, profile_name,
+                                                                  profile_payload):
     config = TPUProfilingConfig(
         chip="sg2260e",
         runtime_mode="pcie",
@@ -849,8 +888,7 @@ def test_pcie_profile_rejects_empty_or_unrecognized_raw_artifacts(
     )
 
     report = TPUInstructionProfiler(config).run_pcie(
-        _fake_pcie_trace_worker(
-            profile_name=profile_name, profile_payload=profile_payload),
+        _fake_pcie_trace_worker(profile_name=profile_name, profile_payload=profile_payload),
         environment=_pcie_profile_environment(),
     )
 
@@ -859,8 +897,8 @@ def test_pcie_profile_rejects_empty_or_unrecognized_raw_artifacts(
 
 
 def test_pcie_profile_requires_all_gates_before_spawning(tmp_path):
-    profiler = TPUInstructionProfiler(TPUProfilingConfig(
-        chip="sg2260e", runtime_mode="pcie", output_dir=tmp_path))
+    profiler = TPUInstructionProfiler(
+        TPUProfilingConfig(chip="sg2260e", runtime_mode="pcie", output_dir=tmp_path))
 
     with pytest.raises(TPUProfilingError, match="ALLOW_PCIE_PROFILE"):
         profiler.run_pcie(
@@ -875,8 +913,7 @@ def test_pcie_profile_requires_all_gates_before_spawning(tmp_path):
 def test_pcie_profile_decodes_with_preinstalled_vendor_packages(tmp_path):
     package_root = _create_fake_pcie_decoder_packages(tmp_path)
     inherited_pythonpath = os.environ.get("PYTHONPATH", "")
-    pythonpath = os.pathsep.join(
-        item for item in (str(package_root), inherited_pythonpath) if item)
+    pythonpath = os.pathsep.join(item for item in (str(package_root), inherited_pythonpath) if item)
     config = TPUProfilingConfig(
         chip="sg2260e",
         programming_model="rv",
@@ -892,10 +929,9 @@ def test_pcie_profile_decodes_with_preinstalled_vendor_packages(tmp_path):
     assert report.parser_status == "ready"
     assert len(report.decoded_report_paths) == 1
     assert report.perfai_report_paths == ()
-    assert [(item.engine, item.duration, item.unit, item.opcode)
-            for item in report.instruction_timings] == [
-                ("bdc", 7.0, "ns", "rvt_fadd")
-            ]
+    assert [
+        (item.engine, item.duration, item.unit, item.opcode) for item in report.instruction_timings
+    ] == [("bdc", 7.0, "ns", "rvt_fadd")]
 
 
 def test_pcie_decoder_requires_canonical_tilelang_json(tmp_path, monkeypatch):
@@ -905,8 +941,7 @@ def test_pcie_decoder_requires_canonical_tilelang_json(tmp_path, monkeypatch):
         "Path('profile_data.js').write_text('let time_data = [];\\n')\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        tpu_profiling_module, "_PCIE_PROFILE_DECODER_PATH", decoder)
+    monkeypatch.setattr(tpu_profiling_module, "_PCIE_PROFILE_DECODER_PATH", decoder)
     config = TPUProfilingConfig(
         chip="sg2260e",
         programming_model="rv",
@@ -936,16 +971,28 @@ def test_pcie_canonical_decoder_report_rejects_an_unknown_schema(tmp_path):
 @pytest.mark.parametrize(
     "event_update",
     (
-        {"begin": True},
-        {"begin": float("nan")},
-        {"end": float("inf")},
-        {"begin": 8, "end": 7},
-        {"unit": ""},
-        {"unit": "cycles"},
+        {
+            "begin": True
+        },
+        {
+            "begin": float("nan")
+        },
+        {
+            "end": float("inf")
+        },
+        {
+            "begin": 8,
+            "end": 7
+        },
+        {
+            "unit": ""
+        },
+        {
+            "unit": "cycles"
+        },
     ),
 )
-def test_pcie_canonical_decoder_report_rejects_invalid_timing(
-        tmp_path, event_update):
+def test_pcie_canonical_decoder_report_rejects_invalid_timing(tmp_path, event_update):
     event = {
         "engine": "bdc",
         "begin": 2,
@@ -956,7 +1003,10 @@ def test_pcie_canonical_decoder_report_rejects_invalid_timing(
     event.update(event_update)
     report_path = tmp_path / "tilelang_pcie_profile.json"
     report_path.write_text(
-        json.dumps({"schema_version": 1, "events": [event]}),
+        json.dumps({
+            "schema_version": 1,
+            "events": [event]
+        }),
         encoding="utf-8",
     )
 
@@ -982,8 +1032,7 @@ def _profile_worker_environment():
 
     repo_root = Path(__file__).resolve().parents[3]
     inherited_pythonpath = os.environ.get("PYTHONPATH", "")
-    pythonpath = os.pathsep.join(
-        item for item in (str(repo_root), inherited_pythonpath) if item)
+    pythonpath = os.pathsep.join(item for item in (str(repo_root), inherited_pythonpath) if item)
     return {
         "PPL_PROJECT_ROOT": os.environ["PPL_PROJECT_ROOT"],
         "PYTHONPATH": pythonpath,
@@ -1013,10 +1062,8 @@ def _run_opt_in_cmodel_profile_or_abort(config: TPUProfilingConfig, case: str):
 
 def _pcie_profile_worker_environment():
     environment = _profile_worker_environment()
-    for name in (
-            "TILELANG_TPU_ALLOW_PCIE_LOAD",
-            "TILELANG_TPU_ALLOW_PCIE_PROFILE",
-            "TILELANG_TPU_DEVICE_ID"):
+    for name in ("TILELANG_TPU_ALLOW_PCIE_LOAD", "TILELANG_TPU_ALLOW_PCIE_PROFILE",
+                 "TILELANG_TPU_DEVICE_ID"):
         value = os.environ.get(name)
         if value is None:
             pytest.skip(f"{name} is required for an opt-in PCIe profile")
@@ -1086,8 +1133,7 @@ def test_sg2260e_rv_cmodel_profile_worker_runs_control_path(tmp_path):
 
     report = _run_opt_in_cmodel_profile_or_abort(config, "rv-control")
 
-    assert "TPU_PROFILE_WORKER_OK case=rv-control" in report.stdout_path.read_text(
-        encoding="utf-8")
+    assert "TPU_PROFILE_WORKER_OK case=rv-control" in report.stdout_path.read_text(encoding="utf-8")
     assert report.has_raw_trace
     assert report.raw_instructions
 
@@ -1112,11 +1158,10 @@ def test_sg2260e_tpukernel_pcie_profile_worker_collects_real_raw_trace(tmp_path)
 
     report = _run_opt_in_pcie_profile_or_abort(config, "tpukernel-matmul")
 
-    assert "TPU_PROFILE_WORKER_OK case=tpukernel-matmul" in (
-        report.stdout_path.read_text(encoding="utf-8"))
+    assert "TPU_PROFILE_WORKER_OK case=tpukernel-matmul" in (report.stdout_path.read_text(
+        encoding="utf-8"))
     assert report.has_raw_trace
-    assert report.parser_status in (
-        "unavailable", "ready", "no-device-command-events")
+    assert report.parser_status in ("unavailable", "ready", "no-device-command-events")
     if report.parser_status == "ready":
         assert report.decoded_report_path is not None
         assert report.instruction_timings
@@ -1143,6 +1188,6 @@ def test_sg2260e_rv_pcie_profile_worker_runs_control_path(tmp_path):
 
     report = _run_opt_in_pcie_profile_or_abort(config, "rv-control")
 
-    assert "TPU_PROFILE_WORKER_OK case=rv-control" in (
-        report.stdout_path.read_text(encoding="utf-8"))
+    assert "TPU_PROFILE_WORKER_OK case=rv-control" in (report.stdout_path.read_text(
+        encoding="utf-8"))
     assert report.has_raw_trace

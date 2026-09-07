@@ -76,8 +76,7 @@ def _optimize_tpu(mod: IRModule) -> IRModule:
     # vectorization must not run before the TPU emitter supports residual
     # vector IR.  Both optimizations have previously produced source that was
     # syntactically plausible but did not preserve the serial program.
-    return _finalize_scheduled_ir(
-        mod, rewrite_storage=False, vectorize=False)
+    return _finalize_scheduled_ir(mod, rewrite_storage=False, vectorize=False)
 
 
 def _optimize_hopper(mod: IRModule) -> IRModule:
@@ -89,8 +88,7 @@ def _optimize_hopper(mod: IRModule) -> IRModule:
     mod = tilelang.transform.MergeIfStmt()(mod)
     mod = tilelang.transform.RewriteWgmmaSync()(mod)
     mod = tilelang.transform.InjectFenceProxy()(mod)
-    return _finalize_scheduled_ir(
-        mod, rewrite_storage=True, lower_opaque=False)
+    return _finalize_scheduled_ir(mod, rewrite_storage=True, lower_opaque=False)
 
 
 def _optimize_generic(mod: IRModule) -> IRModule:
@@ -127,17 +125,14 @@ def AssignTPUAddresses(mod: IRModule, target: Target) -> IRModule:
             continue
         function_target = function.attrs.get("target") if function.attrs else None
         if function_target is None:
-            raise ValueError(
-                "AssignTPUAddresses requires every PrimFunc to be bound to "
-                f"the selected TPU target; {global_var.name_hint!r} is unbound")
+            raise ValueError("AssignTPUAddresses requires every PrimFunc to be bound to "
+                             f"the selected TPU target; {global_var.name_hint!r} is unbound")
         if function_target.kind.name != "tpu":
-            raise ValueError(
-                "AssignTPUAddresses cannot process a PrimFunc bound to "
-                f"{function_target.kind.name!r}: {global_var.name_hint!r}")
+            raise ValueError("AssignTPUAddresses cannot process a PrimFunc bound to "
+                             f"{function_target.kind.name!r}: {global_var.name_hint!r}")
         function_selection = resolve_tpu_target(target=function_target)
         if function_selection != selected_target:
-            raise ValueError(
-                "AssignTPUAddresses target identity mismatch for PrimFunc "
-                f"{global_var.name_hint!r}: function={function_selection}, "
-                f"requested={selected_target}")
+            raise ValueError("AssignTPUAddresses target identity mismatch for PrimFunc "
+                             f"{global_var.name_hint!r}: function={function_selection}, "
+                             f"requested={selected_target}")
     return tilelang.transform.AddressAssign()(mod)

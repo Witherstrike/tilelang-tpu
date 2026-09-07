@@ -41,13 +41,12 @@ std::string BuildTileLangTPU(IRModule mod, Target target) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())
         << "TileLang TPU codegen can only take PrimFunc";
     auto f = Downcast<PrimFunc>(kv.second);
-    Optional<Target> function_target =
-        f->GetAttr<Target>(tvm::attr::kTarget);
+    Optional<Target> function_target = f->GetAttr<Target>(tvm::attr::kTarget);
     if (function_target.defined()) {
       tl::tpu::TargetSelection function_selection = tl::tpu::ResolveTarget(
           function_target.value(), "TileLang TPU codegen PrimFunc");
-      tl::tpu::CheckSameSelection(
-          function_selection, selection, "TileLang TPU codegen");
+      tl::tpu::CheckSameSelection(function_selection, selection,
+                                  "TileLang TPU codegen");
     }
     cg.AddFunction(f);
   }
@@ -58,5 +57,5 @@ std::string BuildTileLangTPU(IRModule mod, Target target) {
 TVM_REGISTER_GLOBAL("target.build.tilelang_tpu")
     .set_body_typed(BuildTileLangTPU);
 
-}  // namespace codegen
-}  // namespace tvm
+} // namespace codegen
+} // namespace tvm

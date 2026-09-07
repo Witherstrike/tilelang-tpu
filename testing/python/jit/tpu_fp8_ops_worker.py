@@ -2,6 +2,8 @@
 # Licensed under the MIT License.
 """Isolated numerical worker for the TPU-Kernel FP8 capability contract."""
 
+from __future__ import annotations
+
 import argparse
 import os
 
@@ -9,7 +11,6 @@ import torch
 
 import tilelang
 import tilelang.language as T
-
 
 _DTYPES = {
     "e4m3": ("e4m3_float8", torch.float8_e4m3fn),
@@ -21,8 +22,7 @@ def _profile_selection() -> tuple[str, str]:
     if os.environ.get("TILELANG_TPU_PROFILE_SESSION") != "1":
         raise RuntimeError("FP8 worker must run through TPUInstructionProfiler")
     chip = os.environ.get("TILELANG_TPU_PROFILE_CHIP", "")
-    programming_model = os.environ.get(
-        "TILELANG_TPU_PROFILE_PROGRAMMING_MODEL", "")
+    programming_model = os.environ.get("TILELANG_TPU_PROFILE_PROGRAMMING_MODEL", "")
     runtime_mode = os.environ.get("TILELANG_TPU_PROFILE_RUNTIME_MODE", "")
     if programming_model != "tpukernel":
         raise RuntimeError("FP8 capability worker requires programming_model=tpukernel")
@@ -46,15 +46,15 @@ def _compile(kernel, chip: str, runtime_mode: str):
     )
 
 
-def _assert_close(actual: torch.Tensor, expected: torch.Tensor, *, atol=0.0,
-                  rtol=0.0) -> None:
+def _assert_close(actual: torch.Tensor, expected: torch.Tensor, *, atol=0.0, rtol=0.0) -> None:
     if not torch.allclose(actual.float(), expected.float(), atol=atol, rtol=rtol):
         max_abs = float(torch.max(torch.abs(actual.float() - expected.float())))
         raise RuntimeError(f"FP8 numerical mismatch; max_abs={max_abs}")
 
 
-def _run_copy(dtype: str, torch_dtype: torch.dtype, chip: str,
-              runtime_mode: str, *, direct_global: bool) -> None:
+def _run_copy(dtype: str, torch_dtype: torch.dtype, chip: str, runtime_mode: str, *,
+              direct_global: bool) -> None:
+
     @T.prim_func
     def copy_kernel(A: T.Tensor((1, 64), dtype), B: T.Tensor((1, 64), dtype)):
         with T.Kernel(1, is_cpu=True) as _:
@@ -73,8 +73,8 @@ def _run_copy(dtype: str, torch_dtype: torch.dtype, chip: str,
         raise RuntimeError("same-format FP8 copy changed the encoded bytes")
 
 
-def _run_fill_zero(dtype: str, torch_dtype: torch.dtype, chip: str,
-                   runtime_mode: str) -> None:
+def _run_fill_zero(dtype: str, torch_dtype: torch.dtype, chip: str, runtime_mode: str) -> None:
+
     @T.prim_func
     def fill_kernel(B: T.Tensor((1, 64), dtype)):
         with T.Kernel(1, is_cpu=True) as _:
@@ -91,9 +91,9 @@ def _run_fill_zero(dtype: str, torch_dtype: torch.dtype, chip: str,
 def _run_cast(direction: str, dtype: str, torch_dtype: torch.dtype, chip: str,
               runtime_mode: str) -> None:
     if direction == "to-fp8":
+
         @T.prim_func
-        def cast_kernel(A: T.Tensor((1, 64), "float32"),
-                        B: T.Tensor((1, 64), dtype)):
+        def cast_kernel(A: T.Tensor((1, 64), "float32"), B: T.Tensor((1, 64), dtype)):
             with T.Kernel(1, is_cpu=True) as _:
                 src = T.alloc_shared((1, 64), "float32")
                 dst = T.alloc_shared((1, 64), dtype)
@@ -105,9 +105,9 @@ def _run_cast(direction: str, dtype: str, torch_dtype: torch.dtype, chip: str,
         output = torch.zeros((1, 64), dtype=torch.float32).to(torch_dtype)
         expected = source.to(torch_dtype)
     else:
+
         @T.prim_func
-        def cast_kernel(A: T.Tensor((1, 64), dtype),
-                        B: T.Tensor((1, 64), "float32")):
+        def cast_kernel(A: T.Tensor((1, 64), dtype), B: T.Tensor((1, 64), "float32")):
             with T.Kernel(1, is_cpu=True) as _:
                 src = T.alloc_shared((1, 64), dtype)
                 dst = T.alloc_shared((1, 64), "float32")
@@ -115,8 +115,7 @@ def _run_cast(direction: str, dtype: str, torch_dtype: torch.dtype, chip: str,
                 T.ppl_copy(src, dst)
                 T.ppl_copy(dst, B)
 
-        source = torch.linspace(-3.0, 3.0, 64, dtype=torch.float32).to(
-            torch_dtype).reshape(1, 64)
+        source = torch.linspace(-3.0, 3.0, 64, dtype=torch.float32).to(torch_dtype).reshape(1, 64)
         output = torch.zeros((1, 64), dtype=torch.float32)
         expected = source.float()
 
@@ -128,14 +127,13 @@ def _run_cast(direction: str, dtype: str, torch_dtype: torch.dtype, chip: str,
         _assert_close(output, expected)
 
 
-def _run_elementwise(operation: str, dtype: str, torch_dtype: torch.dtype,
-                     chip: str, runtime_mode: str, *, broadcast_rhs: bool) -> None:
+def _run_elementwise(operation: str, dtype: str, torch_dtype: torch.dtype, chip: str,
+                     runtime_mode: str, *, broadcast_rhs: bool) -> None:
     rhs_shape = (1, 1) if broadcast_rhs else (1, 64)
 
     @T.prim_func
-    def elementwise(A: T.Tensor((1, 64), dtype),
-                    B: T.Tensor(rhs_shape, dtype),
-                    C: T.Tensor((1, 64), dtype)):
+    def elementwise(A: T.Tensor((1, 64), dtype), B: T.Tensor(rhs_shape, dtype), C: T.Tensor((1, 64),
+                                                                                            dtype)):
         with T.Kernel(1, is_cpu=True) as _:
             lhs = T.alloc_shared((1, 64), dtype)
             rhs = T.alloc_shared(rhs_shape, dtype)
@@ -175,13 +173,12 @@ def _run_elementwise(operation: str, dtype: str, torch_dtype: torch.dtype,
         _assert_close(output, expected, atol=0.25, rtol=0.0)
 
 
-def _run_scalar(operation: str, dtype: str, torch_dtype: torch.dtype,
-                chip: str, runtime_mode: str) -> None:
+def _run_scalar(operation: str, dtype: str, torch_dtype: torch.dtype, chip: str,
+                runtime_mode: str) -> None:
     value = -0.25 if operation == "add" else 0.75
 
     @T.prim_func
-    def scalar_kernel(A: T.Tensor((1, 64), dtype),
-                      C: T.Tensor((1, 64), dtype)):
+    def scalar_kernel(A: T.Tensor((1, 64), dtype), C: T.Tensor((1, 64), dtype)):
         with T.Kernel(1, is_cpu=True) as _:
             src = T.alloc_shared((1, 64), dtype)
             out = T.alloc_shared((1, 64), dtype)
@@ -204,14 +201,12 @@ def _run_scalar(operation: str, dtype: str, torch_dtype: torch.dtype,
         _assert_close(output, expected, atol=0.25, rtol=0.0)
 
 
-def _run_rope(dtype: str, torch_dtype: torch.dtype, chip: str,
-              runtime_mode: str) -> None:
+def _run_rope(dtype: str, torch_dtype: torch.dtype, chip: str, runtime_mode: str) -> None:
     shape = (4, 32)
 
     @T.prim_func
-    def rope_kernel(A: T.Tensor(shape, dtype), B: T.Tensor(shape, dtype),
-                    C: T.Tensor(shape, dtype), D: T.Tensor(shape, dtype),
-                    Output: T.Tensor(shape, dtype)):
+    def rope_kernel(A: T.Tensor(shape, dtype), B: T.Tensor(shape, dtype), C: T.Tensor(shape, dtype),
+                    D: T.Tensor(shape, dtype), Output: T.Tensor(shape, dtype)):
         with T.Kernel(1, is_cpu=True) as _:
             a = T.alloc_shared(shape, dtype)
             b = T.alloc_shared(shape, dtype)
@@ -226,10 +221,8 @@ def _run_rope(dtype: str, torch_dtype: torch.dtype, chip: str,
             T.ppl_copy(out, Output)
 
     inputs = tuple(
-        (torch.arange(128, dtype=torch.float32).reshape(shape) % (7 + index)
-         - 3.0).to(torch_dtype)
-        for index in range(4)
-    )
+        (torch.arange(128, dtype=torch.float32).reshape(shape) % (7 + index) - 3.0).to(torch_dtype)
+        for index in range(4))
     output = torch.zeros(shape, dtype=torch_dtype)
     _compile(rope_kernel, chip, runtime_mode)(*inputs, output)
     a, b, c, d = inputs
@@ -241,21 +234,18 @@ def _run_rope(dtype: str, torch_dtype: torch.dtype, chip: str,
         _assert_close(output, expected, atol=0.5, rtol=0.0)
 
 
-def _run_gather(dtype: str, torch_dtype: torch.dtype, chip: str,
-                runtime_mode: str) -> None:
+def _run_gather(dtype: str, torch_dtype: torch.dtype, chip: str, runtime_mode: str) -> None:
     rows, width, count = 17, 32, 7
 
     @T.prim_func
-    def gather_kernel(param_buffer: T.Tensor((rows, width), dtype),
-                      index_buffer: T.Tensor((count, 1), "uint32"),
-                      output_buffer: T.Tensor((count, width), dtype)):
+    def gather_kernel(param_buffer: T.Tensor((rows, width), dtype), index_buffer: T.Tensor(
+        (count, 1), "uint32"), output_buffer: T.Tensor((count, width), dtype)):
         with T.Kernel(1, is_cpu=True) as _:
             T.ppl_gather(output_buffer, param_buffer, index_buffer, rows)
 
-    param = (torch.arange(rows * width, dtype=torch.float32).reshape(rows, width)
-             % 19 - 9.0).to(torch_dtype)
-    index_i32 = torch.tensor(
-        [16, 0, 8, 3, 12, 1, 15], dtype=torch.int32).reshape(count, 1)
+    param = (torch.arange(rows * width, dtype=torch.float32).reshape(rows, width) % 19 -
+             9.0).to(torch_dtype)
+    index_i32 = torch.tensor([16, 0, 8, 3, 12, 1, 15], dtype=torch.int32).reshape(count, 1)
     index_u32 = index_i32.view(torch.uint32)
     output = torch.zeros((count, width), dtype=torch_dtype)
     _compile(gather_kernel, chip, runtime_mode)(param, index_u32, output)
@@ -271,8 +261,8 @@ def _run_gemm(case: str, dtype: str, torch_dtype: torch.dtype, chip: str,
     b_shape = (16, 64) if transpose_b else (64, 16)
 
     @T.prim_func
-    def gemm(A: T.Tensor((16, 64), dtype), B: T.Tensor(b_shape, dtype),
-             C: T.Tensor((16, 16), "float32")):
+    def gemm(A: T.Tensor((16, 64), dtype), B: T.Tensor(b_shape, dtype), C: T.Tensor((16, 16),
+                                                                                    "float32")):
         with T.Kernel(1, is_cpu=True) as _:
             lhs = T.alloc_shared((16, 64), dtype)
             rhs = T.alloc_shared(b_shape, dtype)
@@ -343,12 +333,9 @@ def main() -> None:
     elif args.case == "fill-zero":
         _run_fill_zero(dtype, torch_dtype, chip, runtime_mode)
     elif args.case.startswith("cast-"):
-        _run_cast(args.case.removeprefix("cast-"), dtype, torch_dtype, chip,
-                  runtime_mode)
-    elif args.case in (
-            "add", "sub", "mul", "add-broadcast", "sub-broadcast",
-            "mul-broadcast"):
-        operation = args.case.removesuffix("-broadcast")
+        _run_cast(args.case[len("cast-"):], dtype, torch_dtype, chip, runtime_mode)
+    elif args.case in ("add", "sub", "mul", "add-broadcast", "sub-broadcast", "mul-broadcast"):
+        operation = args.case[:-len("-broadcast")]
         _run_elementwise(
             operation,
             dtype,
@@ -359,7 +346,7 @@ def main() -> None:
         )
     elif args.case in ("add-scalar", "mul-scalar"):
         _run_scalar(
-            args.case.removesuffix("-scalar"),
+            args.case[:-len("-scalar")],
             dtype,
             torch_dtype,
             chip,
