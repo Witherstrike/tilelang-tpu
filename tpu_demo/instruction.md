@@ -38,8 +38,8 @@ RV. Both use the TPUv7 LMEM geometry modeled by the current compiler. A bare
 `target="tpu"` or a target missing either compile-time field is rejected.
 
 `tpu_demo/matmul/tpu_test_matmul_fp16.py` is the SG2260E TPU-Kernel CModel
-numerical baseline. Historical `tpu_demo/ppl/` scripts are raw SDK development
-examples, not blanket SG2260E claims, and require per-op review. A vendor
+numerical baseline. The retired raw-SDK examples have been removed: demos must
+compile through the complete TileLang TPU target and runtime contract. A vendor
 `ppl.` / `tpu_` / `rvt_` extern fails clearly if it would lower to a non-TPU
 target; do not work around that error with `target="auto"`.
 

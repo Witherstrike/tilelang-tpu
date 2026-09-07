@@ -11,11 +11,6 @@ if [[ ! -f "$config_file" ]]; then
   cp "$script_dir/3rdparty/tvm/cmake/config.cmake" "$config_file"
 fi
 
-# Keep a user-edited CMake configuration intact and make this setting idempotent.
-if ! grep -Fqx 'set(USE_ASCEND ON)' "$config_file"; then
-  printf '%s\n' 'set(USE_ASCEND ON)' >> "$config_file"
-fi
-
 echo "Running CMake for TileLang TPU..."
 cmake -S "$script_dir" -B "$build_dir"
 

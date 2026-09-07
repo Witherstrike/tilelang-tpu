@@ -101,6 +101,10 @@ tilelang/jit/adapter/cython/.cycache
 /src/tl_templates/tpu/main.cpp
 /src/tl_templates/tpu/main.so
 
+# Default local instruction-profile output. Curated experiment summaries live
+# under the separately ignored research/artifacts/ tree.
+/tilelang-tpu-profiles/
+
 # TPU demo C sources are compiler outputs.  Keep the Python kernels as the
 # source of truth and regenerate C in an isolated build workspace.
 /tpu_demo/**/*.c
