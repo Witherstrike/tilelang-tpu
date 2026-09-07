@@ -24,8 +24,7 @@ def validate_profile_report(report: Any, *, require_decoded_timing: bool) -> Non
             f"(parser_status={report.parser_status!r}, message={report.parser_message!r})")
     timing_error = _pcie_instruction_timings_error(report.instruction_timings)
     if timing_error is not None:
-        raise RuntimeError("PCIe decoder produced an invalid instruction interval: " +
-                           timing_error)
+        raise RuntimeError("PCIe decoder produced an invalid instruction interval: " + timing_error)
 
 
 def profile_report_summary(report: Any, *, require_decoded_timing: bool) -> dict[str, Any]:
@@ -47,8 +46,7 @@ def profile_report_summary(report: Any, *, require_decoded_timing: bool) -> dict
             "sum": sum(durations),
             "min": min(durations),
             "max": max(durations),
-        }
-        for (engine, unit), durations in sorted(grouped.items())
+        } for (engine, unit), durations in sorted(grouped.items())
     }
     return {
         "status": "passed",

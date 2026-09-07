@@ -44,9 +44,8 @@ def _profile_selection() -> Tuple[str, str]:
     if runtime_mode == "cmodel":
         inherited_gates = tuple(name for name in _PCIE_GATE_VARIABLES if name in os.environ)
         if inherited_gates:
-            raise RuntimeError(
-                "CModel FP8 worker refuses PCIe recorder/device state: " +
-                ", ".join(inherited_gates))
+            raise RuntimeError("CModel FP8 worker refuses PCIe recorder/device state: " +
+                               ", ".join(inherited_gates))
     else:
         required = {
             "TILELANG_TPU_ALLOW_PCIE_LOAD": "1",
@@ -54,12 +53,10 @@ def _profile_selection() -> Tuple[str, str]:
             "BMLIB_ENABLE_ALL_PROFILE": "1",
         }
         invalid = tuple(
-            name for name, expected in required.items()
-            if os.environ.get(name) != expected)
+            name for name, expected in required.items() if os.environ.get(name) != expected)
         if invalid:
-            raise RuntimeError(
-                "PCIe FP8 worker requires explicit load/profile/recorder gates: " +
-                ", ".join(invalid))
+            raise RuntimeError("PCIe FP8 worker requires explicit load/profile/recorder gates: " +
+                               ", ".join(invalid))
         device_id = os.environ.get("TILELANG_TPU_DEVICE_ID", "")
         if re.fullmatch(r"[0-9]+", device_id) is None or int(device_id) > 2**31 - 1:
             raise RuntimeError("PCIe FP8 worker requires a valid numeric device id")

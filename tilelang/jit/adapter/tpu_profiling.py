@@ -375,9 +375,8 @@ def _pcie_decoder_python(config: TPUProfilingConfig) -> str:
 def _parse_pcie_decoder_identity(stdout: str) -> Mapping[str, str]:
     """Extract and validate the decoder helper's machine-readable identity."""
 
-    identity_line = next(
-        (line for line in reversed(stdout.splitlines())
-         if line.startswith(_PCIE_DECODER_IDENTITY_PREFIX)), None)
+    identity_line = next((line for line in reversed(stdout.splitlines())
+                          if line.startswith(_PCIE_DECODER_IDENTITY_PREFIX)), None)
     if identity_line is None:
         raise ValueError("The offline PCIe decoder did not report its package/API identity.")
     payload = json.loads(identity_line[len(_PCIE_DECODER_IDENTITY_PREFIX):])
@@ -1017,8 +1016,10 @@ class TPUInstructionProfiler:
             raise TPUProfilingError("PPL 1.7 dependency preflight failed for "
                                     f"{self.config.runtime_mode} profiling: {exc}") from exc
 
-    def preflight_pcie_decoder(
-            self, *, environment: Optional[Mapping[str, str]] = None) -> Mapping[str, str]:
+    def preflight_pcie_decoder(self,
+                               *,
+                               environment: Optional[Mapping[str,
+                                                             str]] = None) -> Mapping[str, str]:
         """Validate the offline decoder without loading or dispatching a TPU.
 
         The check runs the decoder helper under the same process-tree watchdog
@@ -1029,12 +1030,10 @@ class TPUInstructionProfiler:
         """
 
         if self.config.runtime_mode != "pcie":
-            raise TPUProfilingError(
-                "preflight_pcie_decoder only supports runtime_mode='pcie'.")
+            raise TPUProfilingError("preflight_pcie_decoder only supports runtime_mode='pcie'.")
         if not _PCIE_PROFILE_DECODER_PATH.is_file():
-            raise TPUProfilingError(
-                f"TileLang's offline PCIe profile decoder helper is missing: "
-                f"{_PCIE_PROFILE_DECODER_PATH}")
+            raise TPUProfilingError(f"TileLang's offline PCIe profile decoder helper is missing: "
+                                    f"{_PCIE_PROFILE_DECODER_PATH}")
         decoder_env = _pcie_decoder_environment(self.config, environment)
         command = (
             _pcie_decoder_python(self.config),
@@ -1067,8 +1066,8 @@ class TPUInstructionProfiler:
             raise
 
         if guarded_output.left_live_descendant:
-            cleanup = ("was terminated" if guarded_output.cleanup_complete else
-                       "could not be fully reaped")
+            cleanup = ("was terminated"
+                       if guarded_output.cleanup_complete else "could not be fully reaped")
             raise TPUProfilingError(
                 "Offline PCIe decoder preflight left a live descendant; its supervised "
                 f"process group {cleanup}.")
@@ -1078,10 +1077,9 @@ class TPUInstructionProfiler:
                 "Offline PCIe decoding requires preinstalled bigTpuProfile; no package "
                 f"was installed automatically{': ' + detail if detail else '.'}")
         if decoder.returncode == 4:
-            raise TPUProfilingError(
-                "The installed bigTpuProfile does not provide the callable "
-                f"BMProfileParserPerfAI.parse API required by TileLang"
-                f"{': ' + detail if detail else '.'}")
+            raise TPUProfilingError("The installed bigTpuProfile does not provide the callable "
+                                    f"BMProfileParserPerfAI.parse API required by TileLang"
+                                    f"{': ' + detail if detail else '.'}")
         if decoder.returncode != 0:
             raise TPUProfilingError(
                 f"Offline PCIe decoder preflight exited with status {decoder.returncode}"
@@ -1302,8 +1300,7 @@ class TPUInstructionProfiler:
                             sorted(output_dir.rglob(_PCIE_DECODED_REPORT_NAME)))
                         if decoded_report_paths:
                             try:
-                                decoder_identity = _read_pcie_decoder_identity(
-                                    decoded_report_paths)
+                                decoder_identity = _read_pcie_decoder_identity(decoded_report_paths)
                                 stdout_identity = _parse_pcie_decoder_identity(decoder_stdout)
                                 if decoder_identity != stdout_identity:
                                     raise ValueError(

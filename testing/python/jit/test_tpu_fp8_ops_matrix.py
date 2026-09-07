@@ -120,8 +120,7 @@ def test_cmodel_cli_rejects_pcie_and_decoder_options():
     with pytest.raises(RuntimeError, match="invalid for CModel"):
         matrix._validate_args(_args(allow_pcie=True))
     with pytest.raises(RuntimeError, match="invalid for CModel"):
-        matrix._validate_args(
-            _args(pcie_decoder_pythonpath=[Path("decoder")]))
+        matrix._validate_args(_args(pcie_decoder_pythonpath=[Path("decoder")]))
     with pytest.raises(RuntimeError, match="invalid for CModel"):
         matrix._validate_args(_args(require_decoded_timing=True))
 

@@ -109,8 +109,7 @@ def _validate_args(args: argparse.Namespace) -> None:
     if args.runtime_mode == "pcie":
         if not args.allow_pcie or not args.allow_pcie_profile:
             raise RuntimeError("PCIe requires both --allow-pcie and --allow-pcie-profile")
-        if (args.device_id is None or args.device_id < 0 or
-                args.device_id > 2**31 - 1):
+        if (args.device_id is None or args.device_id < 0 or args.device_id > 2**31 - 1):
             raise RuntimeError("PCIe requires a valid non-negative --device-id")
         if args.chips is None or len(args.chips) != 1:
             raise RuntimeError("PCIe requires exactly one explicit --chip")
@@ -131,8 +130,7 @@ def _worker_environment(repo_root: Path, scratch: Path, runtime_mode: str,
         os.path.abspath(item)
         for item in environment.get("PYTHONPATH", "").split(os.pathsep)
         if item)
-    environment["PYTHONPATH"] = os.pathsep.join(
-        dict.fromkeys((str(repo_root), *inherited_paths)))
+    environment["PYTHONPATH"] = os.pathsep.join(dict.fromkeys((str(repo_root), *inherited_paths)))
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["TMPDIR"] = str(scratch)
     for name in _PCIE_ENVIRONMENT_VARIABLES:
@@ -178,8 +176,9 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
         "schema_version": 1,
         "runtime_mode": args.runtime_mode,
         "programming_model": "tpukernel",
-        "acceptance": ("numeric-raw-and-decoded-timing"
-                       if args.require_decoded_timing else "numeric-and-raw"),
+        "acceptance":
+            ("numeric-raw-and-decoded-timing" if args.require_decoded_timing else "numeric-and-raw"
+            ),
         "decoded_timing_required": args.require_decoded_timing,
         "complete": False,
         "cases": {},
@@ -192,8 +191,7 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
         try:
             preflight_profiler = TPUInstructionProfiler(
                 _profiling_config(args, output_dir, chips[0], "pcie-decoder-preflight"))
-            decoder_identity = preflight_profiler.preflight_pcie_decoder(
-                environment=environment)
+            decoder_identity = preflight_profiler.preflight_pcie_decoder(environment=environment)
             summary["decoder_preflight"] = {
                 "status": "passed",
                 "identity": dict(decoder_identity),
@@ -214,14 +212,12 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                 key = f"{chip}/tpukernel/{dtype}/{case}"
                 print(f"RUN {key}", flush=True)
                 profiler = TPUInstructionProfiler(
-                    _profiling_config(args, output_dir, chip,
-                                      f"{chip}-tpukernel-{dtype}-{case}"))
+                    _profiling_config(args, output_dir, chip, f"{chip}-tpukernel-{dtype}-{case}"))
                 command = [sys.executable, str(worker), "--dtype", dtype, "--case", case]
                 try:
                     report = (
-                        profiler.run_pcie(command, environment=environment)
-                        if args.runtime_mode == "pcie" else
-                        profiler.run_cmodel(command, environment=environment))
+                        profiler.run_pcie(command, environment=environment) if args.runtime_mode
+                        == "pcie" else profiler.run_cmodel(command, environment=environment))
                     _validate_profile_report(
                         report, require_decoded_timing=args.require_decoded_timing)
                     summary["cases"][key] = _report_summary(
@@ -256,8 +252,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     scratch = Path(tempfile.mkdtemp(prefix=".scratch-", dir=output_dir))
     try:
-        environment = _worker_environment(
-            repo_root, scratch, args.runtime_mode, args.device_id)
+        environment = _worker_environment(repo_root, scratch, args.runtime_mode, args.device_id)
         return _run_matrix(args, repo_root, output_dir, environment)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

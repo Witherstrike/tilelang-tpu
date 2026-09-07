@@ -51,11 +51,12 @@ def _load_decoder():
         except metadata.PackageNotFoundError:
             package_version = "unknown"
     identity = {
-        "package": "bigTpuProfile",
-        "package_version": str(package_version),
-        "parser_api": (
-            f"{BMProfileParserPerfAI.__module__}."
-            f"{BMProfileParserPerfAI.__qualname__}.parse"),
+        "package":
+            "bigTpuProfile",
+        "package_version":
+            str(package_version),
+        "parser_api": (f"{BMProfileParserPerfAI.__module__}."
+                       f"{BMProfileParserPerfAI.__qualname__}.parse"),
     }
     return BMProfileParserPerfAI, identity
 

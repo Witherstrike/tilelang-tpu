@@ -120,8 +120,7 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
     worker = Path(__file__).with_name("tpu_profile_worker.py")
     decoder_config = {
         "pcie_decoder_python": getattr(args, "pcie_decoder_python", None),
-        "pcie_decoder_pythonpath": tuple(
-            getattr(args, "pcie_decoder_pythonpath", ()) or ()),
+        "pcie_decoder_pythonpath": tuple(getattr(args, "pcie_decoder_pythonpath", ()) or ()),
     }
 
     if args.require_decoded_timing:
@@ -138,8 +137,8 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                 postprocess=True,
                 **decoder_config,
             )
-            decoder_identity = TPUInstructionProfiler(
-                preflight_config).preflight_pcie_decoder(environment=environment)
+            decoder_identity = TPUInstructionProfiler(preflight_config).preflight_pcie_decoder(
+                environment=environment)
         except BaseException as exc:
             summary["decoder_preflight"] = {
                 "status": "failed",

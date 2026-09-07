@@ -72,9 +72,8 @@ def _fake_pcie_trace_worker(programming_model: str = "tpukernel",
         profile_write = (f"(profile / {profile_name!r}).write_bytes({profile_payload!r})\n")
     pythonpath_check = ""
     if forbidden_pythonpath is not None:
-        pythonpath_check = (
-            f"assert {str(forbidden_pythonpath)!r} not in "
-            "os.environ.get('PYTHONPATH', '').split(os.pathsep)\n")
+        pythonpath_check = (f"assert {str(forbidden_pythonpath)!r} not in "
+                            "os.environ.get('PYTHONPATH', '').split(os.pathsep)\n")
     source = ("import os\n"
               "from pathlib import Path\n"
               "assert 'FILE_DUMP_CMD' not in os.environ\n"
@@ -924,8 +923,7 @@ def test_pcie_decoder_preflight_reports_only_the_required_package(tmp_path, monk
     missing_decoder = tmp_path / "missing_decoder.py"
     missing_decoder.write_text("raise SystemExit(3)\n", encoding="utf-8")
     monkeypatch.setattr(tpu_profiling_module, "_PCIE_PROFILE_DECODER_PATH", missing_decoder)
-    profiler = TPUInstructionProfiler(
-        TPUProfilingConfig(chip="sg2260e", runtime_mode="pcie"))
+    profiler = TPUInstructionProfiler(TPUProfilingConfig(chip="sg2260e", runtime_mode="pcie"))
 
     with pytest.raises(TPUProfilingError, match="preinstalled bigTpuProfile") as exc_info:
         profiler.preflight_pcie_decoder(environment=_pcie_profile_environment())
