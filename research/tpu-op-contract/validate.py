@@ -26,7 +26,8 @@ SCHEMA_PATH = HERE / "schema.json"
 ABSOLUTE_PATH = re.compile(r"^(?:/|[A-Za-z]:[\\/])")
 GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
 SEMANTIC_EXTERN = re.compile(r"tl\.(?:tpu|tpukernel)\.[A-Za-z0-9_]+")
-RUNTIME_CASE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*/[A-Za-z0-9._-]+$")
+RUNTIME_CASE_ID = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*"
+                             r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*){2,}$")
 SUPPORTED_SCHEMA_KEYWORDS = {
     "$schema",
     "$id",
@@ -410,6 +411,8 @@ def _check_portable_path(label: str, value: Any, *, symbolic: bool = False) -> N
         raise ContractError(f"{label} must be a non-empty string")
     if ABSOLUTE_PATH.match(value):
         raise ContractError(f"{label} is machine-absolute: {value}")
+    if "\\" in value:
+        raise ContractError(f"{label} must use portable POSIX separators: {value}")
     if symbolic and value.startswith("${") and value.endswith("}"):
         return
     if ".." in PurePosixPath(value).parts:
@@ -984,7 +987,7 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
                         raise ContractError(
                             f"evidence {evidence_id} has malformed required case id "
                             f"{case_id!r}")
-                    chip, backend, _ = case_id.split("/")
+                    chip, backend, _ = case_id.split("/", 2)
                     case_target = f"{chip}.{backend}"
                     if case_target not in claim_targets:
                         raise ContractError(f"evidence {evidence_id} required case {case_id!r} "

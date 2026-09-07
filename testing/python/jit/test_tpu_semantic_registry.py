@@ -209,6 +209,60 @@ def test_required_runtime_case_belongs_to_a_claimed_target_without_artifacts(mon
         _validate_contract_without_local_artifacts(monkeypatch, validator, schema, contract)
 
 
+@pytest.mark.parametrize(
+    "case_id",
+    [
+        "bm1690/tpukernel/matmul",
+        "sg2260e/tpukernel/e4m3/add",
+        "sg2260e/rv/group_1/sub-group/case.name",
+    ],
+)
+def test_runtime_case_id_accepts_safe_paths_with_at_least_three_segments(case_id):
+    validator = _contract_validator_module()
+    schema = validator._load_json(validator.SCHEMA_PATH)
+    schema_pattern = schema["$defs"]["runtimeExpectation"]["properties"]["required_case_ids"][
+        "items"]["pattern"]
+
+    assert schema_pattern == validator.RUNTIME_CASE_ID.pattern
+    assert validator.RUNTIME_CASE_ID.fullmatch(case_id)
+
+
+@pytest.mark.parametrize(
+    "case_id",
+    [
+        "sg2260e/tpukernel",
+        "/sg2260e/tpukernel/add",
+        "sg2260e/tpukernel/add/",
+        "sg2260e/tpukernel//add",
+        "sg2260e/tpukernel/fp8/add?",
+        "SG2260E/tpukernel/fp8/add",
+        "sg2260e/tpukernel/../escape",
+        "sg2260e/tpukernel/.",
+        "sg2260e/tpukernel/..",
+        "sg2260e/tpukernel/a/../../escape",
+        "sg2260e/tpukernel/Case.Name",
+        "sg2260e/tpukernel/-leading",
+        "sg2260e/tpukernel/trailing-",
+    ],
+)
+def test_runtime_case_id_rejects_short_empty_or_unsafe_paths(case_id):
+    validator = _contract_validator_module()
+    schema = validator._load_json(validator.SCHEMA_PATH)
+    schema_pattern = schema["$defs"]["runtimeExpectation"]["properties"]["required_case_ids"][
+        "items"]["pattern"]
+
+    assert schema_pattern == validator.RUNTIME_CASE_ID.pattern
+    assert validator.RUNTIME_CASE_ID.fullmatch(case_id) is None
+
+
+@pytest.mark.parametrize("path", [r"..\escape", r"\\server\share"])
+def test_contract_paths_reject_non_posix_separators(path):
+    validator = _contract_validator_module()
+
+    with pytest.raises(validator.ContractError, match="portable POSIX separators"):
+        validator._check_portable_path("test path", path)
+
+
 def test_validated_revision_must_exist_without_local_artifacts(monkeypatch):
     validator = _contract_validator_module()
     schema = validator._load_json(validator.SCHEMA_PATH)

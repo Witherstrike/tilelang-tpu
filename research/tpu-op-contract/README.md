@@ -48,7 +48,7 @@ Schema 1.1 起，`invariants` 记录跨 op 的不可绕过规则。当前 `seman
 
 ### 3.1 TPU-Kernel CModel
 
-2026-09-07 对实现基线 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335` 的 [canonical CModel 重跑](../artifacts/2026-09-07/tpukernel-cmodel-44a6fc2/summary.json) 为 fail-stop、逐 case 独立进程测试，总计 288/288：
+2026-09-07 对实现基线 `e5e308797640fa2c3e789cdddd9ebed9246ddd47` 的 [canonical CModel 重跑](../artifacts/2026-09-07/tpukernel-cmodel-e5e3087/summary.json) 为 fail-stop、逐 case 独立进程测试，总计 288/288：
 
 | 芯片 | 结果 | 覆盖 |
 | --- | ---: | --- |
@@ -69,11 +69,13 @@ Schema 1.1 起，`invariants` 记录跨 op 的不可绕过规则。当前 `seman
 
 所有进入 TPUv7/PPL `dim4` 的 N/C/H/W extent 都必须是编译期整数并落在闭区间 `[1,65535]`；TPU 本地 scope 的闭集为 `shared/shared.dyn/local/local.fragment`。exp/sigmoid 还要求完整 shape4 一致且 `H*W<=65535`；reduction 的 EU 对齐后 padded width 也不得超过 65535。相应正负例集中在 `testing/python/jit/test_tpu_codegen_descriptor_contract.py`。
 
-同一干净实现基线的 [核心 profiling/CModel 重跑](../artifacts/2026-09-07/core-cmodel-44a6fc2/summary.json) 为 27/27：BM1690/TPU-Kernel、SG2260E/TPU-Kernel、SG2260E/RV 各 9 项。每组包含 FP32 add/sub/mul/div、FP16 A/B 与 FP32 累加的 NN GEMM，以及 FP16/FP32 的 local-roundtrip、global-to-global copy。SG2260E/RV 的 local case 直接覆盖 G2L→L2L→L2S，global case 覆盖 S2S，输入为 `(4,32)` 可精确表示的 quarter-integer，按逐元素完全相等判定；对应 raw 命令数分别为 45 和 43。四个逐元素 case 各保留 58 条 raw 命令，GEMM 保留 78 条。所有 case 均生成了非空 CModel raw trace，但本机没有兼容 decoder，本轮也未启用后处理，故 `timed_instruction_count=0`。这些记录只能证明指令选择和数值结果，不能证明逐指令耗时。
+同一干净实现基线的 [核心 profiling/CModel 重跑](../artifacts/2026-09-07/core-cmodel-e5e3087/summary.json) 为 27/27：BM1690/TPU-Kernel、SG2260E/TPU-Kernel、SG2260E/RV 各 9 项。每组包含 FP32 add/sub/mul/div、FP16 A/B 与 FP32 累加的 NN GEMM，以及 FP16/FP32 的 local-roundtrip、global-to-global copy。SG2260E/RV 的 local case 直接覆盖 G2L→L2L→L2S，global case 覆盖 S2S，输入为 `(4,32)` 可精确表示的 quarter-integer，按逐元素完全相等判定；对应 raw 命令数分别为 45 和 43。四个逐元素 case 各保留 58 条 raw 命令，GEMM 保留 78 条。所有 case 均生成了非空 CModel raw trace，但本机没有兼容 decoder，本轮也未启用后处理，故 `timed_instruction_count=0`。这些记录只能证明指令选择和数值结果，不能证明逐指令耗时。
 
 ### 3.2 FP8 TPU-Kernel
 
-[最终 FP8 CModel summary](../artifacts/2026-09-07/fp8-cmodel-44a6fc2/summary.json) 同样绑定实现基线 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335`，结果为 76/76：`2 chips × 2 formats × 19 public cases`，每例均完成数值判定并保留非空 CModel raw 命令 trace。此前 40 项基础矩阵及若干增量实验仍是定位实现演进的辅助证据，能力判定以这份完整重跑为准。
+[最终 FP8 CModel summary](../artifacts/2026-09-07/fp8-cmodel-e5e3087/summary.json) 同样绑定实现基线 `e5e308797640fa2c3e789cdddd9ebed9246ddd47`，结果为 76/76：`2 chips × 2 formats × 19 public cases`，每例均完成数值判定并保留非空 CModel raw 命令 trace。此前 40 项基础矩阵及若干增量实验仍是定位实现演进的辅助证据，能力判定以这份完整重跑为准。
+
+本轮三份 canonical CModel 工件合计 391/391 次独立 launch：TPU-Kernel 全量 288、FP8 专项 76、三 target 核心 profiling 27。核心矩阵与前两份能力矩阵存在 selector 重叠，因此 391 是实际验收 launch 数，不是互斥 capability 数。
 
 | 算子族 | 当前 TileLang TPU-Kernel 范围 | RV 状态 |
 | --- | --- | --- |
@@ -91,25 +93,26 @@ PPL 1.7 高层 DSL 和当前 TileLang 使用同一 scalar 序列：FP32 常量�
 
 ### 3.3 当前 PCIe 证据与门禁
 
-板卡恢复健康后，2026-09-07 在干净实现基线 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335` 上按 fail-stop 顺序完成 151 次 SG2260E device 0 launch。每份 summary 都由 runner 自记相同 revision、`implementation_worktree_dirty=false` 与 `source_identity_scope="tracked files excluding research/**"`；每个 contract runtime expectation 又锁定完整 required case manifest，不能用同数量的其他 selector 替换。
+板卡恢复健康后，2026-09-07 在干净实现基线 `e5e308797640fa2c3e789cdddd9ebed9246ddd47` 上按 fail-stop 顺序完成 189/189 次 SG2260E device 0 launch。每份 summary 都由 runner 自记相同 revision、`implementation_worktree_dirty=false` 与 `source_identity_scope="tracked files excluding research/**"`；每个 contract runtime expectation 又锁定完整 required case manifest，不能用同数量的其他 selector 替换。
 
 | 批次 | 结果 | 覆盖 |
 | --- | ---: | --- |
-| [TPU-Kernel matmul canary](../artifacts/2026-09-07/pcie-tpukernel-matmul-44a6fc2/summary.json) | 1/1 | `64×64×64` FP16 GEMM、FP32 accumulator zero、FP32→FP16 输出转换；数值、raw recorder 与 36 条 ns timing 均通过 |
-| [RV core](../artifacts/2026-09-07/pcie-rv-core-44a6fc2/summary.json) | 9/9 | FP32 四则、FP16 GEMM，以及 FP16/FP32 各自的 local-roundtrip 与 S2S；数值、raw recorder 与 108 条 ns timing 均通过 |
-| [TPU-Kernel core](../artifacts/2026-09-07/pcie-tpukernel-core-44a6fc2/summary.json) | 54/54 | 23 个浮点/整数 copy/cast（含 `(2,3,17)` FP32 rank-3）、三种非零 fill、六种 FP16/BF16 GEMM、16 种 tensor arithmetic、六种 scalar arithmetic |
-| [TPU-Kernel extended](../artifacts/2026-09-07/pcie-tpukernel-extended-44a6fc2/summary.json) | 15/15 | FP16/BF16/FP32 exp、sigmoid、rsqrt、gather、rope |
-| [TPU-Kernel reductions](../artifacts/2026-09-07/pcie-tpukernel-reductions-44a6fc2/summary.json) | 72/72 | 三种基础浮点 sum/max，覆盖 width `15,16,17,31,32,33,47,48,49,63,64,65` |
+| [TPU-Kernel matmul canary](../artifacts/2026-09-07/pcie-tpukernel-matmul-e5e3087/summary.json) | 1/1 | `64×64×64` FP16 GEMM、FP32 accumulator zero、FP32→FP16 输出转换；数值、raw recorder 与 36 条 ns timing 均通过 |
+| [RV core](../artifacts/2026-09-07/pcie-rv-core-e5e3087/summary.json) | 9/9 | FP32 四则、FP16 GEMM，以及 FP16/FP32 各自的 local-roundtrip 与 S2S；数值、raw recorder 与 108 条 ns timing 均通过 |
+| [TPU-Kernel FP8](../artifacts/2026-09-07/pcie-fp8-e5e3087/summary.json) | 38/38 | E4M3/E5M2 各 19 项：同格式 copy、零 fill、FP32 双向 cast、dense/W-broadcast add/sub/mul、scalar add/mul、gather、rope、NN/NT overwrite/accumulate GEMM；数值、38 个 raw recorder 目录与 134 条 ns timing 均通过 |
+| [TPU-Kernel core](../artifacts/2026-09-07/pcie-tpukernel-core-e5e3087/summary.json) | 54/54 | 23 个基础浮点/整数 copy/cast（含 `(2,3,17)` FP32 rank-3）、三种非零 fill、六种 FP16/BF16 GEMM、16 种 tensor arithmetic、六种 scalar arithmetic |
+| [TPU-Kernel extended](../artifacts/2026-09-07/pcie-tpukernel-extended-e5e3087/summary.json) | 15/15 | FP16/BF16/FP32 exp、sigmoid、rsqrt、gather、rope |
+| [TPU-Kernel reductions](../artifacts/2026-09-07/pcie-tpukernel-reductions-e5e3087/summary.json) | 72/72 | 三种基础浮点 sum/max，覆盖 width `15,16,17,31,32,33,47,48,49,63,64,65` |
 
-TPU-Kernel 三个数值批次合计现行 141/141；独立 matmul canary 用于验证 accumulator zero 与 PCIe profiling，不与 141 项解释为不同 selector。RV 的四条独立 copy case 直接闭合 G2L→L2L→L2S 与 S2S，因此 `copy.same-fp32-fp16.same-space` 可以在该精确 `(4,32)` 范围内从 `unverified` 提升为当前 `passed`；GEMM 内的 FP32→FP16 cast 和 zero fill 仍只按复合 workload 记载，不外推为独立 selector。
+TPU-Kernel 三个基础浮点/整数数值批次合计现行 141/141；FP8 是另一个精确的 38-case selector 集合，不与 141 项混算。独立 matmul canary 用于验证 accumulator zero 与 PCIe profiling，不与 141 项解释为不同 selector。RV 的四条独立 copy case 直接闭合 G2L→L2L→L2S 与 S2S，因此 `copy.same-fp32-fp16.same-space` 在精确 `(4,32)` 范围内为当前 `passed`；GEMM 内的 FP32→FP16 cast 和 zero fill 仍只按复合 workload 记载，不外推为独立 selector。
 
-两份 profiling 矩阵都显式要求 decoded timing，所有 case 的 parser 均为 `ready`，并同时保留非空 raw trace。单次事件用于证明指令选择和定位问题，不是稳定性能结论；生产路径仍不会自动安装 decoder。此前 2026-09-04/05 的 RV 5/5、TPU-Kernel 140/140 与离线 decode 文件只保留为演进记录，不再授权或重复累计当前 capability。
+matmul canary、RV core 与 FP8 三份 profiling 矩阵都显式要求 decoded timing，所有 48 个 case 的 parser 均为 `ready`，合计 278 条有效 ns 区间，并同时保留非空 raw trace。单次事件用于证明指令选择和定位问题，不是稳定性能结论；decoder 由显式隔离环境提供，生产路径不会自动安装依赖。此前 2026-09-04/05 的 RV 5/5、TPU-Kernel 140/140、`e5e3087` 之前的同类重跑与离线 decode 文件只保留为演进记录，不再授权或重复累计当前 capability。
 
-契约现在有 43 个当前 `pcie_numeric_passed=passed` stage：42 个是对旧历史精确范围的同 revision 重跑，另一个是 RV FP16/FP32 L2L/S2S 的四条直接 copy case。BM1690 PCIe、FP8 PCIe及更宽的 SG2260E/RV selector 没有对应板端证据，继续保持 `unverified`；SG2260E topk 仍为 `not_applicable`。
+契约现在有 58 个当前 `pcie_numeric_passed=passed` stage：原有 43 个精确 stage 均由本轮同 revision 工件重证，另有 15 个 SG2260E/TPU-Kernel FP8 capability 由 38 个直接 case 提升。FP8 提升只包括同格式 copy、零 fill、FP32 双向 cast、上述算术/scalar/gather/rope 与 NN/NT FP32-result GEMM；BM1690 PCIe、非零 FP8 fill、FP16/BF16↔FP8、cross-FP8 cast、FP8 div/exp/sigmoid/rsqrt/reduce/topk、异常值与更大或动态 shape，以及更宽的 SG2260E/RV selector 都没有被外推。SG2260E topk 仍为 `not_applicable`。
 
 ### 3.4 远程提交前审查
 
-实现基线 `44a6fc2ab6e8ca60569853fd781e21bfa0b78335` 的 source-only 最终回归为 335 passed、4 skipped，其中 descriptor contract 32/32、frontend contract 41/41、core matrix 35/35。四个 skip 均为需要显式启用的真实 profiling worker，默认回归不会访问 CModel 或板卡。
+实现基线 `e5e308797640fa2c3e789cdddd9ebed9246ddd47` 的 source-only 回归为 348 passed、4 skipped；增加 18 个多段 runtime case-id 与 portable path 契约正反例后，远程提交前工作树为 366 passed、4 skipped。四个 skip 均为需要显式启用的真实 profiling worker，默认回归不会访问 CModel 或板卡；新增覆盖包括 PCIe decoder 依赖隔离、无硬件 preflight、身份记录，以及 FP8 matrix 的 runtime/授权/显式目标门禁。
 
 本轮审查闭合了以下提交风险：profiling 以保存的 PGID 检查 supervisor 正常退出后的残留后代，并按 TERM→KILL 执行有界清理；CModel、PCIe、offline decoder 和 PerfAI parser 共用这一语义。契约校验器对不支持的 schema 结构、未闭合引用及不匹配当前 revision/target/capability 的 runtime evidence 均 fail-closed。TPU target 若选择 DLPack，会在 lowering 前拒绝；生成的 host 参数使用位置化 `arg_<index>` 标识，不再信任可能重复或不符合 C++ 标识符规则的 TIR name hint。
 
@@ -143,7 +146,7 @@ Agent 或生成器使用时还必须遵守以下规则：
 
 `research/artifacts/**` 被 Git 忽略，适合保留本机完整结果；因此克隆仓库后工件可能不存在。可移植结论由本目录契约和 `research/tpu-backend-design/test-report.md` 汇总，工件路径只是证据定位符。
 
-当前五份 PCIe canonical evidence 都列出了完整 `required_case_ids`；其数量分别与 target case count 的 1、9、54、15、72 完全相等，严格校验因此能识别 selector 缺失或等量替换。仍刻意保留的边界是 TPU-Kernel CModel 288 项与 FP8 CModel 76 项 evidence 目前只锁定总数、target 分布和全量通过，尚未把 capability 与直接或复合覆盖它的具体 case id 建成机器可检验的明确映射。本轮已人工比较 CModel 新旧 case 集合一致；后续若允许 Agent 自动提升这些 CModel capability，必须先增加稳定 case manifest 或 `claims_by_target` 映射，不能仅凭数量相同自动升级。
+当前六份 PCIe canonical evidence 都列出了完整 `required_case_ids`；其数量分别与所声明 target 范围的 1、9、38、54、15、72 完全相等，严格校验因此能识别 selector 缺失或等量替换。三份 CModel canonical evidence 也已锁定完整 manifest：核心矩阵 27 项，TPU-Kernel 矩阵按 claimed target 分别锁定 SG 141 项与 BM 147 项，FP8 矩阵锁定两 target 共 76 项。case id 至少三段；FP8 用第四段区分格式。每段必须以小写字母或数字开头和结尾，中间只允许 `.`、`_`、`-` 分隔符；schema 与标准库 validator 都拒绝空段、首尾斜线、`//`、大写字符、首尾分隔符和 `.`/`..` traversal 段。runtime evidence 的 `capability_ids` 仍是工件可授权的候选闭集；能力升级还必须逐项核对 case 对 dtype、shape、transpose、accumulate 与 oracle 的直接覆盖，不能仅凭总数或同族名称自动升级。
 
 ## 6. 校验
 
