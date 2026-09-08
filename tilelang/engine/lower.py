@@ -82,6 +82,7 @@ _PORTABLE_TPU_EXTERNS = frozenset({
     "tl.tpu.div",
     "tl.tpu.fill",
     "tl.tpu.gemm",
+    "tl.tpu.max",
     "tl.tpu.mul",
     "tl.tpu.sub",
 })
@@ -110,6 +111,7 @@ _TPU_SEMANTIC_REGION_ARGS = {
     "tl.tpu.sub": (1, 2, 3),
     "tl.tpu.mul": (1, 2, 3),
     "tl.tpu.div": (1, 2, 3),
+    "tl.tpu.max": (1, 2, 3),
     "tl.tpukernel.add_scalar": (1, 2),
     "tl.tpukernel.mul_scalar": (1, 2),
     "tl.tpukernel.exp": (1, 2, 3, 4),

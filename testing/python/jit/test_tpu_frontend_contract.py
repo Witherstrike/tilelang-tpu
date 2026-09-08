@@ -171,6 +171,119 @@ def test_invalid_elementwise_broadcast_fails_at_frontend():
                 T.ppl_add(out, lhs, rhs)
 
 
+@pytest.mark.parametrize(
+    ("chip", "programming_model", "instruction"),
+    (
+        ("bm1690", "tpukernel", "tpu_bdc_max("),
+        ("sg2260e", "tpukernel", "tpu_bdc_max("),
+        ("sg2260e", "rv", "rvt_fmax(10, 8, 9);"),
+    ),
+)
+@pytest.mark.parametrize("dtype", ("float16", "bfloat16", "float32"))
+@pytest.mark.parametrize("rhs_shape", ((4, 32), (4, 1)))
+def test_portable_max_selects_backend_instruction(chip, programming_model, instruction,
+                                                  dtype, rhs_shape):
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, is_cpu=True) as _:
+            lhs = T.alloc_shared((4, 32), dtype)
+            rhs = T.alloc_shared(rhs_shape, dtype)
+            out = T.alloc_shared((4, 32), dtype)
+            T.ppl_max(out, lhs, rhs)
+
+    source = tilelang.lower(
+        kernel,
+        target=f"tpu -mcpu={chip} -tpu-programming-model={programming_model}",
+        runtime_mode="cmodel",
+    ).kernel_source
+    assert instruction in source
+    if rhs_shape == (4, 1):
+        if programming_model == "rv":
+            assert "FREE_LAYOUT" in source
+            assert "(int[4]){" in source
+            assert ".stride.h, 0});" in source
+        else:
+            assert ".w = 0;" in source
+
+
+@pytest.mark.parametrize(
+    ("operation", "instruction"),
+    (("add", "rvt_fadd"), ("sub", "rvt_fsub"),
+     ("mul", "rvt_fmul"), ("div", "rvt_fdiv")),
+)
+def test_rv_w_broadcast_uses_a_zero_stride_descriptor(operation, instruction):
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, is_cpu=True) as _:
+            lhs = T.alloc_shared((4, 32), "float32")
+            rhs = T.alloc_shared((4, 1), "float32")
+            out = T.alloc_shared((4, 32), "float32")
+            if operation == "add":
+                T.ppl_add(out, lhs, rhs)
+            elif operation == "sub":
+                T.ppl_subtract(out, lhs, rhs)
+            elif operation == "mul":
+                T.ppl_mul(out, lhs, rhs)
+            else:
+                T.ppl_div(out, lhs, rhs)
+
+    source = tilelang.lower(
+        kernel,
+        target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
+        runtime_mode="cmodel",
+    ).kernel_source
+    assert f"{instruction}(10, 8, 9);" in source
+    descriptor = next(line for line in source.splitlines() if "rvt_tr(9," in line)
+    assert "FREE_LAYOUT" in descriptor
+    assert "(int[4]){" in descriptor
+    assert descriptor.rstrip().endswith(".stride.h, 0});")
+
+
+@pytest.mark.parametrize("chip", ("bm1690", "sg2260e"))
+@pytest.mark.parametrize(
+    ("dtype", "dtype_token"),
+    (("e4m3_float8", "DT_FP8E4M3"), ("e5m2_float8", "DT_FP8E5M2")),
+)
+@pytest.mark.parametrize("rhs_shape", ((4, 32), (4, 1)))
+def test_tpukernel_fp8_max_selects_generic_instruction(
+        chip, dtype, dtype_token, rhs_shape):
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, is_cpu=True) as _:
+            lhs = T.alloc_shared((4, 32), dtype)
+            rhs = T.alloc_shared(rhs_shape, dtype)
+            out = T.alloc_shared((4, 32), dtype)
+            T.ppl_max(out, lhs, rhs)
+
+    source = tilelang.lower(kernel, target=_target(chip), runtime_mode="cmodel").kernel_source
+    assert "tpu_bdc_max(" in source
+    assert dtype_token in source
+    if rhs_shape == (4, 1):
+        assert ".w = 0;" in source
+
+
+@pytest.mark.parametrize("dtype", ("e4m3_float8", "e5m2_float8"))
+def test_rv_fp8_max_fails_closed_at_codegen(dtype):
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, is_cpu=True) as _:
+            lhs = T.alloc_shared((4, 32), dtype)
+            rhs = T.alloc_shared((4, 32), dtype)
+            out = T.alloc_shared((4, 32), dtype)
+            T.ppl_max(out, lhs, rhs)
+
+    with pytest.raises(tvm.error.TVMError, match="validated only for the TPU-Kernel"):
+        tilelang.lower(
+            kernel,
+            target="tpu -mcpu=sg2260e -tpu-programming-model=rv",
+            runtime_mode="cmodel",
+        )
+
+
 def test_gemm_output_alias_fails_at_frontend():
     with pytest.raises(tvm.error.DiagnosticError):
 
@@ -323,6 +436,21 @@ def test_invalid_copy_operand_fails_with_a_frontend_diagnostic():
             with T.Kernel(1, is_cpu=True) as _:
                 dst = T.alloc_shared((1, 32), "float32")
                 T.ppl_copy(T.float32(1), dst)
+
+
+@pytest.mark.parametrize("chip", ("bm1690", "sg2260e"))
+def test_rank4_singleton_slice_roundtrips_through_rank2_local_tile(chip):
+
+    @T.prim_func
+    def kernel(source: T.Tensor((1, 16, 1, 16), "float32"),
+               destination: T.Tensor((1, 16, 1, 16), "float32")):
+        with T.Kernel(1, is_cpu=True) as _:
+            local = T.alloc_shared((16, 16), "float32")
+            T.ppl_copy(source[0:1, 0:16, 0:1, 0:16], local)
+            T.ppl_copy(local, destination[0:1, 0:16, 0:1, 0:16])
+
+    source = tilelang.lower(kernel, target=_target(chip), runtime_mode="cmodel").kernel_source
+    assert source.count("tpu_gdma_cpy_") == 2
 
 
 def test_descriptor_extent_above_uint16_limit_fails_at_frontend():

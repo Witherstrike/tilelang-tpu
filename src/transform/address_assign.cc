@@ -501,7 +501,8 @@ private:
       mark_arg(3, accumulate ? BufferAccessKind::kReadWrite
                              : BufferAccessKind::kWrite);
     } else if (op_name == "tl.tpu.sub" || op_name == "tl.tpu.mul" ||
-               op_name == "tl.tpu.add" || op_name == "tl.tpu.div") {
+               op_name == "tl.tpu.add" || op_name == "tl.tpu.div" ||
+               op_name == "tl.tpu.max") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);

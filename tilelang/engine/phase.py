@@ -6,15 +6,34 @@ import tilelang
 from tilelang.engine.tpu_config import resolve_tpu_target
 
 
-def _validate_tpu_phase_target(target: Target) -> None:
-    """Require a complete supported TPU identity at every public TPU phase.
+def _validate_tpu_phase_target(mod: IRModule, target: Target, phase_name: str) -> None:
+    """Require one complete, consistent TPU identity at a public TPU phase.
 
     Full lowering validates this contract before entering the pass pipeline,
     but these phase helpers are also imported and called directly by tests and
     downstream tooling.  Do not let that shorter path turn a bare/unknown TPU
-    target into the shared TPUv7 pass pipeline.
+    target, or a module already bound to another target, into the shared TPUv7
+    pass pipeline.  Unbound source PrimFuncs remain valid so
+    ``LowerAndLegalize`` can bind them; the normal pipeline reaches
+    ``OptimizeForTarget`` only after that binding.
     """
-    resolve_tpu_target(target=target)
+    selected_target = resolve_tpu_target(target=target)
+    for global_var, function in mod.functions.items():
+        if not isinstance(function, tir.PrimFunc):
+            continue
+        function_target = function.attrs.get("target") if function.attrs else None
+        if function_target is None:
+            continue
+        if function_target.kind.name != "tpu":
+            raise ValueError(
+                f"{phase_name} cannot process PrimFunc {global_var.name_hint!r} bound to "
+                f"target kind {function_target.kind.name!r} with a TPU target")
+        function_selection = resolve_tpu_target(target=function_target)
+        if function_selection != selected_target:
+            raise ValueError(
+                f"{phase_name} target identity mismatch for PrimFunc "
+                f"{global_var.name_hint!r}: function={function_selection}, "
+                f"requested={selected_target}")
 
 
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
@@ -25,7 +44,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     remain outside this path until they have an explicit TPU contract.
     """
     if target.kind.name == "tpu":
-        _validate_tpu_phase_target(target)
+        _validate_tpu_phase_target(mod, target, "LowerAndLegalize")
     mod = tir.transform.BindTarget(target)(mod)
 
     mod = tilelang.transform.FrontendLegalize()(mod)
@@ -103,7 +122,7 @@ def _optimize_generic(mod: IRModule) -> IRModule:
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     """Dispatch one explicit pass pipeline per backend family."""
     if target.kind.name == "tpu":
-        _validate_tpu_phase_target(target)
+        _validate_tpu_phase_target(mod, target, "OptimizeForTarget")
         return _optimize_tpu(mod)
     if target.kind.name == "cuda" and target.arch == "sm_90":
         return _optimize_hopper(mod)

@@ -64,6 +64,7 @@ from .customize import (
     ppl_add,  # noqa: F401
     ppl_div,  # noqa: F401
     ppl_exp,  # noqa: F401
+    ppl_max,  # noqa: F401
     ppl_mul,  # noqa: F401 
     ppl_mul_C,  # noqa: F401
     ppl_reduce_max,  # noqa: F401

@@ -208,9 +208,24 @@ void CodeGenTileLangTPU::EmitRVElementwise(
       << "RV Tensor " << operation
       << " only supports an equal rhs shape or W-dimension broadcast for the "
          "current 2-D TileLang mapping";
+  const bool rhs_w_broadcast = src1_shape != dst_shape;
 
   EmitRVDescriptor(src0, 8, false, RVDTypeName(src0_dtype), true);
-  EmitRVDescriptor(src1, 9, false, RVDTypeName(src1_dtype), true);
+  if (rhs_w_broadcast) {
+    // The SG2260E CModel does not expand a shape-(M,1) TR merely because the
+    // peer/output TR has width W. Describe the same storage as an (M,W) free
+    // view with zero W stride. This is a descriptor-only broadcast: no LMEM
+    // expansion, extra instruction, or out-of-bounds read is introduced.
+    PrintIndent();
+    stream << "rvt_tr(9, PRECISION(" << RVDTypeName(src1_dtype)
+           << "), FP8TYPE(" << RVDTypeName(src1_dtype) << "), " << src1
+           << ".addr, FREE_LAYOUT, (array4_t){.n=" << dst << ".shape.n, .c="
+           << dst << ".shape.c, .h=" << dst << ".shape.h, .w=" << dst
+           << ".shape.w}, (int[4]){" << src1 << ".stride.n, " << src1
+           << ".stride.c, " << src1 << ".stride.h, 0});\n";
+  } else {
+    EmitRVDescriptor(src1, 9, false, RVDTypeName(src1_dtype), true);
+  }
   EmitRVDescriptor(dst, 10, false, RVDTypeName(dst_dtype), true);
   PrintIndent();
   stream << "rvt_cfg_satu(0, false);\n";

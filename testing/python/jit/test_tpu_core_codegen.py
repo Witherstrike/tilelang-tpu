@@ -46,6 +46,7 @@ def _portable_core_ops(A: T.Tensor((16, 16), "float16"), B: T.Tensor(
         T.ppl_subtract(z_shared, x_shared, y_shared)
         T.ppl_mul(z_shared, x_shared, y_shared)
         T.ppl_div(z_shared, x_shared, y_shared)
+        T.ppl_max(z_shared, x_shared, y_shared)
         T.ppl_copy(z_shared, Z)
 
 
@@ -174,6 +175,7 @@ def test_public_ppl_helpers_form_one_backend_neutral_tir_contract():
         "tl.tpu.sub",
         "tl.tpu.mul",
         "tl.tpu.div",
+        "tl.tpu.max",
     }
 
 
@@ -186,7 +188,7 @@ def test_sg2260e_tpukernel_selects_only_tpukernel_instructions(sg2260e_sources):
     assert "tpu_poll()" in source
     for instruction in ("tpu_gdma_cpy_S2L(", "tpu_gdma_cpy_L2S(", "tpu_bdc_set_C(",
                         "tpu_bdc_fp_mm(", "tpu_bdc_fp_add(", "tpu_bdc_fp_sub(", "tpu_bdc_fp_mul(",
-                        "tpu_bdc_fp_div("):
+                        "tpu_bdc_fp_div(", "tpu_bdc_max("):
         assert instruction in source
     assert '#include "rvt_api.h"' not in source
     assert "rvt_kernel_start(" not in source
@@ -215,7 +217,8 @@ def test_sg2260e_rv_selects_only_rv_tensor_instructions(sg2260e_sources):
                                 "HW_ALIGN_LAYOUT"):
         assert descriptor_fragment in source
     for instruction in ("rvt_dma_ld(", "rvt_dma_st(", "rvt_cp(", "rvt_fmm2a_nn(", "rvt_fadd(",
-                        "rvt_fsub(", "rvt_fmul(", "rvt_cfg_rsqrt_iter(3)", "rvt_fdiv("):
+                        "rvt_fsub(", "rvt_fmul(", "rvt_cfg_rsqrt_iter(3)", "rvt_fdiv(",
+                        "rvt_fmax("):
         assert instruction in source
     assert "rvt_cr(1, PRECISION(DT_FP32), FP8TYPE(DT_FP32)" in source
     assert "rvt_cfg_quant(0)" in source

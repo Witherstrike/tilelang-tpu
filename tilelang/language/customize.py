@@ -340,28 +340,48 @@ def ppl_copy(
         raise TypeError("ppl_copy dst must be a Buffer, BufferRegion, or BufferLoad, "
                         f"got {type(dst).__name__}")
 
-    src_extent = get_extent(src)
-    dst_extent = get_extent(dst)
+    src_extent = list(get_extent(src))
+    dst_extent = list(get_extent(dst))
 
-    src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
-    dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
-    rank = max(len(src_extent), len(dst_extent))
-    src_extent = [1] * (rank - len(src_extent)) + src_extent
-    dst_extent = [1] * (rank - len(dst_extent)) + dst_extent
-    extent = [
-        _merge_extent(src_value, dst_value) for src_value, dst_value in zip(src_extent, dst_extent)
+    def _to_dim4(values):
+        if len(values) == 1:
+            return [1, 1, 1, values[0]]
+        if len(values) == 2:
+            return [1, values[0], 1, values[1]]
+        if len(values) == 3:
+            return [values[0], values[1], 1, values[2]]
+        if len(values) == 4:
+            return values
+        raise ValueError(f"ppl_copy supports ranks 1 through 4, got rank {len(values)}")
+
+    def _from_dim4(values, rank):
+        if rank == 1:
+            return [values[3]]
+        if rank == 2:
+            return [values[1], values[3]]
+        if rank == 3:
+            return [values[0], values[1], values[3]]
+        if rank == 4:
+            return values
+        raise AssertionError(f"unexpected validated rank {rank}")
+
+    merged_dim4 = [
+        _merge_extent(src_value, dst_value)
+        for src_value, dst_value in zip(_to_dim4(src_extent), _to_dim4(dst_extent))
     ]
+    src_region_extent = _from_dim4(merged_dim4, len(src_extent))
+    dst_region_extent = _from_dim4(merged_dim4, len(dst_extent))
 
-    def _to_region(data, access_type):
+    def _to_region(data, access_type, region_extent):
         if isinstance(data, Buffer):
             return buffer_to_tile_region(data, access_type)
         elif isinstance(data, BufferRegion):
             return buffer_region_to_tile_region(data, access_type)
         else:
-            return buffer_load_to_tile_region(data, access_type, extent)
+            return buffer_load_to_tile_region(data, access_type, region_extent)
 
-    src = _to_region(src, "r")
-    dst = _to_region(dst, "w")
+    src = _to_region(src, "r", src_region_extent)
+    dst = _to_region(dst, "w", dst_region_extent)
     return T.call_extern("handle", "tl.tpu.copy", src, dst)
 
 
@@ -481,6 +501,28 @@ def ppl_mul(out, inp1, inp2):
     inpptr1 = _tpu_tensor_region(inp1, "r")
     inpptr2 = _tpu_tensor_region(inp2, "r")
     return T.call_extern("handle", "tl.tpu.mul", outptr, inpptr1, inpptr2)
+
+
+def ppl_max(out, inp1, inp2):
+    """Compute elementwise maximum ``out = max(inp1, inp2)``.
+
+    The portable semantic maps to ``tpu_bdc_max`` on TPU-Kernel and
+    ``rvt_fmax`` on RV Tensor.  It supports equal rank-2 tiles and the same
+    W-dimension broadcast form as the other portable elementwise operations.
+    FP8 is accepted for TPU-Kernel targets and rejected by RV Tensor codegen.
+    The TPU-Kernel selector uses the generic ``tpu_bdc_max`` entry point whose
+    dtype argument distinguishes E4M3 and E5M2.
+    """
+    for name, buffer in (("out", out), ("inp1", inp1), ("inp2", inp2)):
+        _require_local_buffer(name, buffer)
+        _require_rank(name, buffer, 2)
+        _require_dtype(name, buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
+    _require_same_dtype("ppl_max", out, inp1, inp2)
+    _require_elementwise_shapes("ppl_max", out, inp1, inp2)
+    outptr = _tpu_tensor_region(out, "w")
+    inpptr1 = _tpu_tensor_region(inp1, "r")
+    inpptr2 = _tpu_tensor_region(inp2, "r")
+    return T.call_extern("handle", "tl.tpu.max", outptr, inpptr1, inpptr2)
 
 
 @T.macro

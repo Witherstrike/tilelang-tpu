@@ -220,7 +220,7 @@ void CodeGenTileLangTPU::EmitTPUKernelElementwise(
     const std::string &src0, const std::string &src1, DataType dtype,
     const std::vector<int> &src0_shape, const std::vector<int> &src1_shape) {
   ICHECK(operation == "add" || operation == "sub" || operation == "mul" ||
-         operation == "div")
+         operation == "div" || operation == "max")
       << "Unsupported TPU-Kernel elementwise operation " << operation;
   const std::string dtype_name = TPUKernelDTypeName(dtype);
   std::string src1_stride;
@@ -240,7 +240,8 @@ void CodeGenTileLangTPU::EmitTPUKernelElementwise(
         "(" + src1 + ".default_stride ? NULL : &" + src1 + ".stride), ";
   }
   PrintIndent();
-  stream << "tpu_bdc_fp_" << operation << "(" << dst << ".addr, " << src0
+  stream << (operation == "max" ? "tpu_bdc_max" : "tpu_bdc_fp_" + operation)
+         << "(" << dst << ".addr, " << src0
          << ".addr, " << src1 << ".addr, &" << dst << ".shape, (" << dst
          << ".default_stride ? NULL : &" << dst << ".stride), (" << src0
          << ".default_stride ? NULL : &" << src0 << ".stride), " << src1_stride

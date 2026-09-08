@@ -2,7 +2,7 @@
   "$schema": "./schema.json",
   "schema_version": "1.2.0",
   "contract_id": "tilelang-tpu.current-op-capabilities",
-  "reviewed_at": "2026-09-07T20:38:29+08:00",
+  "reviewed_at": "2026-09-08T00:00:00+08:00",
   "validated_source_revision": "e5e308797640fa2c3e789cdddd9ebed9246ddd47",
   "scope": {
     "description": "Current TileLang TPU frontend/internal operation contract for BM1690 TPU-Kernel and SG2260E TPU-Kernel/RV, with evidence scoped by dtype, variant, target, and execution mode.",
@@ -14,6 +14,7 @@
       "sub",
       "mul",
       "div",
+      "max",
       "scalar",
       "exp",
       "sigmoid",
@@ -34,7 +35,7 @@
   "invariants": [
     {
       "id": "semantic-buffer.region-abi",
-      "applies_to_operations": ["copy", "fill", "gemm", "add", "sub", "mul", "div", "scalar", "exp", "sigmoid", "rsqrt", "reduce", "gather", "topk", "rope"],
+      "applies_to_operations": ["copy", "fill", "gemm", "add", "sub", "mul", "div", "max", "scalar", "exp", "sigmoid", "rsqrt", "reduce", "gather", "topk", "rope"],
       "category": "memory",
       "expression": "every buffer operand crosses the typed TPU semantic ABI as tl.region(BufferLoad, access_mask, logical_extents); non-copy operations require a zero-min whole-buffer region whose dtype, source rank, normalized shape, scope, and storage identity match a compiler-owned descriptor; copy validates its explicitly selected subregion",
       "status": "enforced",
@@ -298,6 +299,29 @@
         {"condition": "Selected programming model lacks the exact base-float dtype/layout selector or descriptor representation", "phase": "codegen", "action": "abort_compile", "diagnostic": "Reject before emitting a division instruction.", "conformance": "implemented"}
       ],
       "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
+    },
+    {
+      "id": "max",
+      "frontend_symbols": ["T.ppl_max"],
+      "internal_symbols": ["tl.tpu.max"],
+      "backend_applicability": ["tpukernel", "rv"],
+      "semantics": "Compute elementwise out = maximum(lhs, rhs) on local rank-2 tiles, with optional rhs W broadcast.",
+      "parameters": [
+        {"name": "out", "kind": "buffer", "direction": "out", "required": true, "dtype_role": "payload", "memory_scope": "local", "description": "Output tile."},
+        {"name": "lhs", "kind": "buffer", "direction": "in", "required": true, "dtype_role": "payload", "memory_scope": "local", "description": "Left input tile."},
+        {"name": "rhs", "kind": "buffer", "direction": "in", "required": true, "dtype_role": "payload", "memory_scope": "local", "description": "Right input tile or shape-(M,1) W-broadcast tile."}
+      ],
+      "effects": {"reads": ["lhs", "rhs"], "writes": ["out"], "read_writes": [], "conditional": [], "notes": []},
+      "constraints": [
+        {"id": "max.matrix", "category": "layout", "expression": "out,lhs,rhs are local rank-2 tiles with recovered N=1,H=1", "status": "enforced", "enforced_at": "frontend", "description": "The public portable semantic accepts only local two-dimensional tiles.", "evidence_ids": ["src.frontend", "src.codegen-common"]},
+        {"id": "max.shape", "category": "shape", "expression": "shape(out)==shape(lhs) and (shape(rhs)==shape(out) or shape(rhs)==(M,1))", "status": "enforced", "enforced_at": "frontend", "description": "Only equal-shape elementwise maximum and rhs W broadcast are accepted.", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-rv", "test.max-source-selection"]},
+        {"id": "max.float", "category": "dtype", "expression": "dtype(out)==dtype(lhs)==dtype(rhs) and (dtype(out) in {float16,bfloat16,float32} or (backend==tpukernel and dtype(out) in {e4m3_float8,e5m2_float8}))", "status": "enforced", "enforced_at": "codegen", "description": "The public semantic accepts the two FP8 formats because target selection follows frontend construction. TPU-Kernel lowers them through generic tpu_bdc_max; RV Tensor rejects FP8 at codegen and remains fail-closed.", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "test.max-source-selection"]}
+      ],
+      "failure_policy": [
+        {"condition": "Unsupported dtype, nonlocal or non-rank-2 operand, dtype mismatch, or invalid broadcast shape", "phase": "frontend", "action": "reject", "diagnostic": "Reject before forming tl.tpu.max.", "conformance": "implemented"},
+        {"condition": "A direct semantic call requests an uncharacterized dtype or an invalid target-specific selector", "phase": "codegen", "action": "abort_compile", "diagnostic": "Fail closed before emitting tpu_bdc_max or rvt_fmax.", "conformance": "implemented"}
+      ],
+      "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv", "src.effects", "test.max-source-selection"]
     },
     {
       "id": "scalar",
@@ -627,6 +651,16 @@
       "observed_at": "2026-09-07T00:00:00+08:00",
       "time_precision": "day",
       "summary": "Source-only target-specific GEMM selection plus positive descriptor-equivalent presentation aliases and fail-closed rank/shape-changing T.view, T.reshape, and direct T.Tensor aliases. This file alone is not a numerical-result claim."
+    },
+    {
+      "id": "test.max-source-selection",
+      "kind": "test_source",
+      "source_root": "repo",
+      "path": "testing/python/jit/test_tpu_frontend_contract.py",
+      "locator": "test_portable_max_selects_backend_instruction, test_tpukernel_fp8_max_selects_generic_instruction, test_rv_fp8_max_fails_closed_at_codegen",
+      "observed_at": "2026-09-08T00:00:00+08:00",
+      "time_precision": "day",
+      "summary": "Source-only checks select tpu_bdc_max for BM1690/SG2260E TPU-Kernel and rvt_fmax for SG2260E RV across FP16/BF16/FP32 W-broadcast tiles. TPU-Kernel additionally emits the generic tpu_bdc_max selector for E4M3/E5M2, while SG2260E RV rejects both FP8 formats at codegen. This evidence makes no CModel or PCIe numerical claim."
     },
     {
       "id": "test.descriptor-contract",
@@ -1251,6 +1285,16 @@
       "observed_at": "2026-09-05T18:02:41+08:00",
       "time_precision": "second",
       "summary": "Ignored local artifact records 40/40 passed: two chips times E4M3/E5M2 times copy, zero fill, both FP32 cast directions, add/sub/mul, NN overwrite/accumulate GEMM, and NT overwrite GEMM; every case retained raw traces."
+    },
+    {
+      "id": "artifact.cmodel-fp8-max-dirty-probe",
+      "kind": "runtime_report",
+      "source_root": "artifacts",
+      "path": "2026-09-08/fp8-max-cmodel-probe/summary.json",
+      "locator": "complete=true and all 8 exploratory max cases passed",
+      "observed_at": "2026-09-08T00:00:00+08:00",
+      "time_precision": "day",
+      "summary": "Exploratory dirty-worktree CModel probe passed 8/8: BM1690 and SG2260E TPU-Kernel, E4M3/E5M2, equal-shape and rhs W-broadcast tpu_bdc_max. Every result matched the selected operand's FP8 encoding byte-for-byte and retained a non-empty raw trace. Because the runner recorded implementation_worktree_dirty=true, this observation is deliberately non-authorizing and cannot promote a canonical numerical stage."
     },
     {
       "id": "artifact.cmodel-fp8-final",
@@ -8477,6 +8521,104 @@
             }, "pcie_numeric_passed": {"status": "passed", "evidence_ids": ["test.fp8-worker", "artifact.pcie-sg-tpukernel-fp8-final"], "scope": "Current clean e5e3087 SG2260E device 0; E4M3/E5M2 interleaved RoPE add composite on (4,32), encoded-byte oracle with atol 0.5 fallback", "reason": "The runner-recorded clean e5e3087 SG2260E/TPU-Kernel PCIe matrix passed every required case for this exact selector in both FP8 formats, with a raw trace and valid decoded nanosecond timing for each case."}, "sdk_declared": {"status": "not_applicable", "evidence_ids": [], "scope": "standalone FP8 rope_add", "reason": "RoPE add is a TileLang composition of declared FP8 add, not a standalone SDK operation."}}}
       },
       "evidence_ids": ["artifact.cmodel-fp8-final"]
+    },
+    {
+      "id": "max.fp8",
+      "operation_id": "max",
+      "variant": "equal-shape and rhs W-broadcast FP8 maximum on shape (1,64)",
+      "dtype_bindings": [
+        {"out": "e4m3_float8", "lhs": "e4m3_float8", "rhs": "e4m3_float8"},
+        {"out": "e5m2_float8", "lhs": "e5m2_float8", "rhs": "e5m2_float8"}
+      ],
+      "constraints": ["max.matrix", "max.shape", "max.float"],
+      "target_results": {
+        "bm1690.tpukernel": {
+          "support_status": "supported",
+          "implementation_conformance": "conforming",
+          "reason": "The public selector emits generic tpu_bdc_max with E4M3/E5M2 dtype tokens; canonical numerical promotion awaits a clean-source rerun.",
+          "verification": {
+            "declared": {"status": "passed", "evidence_ids": ["src.frontend", "test.max-source-selection"], "scope": "same-format E4M3/E5M2 local rank-2 maximum", "reason": "The public helper accepts both FP8 formats with the same strict shape and dtype equality rules as other elementwise selectors."},
+            "codegen_passed": {"status": "passed", "evidence_ids": ["src.codegen-common", "src.codegen-tpukernel", "test.max-source-selection"], "scope": "BM1690 TPU-Kernel E4M3/E5M2 rhs W-broadcast source emission", "reason": "The source test observes tpu_bdc_max, the requested FP8 dtype token, and a zero-W-stride broadcast descriptor for both formats."},
+            "cmodel_numeric_passed": {"status": "unverified", "evidence_ids": ["artifact.cmodel-fp8-max-dirty-probe"], "scope": "BM1690 CModel E4M3/E5M2 dense (1,64) and rhs (1,1) W-broadcast maximum", "reason": "A fail-stop 4/4 BM1690 subset matched selected operand encodings byte-for-byte, but its runner-recorded implementation worktree was dirty; it is an observation pending a clean canonical rerun."},
+            "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "BM1690 PCIe FP8 maximum", "reason": "No BM1690 board experiment is recorded."},
+            "sdk_declared": {"status": "unverified", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "tpub_7_1 generic tpu_bdc_max/fmax with FP8 dtype", "reason": "The header exposes a generic data_type_t entry point and PPL exposes a same-type template, but neither reviewed prose section enumerates FP8 for fmax."}
+          }
+        },
+        "sg2260e.tpukernel": {
+          "support_status": "supported",
+          "implementation_conformance": "conforming",
+          "reason": "The public selector emits generic tpu_bdc_max with E4M3/E5M2 dtype tokens; canonical numerical promotion awaits a clean-source rerun.",
+          "verification": {
+            "declared": {"status": "passed", "evidence_ids": ["src.frontend", "test.max-source-selection"], "scope": "same-format E4M3/E5M2 local rank-2 maximum", "reason": "The public helper accepts both FP8 formats and defers programming-model support to target-specific codegen."},
+            "codegen_passed": {"status": "passed", "evidence_ids": ["src.codegen-common", "src.codegen-tpukernel", "test.max-source-selection"], "scope": "SG2260E TPU-Kernel E4M3/E5M2 rhs W-broadcast source emission", "reason": "The source test observes tpu_bdc_max, the requested FP8 dtype token, and a zero-W-stride broadcast descriptor for both formats."},
+            "cmodel_numeric_passed": {"status": "unverified", "evidence_ids": ["artifact.cmodel-fp8-max-dirty-probe"], "scope": "SG2260E TPU-Kernel CModel E4M3/E5M2 dense (1,64) and rhs (1,1) W-broadcast maximum", "reason": "A fail-stop 4/4 SG2260E subset matched selected operand encodings byte-for-byte, but its runner-recorded implementation worktree was dirty; it is an observation pending a clean canonical rerun."},
+            "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "SG2260E PCIe FP8 maximum", "reason": "No supervised board experiment has been run for this newly exposed selector."},
+            "sdk_declared": {"status": "unverified", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71e"], "scope": "tpub_7_1_e generic tpu_bdc_max/fmax with FP8 dtype", "reason": "The header exposes a generic data_type_t entry point and PPL exposes a same-type template, but neither reviewed prose section enumerates FP8 for fmax."}
+          }
+        },
+        "sg2260e.rv": {
+          "support_status": "unsupported",
+          "implementation_conformance": "conforming",
+          "reason": "The public target-independent semantic can be formed, but current RV Tensor FP8 mapping remains intentionally absent and codegen fails closed.",
+          "verification": {
+            "declared": {"status": "passed", "evidence_ids": ["src.frontend", "test.max-source-selection"], "scope": "generic same-format E4M3/E5M2 local maximum", "reason": "Public construction is target-independent."},
+            "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-common", "src.codegen-rv", "test.max-source-selection"], "scope": "SG2260E RV E4M3/E5M2 maximum", "reason": "The programming-model guard rejects both formats before RV instruction emission."},
+            "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV CModel FP8 maximum", "reason": "Codegen rejects this selector."},
+            "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV PCIe FP8 maximum", "reason": "Codegen rejects this selector."},
+            "sdk_declared": {"status": "passed", "evidence_ids": ["manual.rv-isa"], "scope": "RVT FP8 fmax", "reason": "The ISA declares FP8 encodings, but TileLang does not map them in the current RV backend."}
+          }
+        }
+      },
+      "evidence_ids": ["test.max-source-selection", "artifact.cmodel-fp8-max-dirty-probe"],
+      "notes": ["The dirty-source probe covers finite, exactly representable inputs only. NaN, infinity, signed-zero tie behavior, larger or dynamic shapes, PCIe execution, and every RV FP8 selector remain outside the claim."]
+    },
+    {
+      "id": "max.base-float-broadcast-source",
+      "operation_id": "max",
+      "variant": "rhs W broadcast on local shape-(4,32) tiles",
+      "dtype_bindings": [
+        {"out": "float16", "lhs": "float16", "rhs": "float16"},
+        {"out": "bfloat16", "lhs": "bfloat16", "rhs": "bfloat16"},
+        {"out": "float32", "lhs": "float32", "rhs": "float32"}
+      ],
+      "constraints": ["max.matrix", "max.shape", "max.float"],
+      "target_results": {
+        "bm1690.tpukernel": {
+          "support_status": "supported",
+          "implementation_conformance": "conforming",
+          "reason": "The exact public selector emits tpu_bdc_max for all three base floating dtypes; numerical execution is not yet recorded on the current implementation.",
+          "verification": {
+            "declared": {"status": "passed", "evidence_ids": ["src.frontend", "test.max-source-selection"], "scope": "T.ppl_max with lhs/out shape (4,32), rhs shape (4,1), and matching FP16/BF16/FP32 dtype", "reason": "The public helper admits the exact local rank-2 W-broadcast forms and rejects uncharacterized FP8."},
+            "codegen_passed": {"status": "passed", "evidence_ids": ["src.codegen-common", "src.codegen-tpukernel", "test.max-source-selection"], "scope": "BM1690 TPU-Kernel FP16/BF16/FP32 W-broadcast maximum source emission", "reason": "The parameterized source test observes tpu_bdc_max for every listed binding."},
+            "cmodel_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "BM1690 CModel FP16/BF16/FP32 W-broadcast maximum", "reason": "The current source-selection test does not execute a numerical oracle; this stage awaits the final matrix."},
+            "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "BM1690 PCIe FP16/BF16/FP32 W-broadcast maximum", "reason": "No BM1690 board result is recorded."}
+          }
+        },
+        "sg2260e.tpukernel": {
+          "support_status": "supported",
+          "implementation_conformance": "conforming",
+          "reason": "The exact public selector emits tpu_bdc_max for all three base floating dtypes; numerical execution is not yet recorded on the current implementation.",
+          "verification": {
+            "declared": {"status": "passed", "evidence_ids": ["src.frontend", "test.max-source-selection"], "scope": "T.ppl_max with lhs/out shape (4,32), rhs shape (4,1), and matching FP16/BF16/FP32 dtype", "reason": "The public helper is target-independent and admits the exact W-broadcast forms."},
+            "codegen_passed": {"status": "passed", "evidence_ids": ["src.codegen-common", "src.codegen-tpukernel", "test.max-source-selection"], "scope": "SG2260E TPU-Kernel FP16/BF16/FP32 W-broadcast maximum source emission", "reason": "The parameterized source test observes tpu_bdc_max for every listed binding."},
+            "cmodel_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "SG2260E TPU-Kernel CModel FP16/BF16/FP32 W-broadcast maximum", "reason": "The current source-selection test does not execute a numerical oracle; this stage awaits the final matrix."},
+            "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "SG2260E TPU-Kernel PCIe FP16/BF16/FP32 W-broadcast maximum", "reason": "This selector has not yet completed the current supervised board matrix."}
+          }
+        },
+        "sg2260e.rv": {
+          "support_status": "supported",
+          "implementation_conformance": "conforming",
+          "reason": "The exact public selector emits rvt_fmax for all three base floating dtypes; numerical execution is not yet recorded on the current implementation.",
+          "verification": {
+            "declared": {"status": "passed", "evidence_ids": ["src.frontend", "test.max-source-selection"], "scope": "T.ppl_max with lhs/out shape (4,32), rhs shape (4,1), and matching FP16/BF16/FP32 dtype", "reason": "The same portable public helper reaches RV target selection for every listed binding."},
+            "codegen_passed": {"status": "passed", "evidence_ids": ["src.codegen-common", "src.codegen-rv", "test.max-source-selection"], "scope": "SG2260E RV FP16/BF16/FP32 W-broadcast maximum source emission", "reason": "The parameterized source test observes rvt_fmax for every listed binding."},
+            "cmodel_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "SG2260E RV CModel FP16/BF16/FP32 W-broadcast maximum", "reason": "The current source-selection test does not execute a numerical oracle; this stage awaits the final matrix."},
+            "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "SG2260E RV PCIe FP16/BF16/FP32 W-broadcast maximum", "reason": "This selector has not yet completed the current supervised board matrix."}
+          }
+        }
+      },
+      "evidence_ids": ["test.max-source-selection"],
+      "notes": ["Source emission is established for the exact W-broadcast selector; equal-shape and all numerical stages remain outside this capability until separately evidenced."]
     }
   ]
 }

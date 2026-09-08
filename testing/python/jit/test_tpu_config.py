@@ -75,6 +75,33 @@ def test_direct_tpu_phase_entrypoints_require_a_complete_target(phase):
         phase(mod, incomplete)
 
 
+@pytest.mark.parametrize("phase", [
+    phase_module.LowerAndLegalize,
+    phase_module.OptimizeForTarget,
+])
+@pytest.mark.parametrize("function_target,requested_target", [
+    (
+        _tpu_target("bm1690", "tpukernel"),
+        _tpu_target("sg2260e", "tpukernel"),
+    ),
+    (
+        _tpu_target("sg2260e", "rv"),
+        _tpu_target("sg2260e", "tpukernel"),
+    ),
+])
+def test_direct_tpu_phase_entrypoints_reject_a_different_bound_identity(
+        phase, function_target, requested_target):
+    prim_func = tvm.tir.PrimFunc(
+        [],
+        tvm.tir.Evaluate(0),
+    ).with_attr("global_symbol", "phase_target_mismatch").with_attr(
+        "target", tvm.target.Target(function_target))
+    mod = tvm.IRModule({"phase_target_mismatch": prim_func})
+
+    with pytest.raises(ValueError, match=rf"{phase.__name__} target identity mismatch"):
+        phase(mod, tvm.target.Target(requested_target))
+
+
 def test_tpu_contract_is_revalidated_before_address_assignment(monkeypatch):
     target = _tpu_target("sg2260e", "tpukernel")
     original = tvm.tir.PrimFunc(

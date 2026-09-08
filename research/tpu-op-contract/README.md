@@ -40,9 +40,11 @@
 
 ### 2.1 全局 semantic buffer ABI
 
-Schema 1.1 起，`invariants` 记录跨 op 的不可绕过规则。当前 `semantic-buffer.region-abi` 覆盖全部 15 个 operation：每个 typed semantic buffer 参数必须是 `tl.region(BufferLoad, access_mask, logical_extents)`，不保留裸 `tir.tvm_access_ptr` 兼容入口。非 copy op 要求零起点 whole-buffer region；copy 才能携带显式子区间，并额外校验连续 Ramp、bounds 和 local C-axis 起点。Schema 1.2 又把 ignored runtime artifacts 从 tracked repo evidence 中分离，并加入不具当前上板授权意义的 `historical_passed` 状态。
+Schema 1.1 起，`invariants` 记录跨 op 的不可绕过规则。当前 `semantic-buffer.region-abi` 覆盖全部 16 个 operation：每个 typed semantic buffer 参数必须是 `tl.region(BufferLoad, access_mask, logical_extents)`，不保留裸 `tir.tvm_access_ptr` 兼容入口。非 copy op 要求零起点 whole-buffer region；copy 才能携带显式子区间，并额外校验连续 Ramp、bounds 和 local C-axis 起点。Schema 1.2 又把 ignored runtime artifacts 从 tracked repo evidence 中分离，并加入不具当前上板授权意义的 `historical_passed` 状态。
 
 这条 ABI 的目的不是改变用户侧 `T.ppl_*` 表达，而是把 logical Buffer 的 dtype、原始 rank、shape、scope 与 storage identity 一直保留到 native codegen。native 层把这些字段与 compiler-owned descriptor 逐项核对；因此改变 rank/shape/dtype/scope 的 `T.view`、`T.reshape` 或直接 `T.Tensor(..., data=...)` 会被拒绝，不会静默使用 owner descriptor 执行。descriptor 完全等价且作为唯一表示的 presentation alias 仍合法。region 的 mask、返回 dtype、rank、extent 或 marker 结构即使绕开公开 frontend 人工构造，也会在 residual verifier 或 native parser fail-closed。
+
+本轮新增的 portable `T.ppl_max` / `tl.tpu.max` 也服从同一 region ABI。精确的 `(4,32)` lhs/out 与 `(4,1)` rhs W-broadcast selector 已在 FP16/BF16/FP32 上完成三组合法 target 的 source emission 检查：TPU-Kernel 选择 `tpu_bdc_max`，SG2260E/RV 选择 `rvt_fmax`。TPU-Kernel 又将同一公开语义扩展到 E4M3/E5M2，BM1690 与 SG2260E source 分别生成带对应 dtype token 的通用 `tpu_bdc_max`；SG2260E/RV 的两种 FP8 binding 仍在 codegen 显式拒绝。基础浮点与 FP8 的 canonical 数值阶段仍独立判定，source emission 不能替代 CModel 或 PCIe 证据。
 
 ## 3. 已验证边界
 
@@ -82,12 +84,15 @@ Schema 1.1 起，`invariants` 记录跨 op 的不可绕过规则。当前 `seman
 | copy | 同格式 local roundtrip 与 S2S；FP32 与同一 FP8 格式双向本地 cast | fail-closed |
 | fill | 只开放零值 | fail-closed |
 | add/sub/mul | 等形 `(1,64)` 及 rhs `(1,1)` W broadcast | ISA 有声明，TileLang 尚未映射 |
+| max | 等形 `(1,64)` 及 rhs `(1,1)` W broadcast 的 E4M3/E5M2 已接入 `tpu_bdc_max`；当前仅有 dirty-source 8/8 CModel 探针，等待 clean canonical 重跑 | fail-closed |
 | div | 不支持；已审阅接口的 operand 范围不含 FP8 | 不支持 |
 | GEMM | 同型 FP8 A/B、FP32 C；NN/NT overwrite 与 accumulate 均已通过 | ISA 有声明，TileLang 尚未映射 |
 | scalar add/mul | 同型 E4M3/E5M2，FP32 常量先 round-to-even cast；默认非饱和语义 | 不适用 |
 | gather | `param=(17,32)`、UINT32 `index=(7,1)`；两格式均按 selected encoded bytes 精确验证 | 不适用 |
 | rope | `(4,32)` 偶/奇 lane FP8 add composite；两格式均已验证 | 不适用 |
 | exp/sigmoid/rsqrt/reduce/topk | 当前生产路径不开放 FP8 | 不适用 |
+
+[FP8 max 探针](../artifacts/2026-09-08/fp8-max-cmodel-probe/summary.json) 以 fail-stop fresh process 依次覆盖 `2 chips × 2 formats × {dense,W-broadcast}`，8/8 均通过；每个输出都必须与被选中输入的 FP8 编码逐字节相同，未使用算术 op 的误差容差兜底。BM1690 每例保留 48 个 raw trace 文件，SG2260E 每例保留 24 个。该 summary 同时诚实记录 `implementation_worktree_dirty=true`，所以这里只把它作为候选实现的观察结果，不将 machine contract 的 `cmodel_numeric_passed` 提升为 `passed`。能力边界只覆盖有限、可精确表示输入和上述固定 shape；NaN、infinity、signed-zero tie、更大或动态 shape、PCIe 以及 RV FP8 都没有外推。
 
 PPL 1.7 高层 DSL 和当前 TileLang 使用同一 scalar 序列：FP32 常量以 round-to-even cast 成目标 FP8，再调用通用 `tpu_bdc_fp_add_C/tpu_bdc_fp_mul_C`。[PPL probe](../artifacts/2026-09-05/fp8-scalar-ppl-probe/summary.json) 在两芯片的 moderate 与 boundary 输入上完成；当前公共路径随后 8/8 通过。历史 E4M3 direct `tpu_bdc_fp8_add_C` 探针在 [SG2260E](../artifacts/2026-09-05/fp8-scalar-cmodel/summary.json) 与 [BM1690](../artifacts/2026-09-05/fp8-scalar-bm1690-cmodel/summary.json) 的 exit 139 已定位为非法参数：FP8 dst/src 搭配 FP32 `C_dtype` 违反 `sizeof(C_dtype) <= sizeof(dst_dtype)`。它不是硬件不支持证据。当前只承诺默认非饱和行为；E4M3 overflow 为 NaN、E5M2 为 infinity，不暴露可选 saturation。
 

@@ -4,7 +4,10 @@
 
 本实现把 TPU 支持拆为互不混淆的三条选择轴：物理芯片、设备编程模型和 host 运行时。用户仍以 `T.ppl_*` 编写 copy、fill、GEMM 和逐元素算子；这些入口现在先生成中立的 `tl.tpu.*` TIR，再由后端选择传统 TPU-Kernel 或 SG2260E RV Tensor（RVT）指令。
 
-当前已覆盖的中立算子是 `copy`、`fill`、`gemm`、`add`、`sub`、`mul` 和 `div`。面向用户的示例位于 `tpu_demo/matmul/tpu_test_matmul_fp16.py` 与 `tpu_demo/elementwise/tpu_test_elementwise.py`。
+当前已覆盖的中立算子是 `copy`、`fill`、`gemm`、`add`、`sub`、`mul`、`div` 和
+`max`。面向用户的统一入口与 36 个高层 case 位于 `tpu_demo/run.py`、
+`tpu_demo/cases.py`；逐元素四则与 matmul 的 FP16/BF16/FP32 共 15 个 case 可选择 RV，
+完整使用与晋级流程见 `tpu_demo/README.md`。
 
 这里的 “PPL” 仅指 PPL 1.7 SDK/ABI；它不是 TileLang 的编程模型名称。源码按职责拆为 `codegen_tpu_common.cc`、`codegen_tpukernel.cc` 和 `codegen_rv.cc`。
 
@@ -38,7 +41,7 @@ kernel = tilelang.compile(
 
 ```text
 T.ppl_* 前端
-    │  生成 tl.tpu.{copy,fill,gemm,add,sub,mul,div}
+    │  生成 tl.tpu.{copy,fill,gemm,add,sub,mul,div,max}
     ▼
 TileLang TPU lowering + AddressAssign
     │  target: tpu -mcpu=<chip> -tpu-programming-model=<model>
@@ -61,7 +64,7 @@ TileLang TPU lowering + AddressAssign
 | `ppl_copy` | `tl.tpu.copy` | S2L/L2S/S2S/L2L GDMA/BDC；本地 cast | `rvt_dma_ld/st/cp`，本地浮点转换用 `rvt_cvt_f2f` | 两端静态 region 的规范化 N/C/H/W extent 必须相同。SG2260E/RV 的 FP16/FP32 G2L→L2L→L2S 与独立 S2S 已在 `(4,32)` 精确 CModel 验证。跨 dtype 仅本地；TPU-Kernel 拒绝 FP16↔BF16。RV 转换类型闭集包含 FP16/BF16/FP32，但当前只有 FP16→BF16 精确 codegen 证据，两向均无数值证据。 |
 | `ppl_fill` | `tl.tpu.fill` | `tpu_bdc_set_C` | typed CR + `rvt_cp` | RV 当前只开放零填充，用于累加器初始化。 |
 | `ppl_gemm` | `tl.tpu.gemm` | `tpu_bdc_fp_mm` / right-transpose 变体；另有已验证的同格式 FP8 A/B + FP32 C 路径 | `rvt_fmm2[a]_{nn,nt}` | RV 当前只映射 FP16/BF16；local N=H=1；无 `transpose_A`；M/N/K 在 `[1,65535]`。`accumulate` 显式表达读写 C；NT accumulate 的 `rvt_fmm2a_nt` 已有精确源码选择回归但尚无数值证据。TPU-Kernel 的 FP8 NT accumulate 是独立 selector，不能外推给 RV。 |
-| `ppl_add/subtract/mul/div` | `tl.tpu.{add,sub,mul,div}` | `tpu_bdc_fp_*`；add/sub/mul 另有已验证 FP8 路径 | `rvt_fadd/fsub/fmul/fdiv` | RV 当前限同 dtype FP16/BF16/FP32；local N=H=1；右操作数可作 W 维广播。`div` 配置 RV rsqrt 迭代并以容差验证。TPU-Kernel FP8 div 与全部 RV FP8 映射仍未开放。 |
+| `ppl_add/subtract/mul/div/max` | `tl.tpu.{add,sub,mul,div,max}` | 四则为 `tpu_bdc_fp_*`，max 为 `tpu_bdc_max`；add/sub/mul/max 另有已验证候选 FP8 路径 | `rvt_fadd/fsub/fmul/fdiv/fmax` | RV 当前限同 dtype FP16/BF16/FP32；local N=H=1；右操作数可作 W 维广播。RV broadcast 用逻辑 `(M,W)`、W stride=0 的 FREE_LAYOUT descriptor，避免把 `(M,1)` 错当成由 peer 自动扩展。`div` 配置 RV rsqrt 迭代并以容差验证。TPU-Kernel FP8 div 与全部 RV FP8 映射仍未开放。 |
 
 算子不支持的 dtype、形状、布局、尾块和别名组合必须在编译期报错；不以静默 fallback 或错误指令换取“可编译”。AddressAssign 以写/读写 effect 区分 GEMM 的覆盖与累加，保证 C 的 bank/生存期分析与指令语义一致。
 

@@ -665,8 +665,9 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
     const bool is_fp8 =
         dst_dtype.is_e4m3_float8() || dst_dtype.is_e5m2_float8();
     if (is_fp8) {
-      ICHECK_NE(operation, "div")
-          << "TileLang TPU division has no validated FP8 instruction";
+      ICHECK(operation != "div")
+          << "TileLang TPU " << operation
+          << " has no validated FP8 instruction contract";
       ICHECK_EQ(target_programming_model_, "tpukernel")
           << "FP8 " << operation
           << " is validated only for the TPU-Kernel programming model";
@@ -728,7 +729,7 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           op_name == "tl.tpu.copy" || op_name == "tl.tpu.fill" ||
           op_name == "tl.tpu.gemm" || op_name == "tl.tpu.add" ||
           op_name == "tl.tpu.sub" || op_name == "tl.tpu.mul" ||
-          op_name == "tl.tpu.div";
+          op_name == "tl.tpu.div" || op_name == "tl.tpu.max";
       ICHECK(is_supported_portable_op)
           << "Unknown backend-neutral TPU operation " << op_name;
       ICHECK_EQ(rvt_direct_call_count_, 0)
@@ -1009,7 +1010,9 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
         ICHECK(src_shape4 == dst_shape4)
             << op_name
             << " requires source and destination regions to have "
-               "the same normalized N/C/H/W extents";
+               "the same normalized N/C/H/W extents; source="
+            << vector2string(src_shape4)
+            << ", destination=" << vector2string(dst_shape4);
         auto [src_var_id, src_flag, src_dtype] =
             process_copy(src, src_ranges, "src");
         auto [dst_var_id, dst_flag, dst_dtype] =
@@ -1163,6 +1166,8 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
       handle_elementwise("add");
     } else if (op_name == "tl.tpu.div") {
       handle_elementwise("div");
+    } else if (op_name == "tl.tpu.max") {
+      handle_elementwise("max");
     } else if (is_tpukernel_extern) {
       ICHECK(TryEmitTPUKernelSemantic(op, op_name))
           << "Unknown TPU-Kernel semantic operation " << op_name;

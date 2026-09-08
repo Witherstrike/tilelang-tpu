@@ -22,6 +22,7 @@ _PORTABLE_EXTERNS = {
     "tl.tpu.div",
     "tl.tpu.fill",
     "tl.tpu.gemm",
+    "tl.tpu.max",
     "tl.tpu.mul",
     "tl.tpu.sub",
 }
