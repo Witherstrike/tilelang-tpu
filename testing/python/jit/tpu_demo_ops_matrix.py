@@ -52,6 +52,7 @@ MATRIX_KIND = "tpu_demo_ops"
 SCHEMA_VERSION = 1
 CMODEL_CONFIGS = TARGET_CONFIGS
 PCIE_CONFIGS = tuple(pair for pair in TARGET_CONFIGS if pair[0] == "sg2260e")
+_WORKER_TOOL_PATH = os.pathsep.join(("/usr/bin", "/bin"))
 
 
 def parse_args() -> argparse.Namespace:
@@ -151,6 +152,12 @@ def worker_environment(repo_root: Path, runtime_mode: str,
     inherited_pythonpath = os.environ.get("PYTHONPATH", "")
     environment = {
         "PPL_PROJECT_ROOT": str(Path(ppl_root).expanduser().resolve()),
+        # Workers receive an allowlist environment rather than the caller's
+        # shell state. Keep the host tool search path deterministic while
+        # retaining the binutils required by /usr/bin/cc and /usr/bin/c++
+        # (notably collect2's lookup of ld). PCIe's cross-GCC is invoked by
+        # absolute path and locates its companion tools from its SDK prefix.
+        "PATH": _WORKER_TOOL_PATH,
         "PYTHONPATH": os.pathsep.join(
             item for item in (str(repo_root), inherited_pythonpath) if item
         ),

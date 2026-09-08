@@ -3,6 +3,8 @@
 """Pure safety-policy tests for the full TPU-Kernel numerical matrix."""
 
 import json
+import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -65,6 +67,29 @@ def _toolchain_identity(runtime_mode):
 
 def _case(case_id="add.float16.dense"):
     return next(case for case in matrix.build_case_specs() if case.case_id == case_id)
+
+
+@pytest.mark.parametrize(
+    ("runtime_mode", "chip", "device_id"),
+    (("cmodel", "bm1690", None), ("pcie", "sg2260e", 0)),
+)
+def test_direct_worker_environment_has_deterministic_host_tool_path(
+        monkeypatch, tmp_path, runtime_mode, chip, device_id):
+    monkeypatch.setenv("PPL_PROJECT_ROOT", str(tmp_path / "ppl"))
+    monkeypatch.setenv("PATH", "/caller/toolchain:/volatile/bin")
+    base = matrix._base_worker_environment(tmp_path, runtime_mode, device_id)
+
+    environment = matrix._worker_environment(
+        base,
+        tmp_path / "scratch",
+        _case(),
+        chip,
+        _args(runtime_mode),
+    )
+
+    assert environment["PATH"] == os.pathsep.join(("/usr/bin", "/bin"))
+    assert "/caller/toolchain" not in environment["PATH"]
+    assert shutil.which("ld", path=environment["PATH"]) == "/usr/bin/ld"
 
 
 def test_validate_args_requires_scoped_promoted_single_device_pcie():

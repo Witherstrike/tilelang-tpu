@@ -630,6 +630,7 @@ def test_worker_environment_separates_cmodel_and_board_runtime(monkeypatch, tmp_
         "LD_LIBRARY_PATH", os.pathsep.join((str(sdk_runtime), str(external))))
     monkeypatch.setenv("TILELANG_TPU_PCIE_RUNTIME_PATH", str(board_runtime))
     monkeypatch.setenv("PPL_PERFAI_ROOT", str(perfai))
+    monkeypatch.setenv("PATH", "/caller/toolchain:/volatile/bin")
 
     cmodel = matrix.worker_environment(tmp_path, "cmodel", None)
     pcie = matrix.worker_environment(tmp_path, "pcie", 0)
@@ -640,6 +641,10 @@ def test_worker_environment_separates_cmodel_and_board_runtime(monkeypatch, tmp_
     assert pcie["TILELANG_TPU_PCIE_RUNTIME_PATH"] == str(board_runtime.resolve())
     assert cmodel["PPL_PERFAI_ROOT"] == str(perfai.resolve())
     assert pcie["PPL_PERFAI_ROOT"] == str(perfai.resolve())
+    assert cmodel["PATH"] == os.pathsep.join(("/usr/bin", "/bin"))
+    assert pcie["PATH"] == os.pathsep.join(("/usr/bin", "/bin"))
+    assert "/caller/toolchain" not in cmodel["PATH"]
+    assert "/caller/toolchain" not in pcie["PATH"]
 
 
 def test_materialize_execution_snapshot_pins_parent_and_tvm_commits(
