@@ -17,13 +17,15 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
-from typing import Any, Mapping, Optional
+import time
+from typing import Any, Callable, Mapping, Optional
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
@@ -53,6 +55,25 @@ SCHEMA_VERSION = 1
 CMODEL_CONFIGS = TARGET_CONFIGS
 PCIE_CONFIGS = tuple(pair for pair in TARGET_CONFIGS if pair[0] == "sg2260e")
 _WORKER_TOOL_PATH = os.pathsep.join(("/usr/bin", "/bin"))
+_BOARD_IDLE_SETTLE_TIMEOUT_S = 10.0
+_BOARD_IDLE_POLL_INTERVAL_S = 0.25
+_BOARD_IDLE_REQUIRED_ZERO_SAMPLES = 2
+
+
+class BoardHealthError(RuntimeError):
+    """A bounded board observation failed, with serializable partial evidence."""
+
+    def __init__(self, message: str, evidence: Mapping[str, Any]):
+        super().__init__(message)
+        self.evidence = dict(evidence)
+
+
+class BoardHealthCancelled(KeyboardInterrupt):
+    """A board observation was interrupted after preserving partial evidence."""
+
+    def __init__(self, message: str, evidence: Mapping[str, Any]):
+        super().__init__(message)
+        self.evidence = dict(evidence)
 
 
 def parse_args() -> argparse.Namespace:
@@ -496,7 +517,8 @@ def write_json(path: Path, payload: Mapping[str, Any]) -> None:
         pending.unlink(missing_ok=True)
 
 
-def validate_board_snapshot(payload: Any, device_id: int) -> dict[str, Any]:
+def validate_board_snapshot(payload: Any, device_id: int, *,
+                            require_idle: bool = True) -> dict[str, Any]:
     """Validate the exact single-card topology used to map logical device 0."""
 
     if device_id != 0:
@@ -534,10 +556,16 @@ def validate_board_snapshot(payload: Any, device_id: int) -> dict[str, Any]:
                 observed_index != chip_index):
             raise RuntimeError(
                 f"tpu-smi {card_key}/chip{chip_index} has inconsistent chip index")
-        if chip.get("tpu_util") != "0%":
+        tpu_util = chip.get("tpu_util")
+        if (not isinstance(tpu_util, str) or
+                re.fullmatch(r"(?:0|[1-9][0-9]?|100)%", tpu_util) is None):
             raise RuntimeError(
                 f"{card_key}/chip{chip_index} is not idle: "
-                f"tpu_util={chip.get('tpu_util')!r}")
+                f"tpu_util={tpu_util!r}")
+        if require_idle and tpu_util != "0%":
+            raise RuntimeError(
+                f"{card_key}/chip{chip_index} is not idle: "
+                f"tpu_util={tpu_util!r}")
         chips.append(chip)
     return {
         "device_id": device_id,
@@ -548,8 +576,179 @@ def validate_board_snapshot(payload: Any, device_id: int) -> dict[str, Any]:
     }
 
 
-def board_health(device_id: int, tpu_smi: Optional[Path] = None) -> dict[str, Any]:
+def _wait_for_idle_board_snapshot(
+        probe: Callable[[float], Any], device_id: int, *,
+        timeout_s: float = _BOARD_IDLE_SETTLE_TIMEOUT_S,
+        poll_interval_s: float = _BOARD_IDLE_POLL_INTERVAL_S,
+        required_zero_samples: int = _BOARD_IDLE_REQUIRED_ZERO_SAMPLES) -> dict[str, Any]:
+    """Wait for interval-separated idle samples within one monotonic deadline."""
+
+    if not math.isfinite(timeout_s) or timeout_s < 0:
+        raise ValueError("board idle-settle timeout must be finite and non-negative")
+    if not math.isfinite(poll_interval_s) or poll_interval_s <= 0:
+        raise ValueError("board idle-settle poll interval must be finite and positive")
+    if (isinstance(required_zero_samples, bool) or
+            not isinstance(required_zero_samples, int) or required_zero_samples < 2):
+        raise ValueError("board idle-settle requires at least two zero-utilization samples")
+    started = time.monotonic()
+    deadline = started + timeout_s
+    evidence: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "settling",
+        "device_id": device_id,
+        "timeout_s": timeout_s,
+        "poll_interval_s": poll_interval_s,
+        "required_consecutive_zero_samples": required_zero_samples,
+        "started_at": utc_now(),
+        "finished_at": None,
+        "settle_seconds": None,
+        "sample_count": 0,
+        "consecutive_zero_samples": 0,
+        "initial_tpu_util": None,
+        "last_tpu_util": None,
+        "max_observed_util_percent": None,
+        "samples": [],
+    }
+    zero_streak = 0
+
+    def fail(reason: str, message: str, *, cause: Optional[BaseException] = None):
+        evidence.update({
+            "status": "failed",
+            "failure_reason": reason,
+            "finished_at": utc_now(),
+            "settle_seconds": round(time.monotonic() - started, 6),
+        })
+        error = BoardHealthError(message, evidence)
+        if cause is None:
+            raise error
+        raise error from cause
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            fail(
+                "idle-timeout",
+                f"device {device_id} did not provide {required_zero_samples} consecutive "
+                f"idle samples within {timeout_s:g}s; "
+                f"last_tpu_util={evidence['last_tpu_util']!r}",
+            )
+        probe_started = time.monotonic()
+        try:
+            payload = probe(remaining)
+            snapshot = validate_board_snapshot(payload, device_id, require_idle=False)
+        except KeyboardInterrupt as error:
+            evidence.update({
+                "status": "cancelled",
+                "failure_reason": "observation-cancelled",
+                "finished_at": utc_now(),
+                "settle_seconds": round(time.monotonic() - started, 6),
+            })
+            raise BoardHealthCancelled(
+                f"device {device_id} board observation was interrupted", evidence) from error
+        except Exception as error:
+            fail(
+                "probe-or-snapshot-invalid",
+                f"device {device_id} board observation failed: "
+                f"{type(error).__name__}: {error}",
+                cause=error,
+            )
+        utilization = [chip["tpu_util"] for chip in snapshot["chips"]]
+        utilization_percent = [int(value[:-1]) for value in utilization]
+        observed_at = time.monotonic()
+        zero_streak = zero_streak + 1 if all(value == 0 for value in utilization_percent) else 0
+        sample = {
+            "sample_index": len(evidence["samples"]),
+            "observed_at": utc_now(),
+            "elapsed_s": round(observed_at - started, 6),
+            "probe_duration_s": round(observed_at - probe_started, 6),
+            "status": snapshot["status"],
+            "tpu_util": utilization,
+            "consecutive_zero_samples": zero_streak,
+            "within_deadline": observed_at <= deadline,
+        }
+        evidence["samples"].append(sample)
+        evidence["sample_count"] = len(evidence["samples"])
+        evidence["consecutive_zero_samples"] = zero_streak
+        evidence["last_tpu_util"] = utilization
+        if evidence["initial_tpu_util"] is None:
+            evidence["initial_tpu_util"] = utilization
+        maximum = max(utilization_percent)
+        previous_maximum = evidence["max_observed_util_percent"]
+        evidence["max_observed_util_percent"] = (
+            maximum if previous_maximum is None else max(previous_maximum, maximum))
+        if observed_at > deadline:
+            fail(
+                "idle-timeout",
+                f"device {device_id} board observation returned after the "
+                f"{timeout_s:g}s idle-settle deadline; last_tpu_util={utilization!r}",
+            )
+        if zero_streak >= required_zero_samples:
+            evidence.update({
+                "status": "passed",
+                "finished_at": utc_now(),
+                "settle_seconds": round(observed_at - started, 6),
+            })
+            return {
+                **snapshot,
+                "idle_probe_count": evidence["sample_count"],
+                "idle_settle_seconds": evidence["settle_seconds"],
+                "initial_tpu_util": evidence["initial_tpu_util"],
+                "idle_settle": evidence,
+            }
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            fail(
+                "idle-timeout",
+                f"device {device_id} did not provide {required_zero_samples} consecutive "
+                f"idle samples within {timeout_s:g}s; initial_tpu_util="
+                f"{evidence['initial_tpu_util']!r}, last_tpu_util={utilization!r}",
+            )
+        time.sleep(min(poll_interval_s, remaining))
+
+
+def _pcie_driver_identity() -> list[dict[str, str]]:
+    """Return the unique physical TPUv7 endpoint owned by the SG host driver."""
+
+    driver_root = Path("/sys/bus/pci/drivers/sg-host-drv")
+    devices = []
+    if driver_root.is_dir():
+        for entry in sorted(driver_root.iterdir()):
+            if not entry.is_symlink() or ":" not in entry.name:
+                continue
+            vendor_path = entry / "vendor"
+            device_path = entry / "device"
+            if vendor_path.is_file() and device_path.is_file():
+                devices.append({
+                    "bdf": entry.name,
+                    "vendor": vendor_path.read_text(encoding="ascii").strip().lower(),
+                    "device": device_path.read_text(encoding="ascii").strip().lower(),
+                    "driver": "sg-host-drv",
+                })
+    matching_devices = [
+        device for device in devices
+        if device["vendor"] == "0x1f1c" and device["device"] == "0x1690"
+    ]
+    if len(matching_devices) != 1:
+        raise RuntimeError(
+            "PCIe preflight requires exactly one SG host-driver TPUv7 device; "
+            f"found {len(matching_devices)}")
+    return matching_devices
+
+
+def board_health(device_id: int, tpu_smi: Optional[Path] = None, *,
+                 quarantine_on_failure: bool = False) -> dict[str, Any]:
+    """Prove one card is stably idle while holding its complete session lock.
+
+    A preflight observation is read-only and normally leaves no persistent
+    marker when the board is unavailable.  A postflight caller sets
+    ``quarantine_on_failure`` because failure to prove quiescence after a TPU
+    dispatch must keep the current session fail-closed.
+    """
+
     from tilelang.jit import TPUInstructionProfiler
+
+    if not isinstance(quarantine_on_failure, bool):
+        raise ValueError("quarantine_on_failure must be a boolean")
 
     runtime_root = Path(os.environ.get(
         "TILELANG_TPU_PCIE_RUNTIME_PATH", "/opt/tpuv7/tpuv7-current/lib"
@@ -586,58 +785,80 @@ def board_health(device_id: int, tpu_smi: Optional[Path] = None) -> dict[str, An
         "LD_LIBRARY_PATH": os.pathsep.join(
             dict.fromkeys((str(runtime_root), *inherited_libraries)))
     }
-    with TPUInstructionProfiler.exclusive_pcie_device(device_id):
+
+    def probe(remaining_s: float):
         completed = TPUInstructionProfiler.run_supervised_pcie_probe(
             device_id,
             [executable, f"--dev={device_id}", "--noloop", "--json_format"],
             cwd=_REPO_ROOT,
             environment=probe_environment,
-            timeout_s=10.0,
+            timeout_s=remaining_s,
         )
-    if completed.timed_out:
-        raise RuntimeError("tpu-smi preflight exceeded its hard 10s deadline")
-    if completed.left_live_descendant:
-        raise RuntimeError(
-            "tpu-smi preflight left a descendant process; the supervised group was stopped")
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"tpu-smi preflight failed with status {completed.returncode}: "
-            f"{completed.stderr.strip()}"
-        )
-    try:
-        payload = json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
-        raise RuntimeError(f"tpu-smi returned invalid JSON: {error}") from error
-    snapshot = validate_board_snapshot(payload, device_id)
+        if completed.timed_out:
+            raise RuntimeError("tpu-smi board observation exceeded its remaining deadline")
+        if completed.left_live_descendant:
+            raise RuntimeError(
+                "tpu-smi preflight left a descendant process; the supervised group was stopped")
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"tpu-smi preflight failed with status {completed.returncode}: "
+                f"{completed.stderr.strip()}"
+            )
+        try:
+            return json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"tpu-smi returned invalid JSON: {error}") from error
 
-    driver_root = Path("/sys/bus/pci/drivers/sg-host-drv")
-    devices = []
-    if driver_root.is_dir():
-        for entry in sorted(driver_root.iterdir()):
-            if not entry.is_symlink() or ":" not in entry.name:
-                continue
-            vendor_path = entry / "vendor"
-            device_path = entry / "device"
-            if vendor_path.is_file() and device_path.is_file():
-                devices.append({
-                    "bdf": entry.name,
-                    "vendor": vendor_path.read_text(encoding="ascii").strip().lower(),
-                    "device": device_path.read_text(encoding="ascii").strip().lower(),
-                    "driver": "sg-host-drv",
-                })
-    matching_devices = [
-        device for device in devices
-        if device["vendor"] == "0x1f1c" and device["device"] == "0x1690"
-    ]
-    if len(matching_devices) != 1:
-        raise RuntimeError(
-            "PCIe preflight requires exactly one SG host-driver TPUv7 device; "
-            f"found {len(matching_devices)}")
-    return {
-        **snapshot,
-        "tpu_smi": executable,
-        "pcie_driver_candidates": matching_devices,
-    }
+    # tpu-smi can report the just-finished synchronized launch for one sample.
+    # Hold the same device lock for every sample and the physical-device check.
+    # A persistently busy or non-Active board cannot race with another TileLang
+    # launch and is never accepted on the strength of one transient 0% sample.
+    with TPUInstructionProfiler.exclusive_pcie_device(device_id):
+        try:
+            snapshot = _wait_for_idle_board_snapshot(
+                probe,
+                device_id,
+                timeout_s=_BOARD_IDLE_SETTLE_TIMEOUT_S,
+                poll_interval_s=_BOARD_IDLE_POLL_INTERVAL_S,
+                required_zero_samples=_BOARD_IDLE_REQUIRED_ZERO_SAMPLES,
+            )
+            matching_devices = _pcie_driver_identity()
+            return {
+                **snapshot,
+                "tpu_smi": executable,
+                "pcie_driver_candidates": matching_devices,
+            }
+        except BaseException as error:
+            if quarantine_on_failure:
+                reason = (
+                    "postflight-did-not-settle"
+                    if (isinstance(error, BoardHealthError) and
+                        error.evidence.get("failure_reason") == "idle-timeout")
+                    else "postflight-observation-incomplete"
+                )
+                # This public operation first marks the active session unsafe,
+                # so even failure to create the secondary marker retains the
+                # crash-persistent session marker on context exit.
+                quarantine = TPUInstructionProfiler.fail_closed_pcie_device(
+                    device_id, reason=reason)
+                if isinstance(error, (BoardHealthError, BoardHealthCancelled)):
+                    quarantine_evidence: dict[str, Any] = {
+                        "status": "quarantined",
+                        "requested_reason": reason,
+                        "marker": str(quarantine),
+                    }
+                    try:
+                        persisted = json.loads(quarantine.read_text(encoding="utf-8"))
+                    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                        persisted = None
+                    if isinstance(persisted, dict):
+                        quarantine_evidence.update({
+                            field: persisted[field]
+                            for field in ("reason", "process_group", "process_group_known")
+                            if field in persisted
+                        })
+                    error.evidence["quarantine"] = quarantine_evidence
+            raise
 
 
 def worker_payload(stdout_path: Path) -> dict[str, Any]:
@@ -846,6 +1067,7 @@ def run_matrix(
         "completed_case_count": 0,
         "passed_case_count": 0,
         "failed_case_count": 0,
+        "cancelled_case_count": 0,
         "scheduled": [
             {
                 "chip": chip,
@@ -949,6 +1171,7 @@ def run_matrix(
         existing_artifacts = set(output_dir.iterdir())
         launch_attempted = False
         postflight_attempted = False
+        result: Optional[dict[str, Any]] = None
         try:
             if args.runtime_mode == "pcie":
                 assert_source_identity_unchanged(repo_root, summary)
@@ -997,17 +1220,33 @@ def run_matrix(
                 tpu_smi = Path(
                     summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
                 postflight_attempted = True
-                result["board_postflight"] = board_health(args.device_id, tpu_smi)
-        except KeyboardInterrupt:
+                result["board_postflight"] = board_health(
+                    args.device_id, tpu_smi, quarantine_on_failure=True)
+        except KeyboardInterrupt as error:
             summary["status"] = "cancelled"
             summary["stopped_after"] = key
+            if postflight_attempted and result is not None:
+                result.update({
+                    "status": "cancelled",
+                    "execution_status": "passed",
+                    "failed_phase": "board-postflight-settle",
+                    "error_type": "KeyboardInterrupt",
+                    "error": "board postflight was interrupted",
+                })
+                postflight_evidence = getattr(error, "evidence", None)
+                if isinstance(postflight_evidence, Mapping):
+                    result["board_postflight_failure"] = dict(postflight_evidence)
+                summary["results"].append(result)
+                summary["completed_case_count"] += 1
+                summary["cancelled_case_count"] += 1
             if (args.runtime_mode == "pcie" and launch_attempted and
                     not postflight_attempted):
                 assert args.device_id is not None
                 try:
                     tpu_smi = Path(
                         summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
-                    summary["board_after_cancel"] = board_health(args.device_id, tpu_smi)
+                    summary["board_after_cancel"] = board_health(
+                        args.device_id, tpu_smi, quarantine_on_failure=True)
                 except Exception as health_error:
                     summary["board_after_cancel_error"] = (
                         f"{type(health_error).__name__}: {health_error}")
@@ -1015,39 +1254,53 @@ def run_matrix(
             write_json(summary_path, summary)
             raise
         except Exception as error:
-            new_artifacts = sorted(
-                (path for path in output_dir.iterdir() if path not in existing_artifacts),
-                key=lambda path: path.stat().st_mtime_ns,
-            )
-            result = {
-                "status": "failed",
-                "key": key,
-                "chip": chip,
-                "programming_model": programming_model,
-                "case": case.to_json(),
-                "error_type": type(error).__name__,
-                "error": str(error),
-            }
-            if new_artifacts:
-                case_artifact = new_artifacts[-1]
-                result["artifact_dir"] = str(case_artifact)
-                stdout_path = case_artifact / "worker.stdout.log"
-                stderr_path = case_artifact / "worker.stderr.log"
-                if stdout_path.is_file():
-                    result["stdout_path"] = str(stdout_path)
-                    try:
-                        result["numeric"] = worker_payload(stdout_path)
-                    except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
-                        pass
-                if stderr_path.is_file():
-                    result["stderr_path"] = str(stderr_path)
+            if postflight_attempted and result is not None:
+                result.update({
+                    "status": "failed",
+                    "execution_status": "passed",
+                    "failed_phase": "board-postflight-settle",
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                })
+                postflight_evidence = getattr(error, "evidence", None)
+                if postflight_evidence is not None:
+                    result["board_postflight_failure"] = postflight_evidence
+            else:
+                new_artifacts = sorted(
+                    (path for path in output_dir.iterdir()
+                     if path not in existing_artifacts),
+                    key=lambda path: path.stat().st_mtime_ns,
+                )
+                result = {
+                    "status": "failed",
+                    "key": key,
+                    "chip": chip,
+                    "programming_model": programming_model,
+                    "case": case.to_json(),
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                }
+                if new_artifacts:
+                    case_artifact = new_artifacts[-1]
+                    result["artifact_dir"] = str(case_artifact)
+                    stdout_path = case_artifact / "worker.stdout.log"
+                    stderr_path = case_artifact / "worker.stderr.log"
+                    if stdout_path.is_file():
+                        result["stdout_path"] = str(stdout_path)
+                        try:
+                            result["numeric"] = worker_payload(stdout_path)
+                        except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
+                            pass
+                    if stderr_path.is_file():
+                        result["stderr_path"] = str(stderr_path)
             if (args.runtime_mode == "pcie" and launch_attempted and
                     not postflight_attempted):
                 assert args.device_id is not None
                 try:
                     tpu_smi = Path(
                         summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
-                    result["board_after_failure"] = board_health(args.device_id, tpu_smi)
+                    result["board_after_failure"] = board_health(
+                        args.device_id, tpu_smi, quarantine_on_failure=True)
                 except Exception as health_error:
                     result["board_after_failure_error"] = (
                         f"{type(health_error).__name__}: {health_error}")

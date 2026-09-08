@@ -232,9 +232,11 @@ def _patch_pcie_preflight(monkeypatch, events):
         assert expected == toolchain
         events.append("toolchain-guard")
 
-    def health(device_id, tpu_smi):
+    def health(device_id, tpu_smi, *, quarantine_on_failure=False):
         assert device_id == 0
         assert tpu_smi == Path("/sbin/tpu-smi")
+        if events.count("board-health") > 0:
+            assert quarantine_on_failure is True
         events.append("board-health")
         return {"device_id": 0, "status": "Active"}
 
@@ -498,8 +500,16 @@ def test_failed_decoder_preflight_stops_before_board_or_dispatch(monkeypatch, tm
     assert summary["error"] == "decoder unavailable"
 
 
-def test_failed_board_postflight_is_not_retried_and_stops_matrix(monkeypatch, tmp_path):
+@pytest.mark.parametrize("interrupted", (False, True))
+def test_failed_board_postflight_is_not_retried_and_stops_matrix(
+        monkeypatch, tmp_path, interrupted):
     events = []
+
+    class BoardHealthError(RuntimeError):
+
+        def __init__(self, message):
+            super().__init__(message)
+            self.evidence = {"samples": [{"tpu_util": "9%"}], "settled": False}
 
     class FakeProfiler:
         def __init__(self, config):
@@ -514,24 +524,48 @@ def test_failed_board_postflight_is_not_retried_and_stops_matrix(monkeypatch, tm
     _patch_pcie_preflight(monkeypatch, events)
     health_calls = []
 
-    def health(device_id, tpu_smi):
+    def health(device_id, tpu_smi, *, quarantine_on_failure=False):
         del device_id, tpu_smi
-        health_calls.append("health")
+        health_calls.append(quarantine_on_failure)
         if len(health_calls) == 2:
-            raise RuntimeError("board not idle")
+            if interrupted:
+                raise KeyboardInterrupt
+            raise BoardHealthError("board not idle")
         return {"status": "Active"}
 
     monkeypatch.setattr(matrix, "board_health", health)
     output = tmp_path / "output"
     output.mkdir()
-    assert matrix._run_matrix(
-        _args("pcie"), tmp_path, output,
-        {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(tmp_path / "scratch")}) == 1
-    assert health_calls == ["health", "health"]
+    def invoke_matrix():
+        return matrix._run_matrix(
+            _args("pcie"), tmp_path, output,
+            {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(tmp_path / "scratch")})
+
+    if interrupted:
+        with pytest.raises(KeyboardInterrupt):
+            invoke_matrix()
+    else:
+        assert invoke_matrix() == 1
+    assert health_calls == [False, True]
     summary = json.loads((output / "summary.json").read_text())
+    assert summary["completed_case_count"] == 1
+    assert summary["cancelled_case_count"] == (1 if interrupted else 0)
+    assert summary["failed_case_count"] == (0 if interrupted else 1)
     failed = summary["cases"]["sg2260e/tpukernel/e4m3/copy"]
-    assert failed["error"] == "board not idle"
+    assert failed["status"] == ("cancelled" if interrupted else "failed")
+    assert failed["execution_status"] == "passed"
+    assert failed["failed_phase"] == "board-postflight-settle"
+    assert failed["error"] == (
+        "board postflight was interrupted" if interrupted else "board not idle")
     assert "board_after_failure" not in failed
+    assert failed["artifact_dir"] == "profile"
+    assert failed["raw_instruction_count"] == 1
+    assert failed["numeric"] == {"fixture": "worker-payload"}
+    if interrupted:
+        assert "board_postflight_failure" not in failed
+    else:
+        assert failed["board_postflight_failure"] == {
+            "samples": [{"tpu_util": "9%"}], "settled": False}
 
 
 def test_identity_guard_failure_stops_before_first_pcie_dispatch(monkeypatch, tmp_path):

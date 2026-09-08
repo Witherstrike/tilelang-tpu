@@ -161,6 +161,285 @@ def test_validate_board_snapshot_rejects_unprovable_logical_device():
         matrix.validate_board_snapshot(_board_payload(), 1)
 
 
+def test_wait_for_idle_board_snapshot_accepts_one_transient_sample(monkeypatch):
+    busy = _board_payload()
+    busy["card0"]["chip0"]["tpu_util"] = "9%"
+    samples = iter((busy, _board_payload(), _board_payload()))
+    monkeypatch.setattr(matrix.time, "sleep", lambda _seconds: None)
+
+    snapshot = matrix._wait_for_idle_board_snapshot(
+        lambda _remaining: next(samples), 0, timeout_s=1.0, poll_interval_s=0.01)
+
+    assert snapshot["chips"][0]["tpu_util"] == "0%"
+    assert snapshot["initial_tpu_util"] == ["9%"]
+    assert snapshot["idle_probe_count"] == 3
+    assert snapshot["idle_settle_seconds"] >= 0
+    assert snapshot["idle_settle"]["status"] == "passed"
+    assert snapshot["idle_settle"]["max_observed_util_percent"] == 9
+    assert [sample["consecutive_zero_samples"]
+            for sample in snapshot["idle_settle"]["samples"]] == [0, 1, 2]
+
+
+def test_wait_for_idle_board_snapshot_resets_zero_streak(monkeypatch):
+    busy = _board_payload()
+    busy["card0"]["chip0"]["tpu_util"] = "9%"
+    samples = iter((_board_payload(), busy, _board_payload(), _board_payload()))
+    monkeypatch.setattr(matrix.time, "sleep", lambda _seconds: None)
+
+    snapshot = matrix._wait_for_idle_board_snapshot(
+        lambda _remaining: next(samples), 0, timeout_s=1.0, poll_interval_s=0.01)
+
+    assert snapshot["idle_probe_count"] == 4
+    assert [sample["consecutive_zero_samples"]
+            for sample in snapshot["idle_settle"]["samples"]] == [1, 0, 1, 2]
+
+
+def test_wait_for_idle_board_snapshot_fails_closed_without_a_settle_budget():
+    busy = _board_payload()
+    busy["card0"]["chip0"]["tpu_util"] = "9%"
+
+    with pytest.raises(matrix.BoardHealthError, match="did not provide") as raised:
+        matrix._wait_for_idle_board_snapshot(lambda _remaining: busy, 0, timeout_s=0)
+
+    assert raised.value.evidence["failure_reason"] == "idle-timeout"
+    assert raised.value.evidence["samples"] == []
+
+
+def test_wait_for_idle_board_snapshot_records_persistent_busy_timeout(monkeypatch):
+    busy = _board_payload()
+    busy["card0"]["chip0"]["tpu_util"] = "9%"
+
+    class Clock:
+        now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += seconds
+
+    clock = Clock()
+    budgets = []
+    monkeypatch.setattr(matrix.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(matrix.time, "sleep", clock.sleep)
+
+    with pytest.raises(matrix.BoardHealthError, match="did not provide") as raised:
+        matrix._wait_for_idle_board_snapshot(
+            lambda remaining: budgets.append(remaining) or busy,
+            0,
+            timeout_s=0.02,
+            poll_interval_s=0.01,
+        )
+
+    evidence = raised.value.evidence
+    assert evidence["failure_reason"] == "idle-timeout"
+    assert evidence["sample_count"] == 2
+    assert evidence["last_tpu_util"] == ["9%"]
+    assert evidence["max_observed_util_percent"] == 9
+    assert budgets == pytest.approx([0.02, 0.01])
+
+
+def test_wait_for_idle_board_snapshot_rejects_a_late_idle_probe(monkeypatch):
+    class Clock:
+        now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+    clock = Clock()
+    monkeypatch.setattr(matrix.time, "monotonic", clock.monotonic)
+
+    def late_probe(_remaining):
+        clock.now = 0.03
+        return _board_payload()
+
+    with pytest.raises(matrix.BoardHealthError, match="returned after") as raised:
+        matrix._wait_for_idle_board_snapshot(
+            late_probe, 0, timeout_s=0.02, poll_interval_s=0.01)
+
+    evidence = raised.value.evidence
+    assert evidence["failure_reason"] == "idle-timeout"
+    assert evidence["sample_count"] == 1
+    assert evidence["samples"][0]["within_deadline"] is False
+
+
+def test_wait_for_idle_board_snapshot_rejects_invalid_active_snapshot_immediately():
+    fault = _board_payload()
+    fault["card0"]["chip0"]["status"] = "Fault"
+
+    with pytest.raises(matrix.BoardHealthError, match="exact Active") as raised:
+        matrix._wait_for_idle_board_snapshot(
+            lambda _remaining: fault, 0, timeout_s=1.0, poll_interval_s=0.01)
+
+    assert raised.value.evidence["failure_reason"] == "probe-or-snapshot-invalid"
+    assert raised.value.evidence["samples"] == []
+
+
+def test_postflight_board_health_quarantines_persistent_busy_device(
+        monkeypatch, tmp_path):
+    from tilelang.jit import TPUInstructionProfiler
+    from tilelang.jit.adapter import tpu_profiling as profiling
+
+    tool = tmp_path / "tpu-smi"
+    tool.write_text("fake", encoding="utf-8")
+    tool.chmod(0o700)
+    busy = _board_payload()
+    busy["card0"]["chip0"]["tpu_util"] = "9%"
+
+    class Clock:
+        now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += seconds
+
+    clock = Clock()
+    monkeypatch.setattr(profiling, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+    monkeypatch.setattr(matrix.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(matrix.time, "sleep", clock.sleep)
+    monkeypatch.setattr(matrix, "_BOARD_IDLE_SETTLE_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(matrix, "_pcie_driver_identity", lambda: [{"bdf": "fake"}])
+    monkeypatch.setattr(
+        TPUInstructionProfiler,
+        "run_supervised_pcie_probe",
+        staticmethod(lambda *_args, **_kwargs: SimpleNamespace(
+            stdout=json.dumps(busy), stderr="", returncode=0, timed_out=False,
+            left_live_descendant=False, cleanup_complete=True)),
+    )
+
+    with pytest.raises(matrix.BoardHealthError, match="did not provide") as raised:
+        matrix.board_health(0, tool, quarantine_on_failure=True)
+
+    quarantine = tmp_path / "tilelang-tpu-device-0.quarantine.json"
+    session = tmp_path / "tilelang-tpu-device-0.session.json"
+    payload = json.loads(quarantine.read_text(encoding="utf-8"))
+    assert payload["reason"] == "postflight-did-not-settle"
+    assert payload["process_group_known"] is False
+    assert session.is_file()
+    assert raised.value.evidence["quarantine"]["marker"] == str(quarantine)
+
+
+def test_postflight_board_health_interrupt_preserves_evidence_and_quarantine(
+        monkeypatch, tmp_path):
+    from tilelang.jit import TPUInstructionProfiler
+    from tilelang.jit.adapter import tpu_profiling as profiling
+
+    tool = tmp_path / "tpu-smi"
+    tool.write_text("fake", encoding="utf-8")
+    tool.chmod(0o700)
+    monkeypatch.setattr(profiling, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+
+    def interrupt_probe(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        TPUInstructionProfiler,
+        "run_supervised_pcie_probe",
+        staticmethod(interrupt_probe),
+    )
+
+    with pytest.raises(matrix.BoardHealthCancelled) as raised:
+        matrix.board_health(0, tool, quarantine_on_failure=True)
+
+    evidence = raised.value.evidence
+    assert evidence["failure_reason"] == "observation-cancelled"
+    assert evidence["quarantine"]["reason"] == "postflight-observation-incomplete"
+    assert (tmp_path / "tilelang-tpu-device-0.quarantine.json").is_file()
+    assert (tmp_path / "tilelang-tpu-device-0.session.json").is_file()
+
+
+def test_postflight_board_health_keeps_original_error_after_probe_quarantine(
+        monkeypatch, tmp_path):
+    from tilelang.jit import TPUInstructionProfiler, TPUProfilingError
+    from tilelang.jit.adapter import tpu_profiling as profiling
+
+    tool = tmp_path / "tpu-smi"
+    tool.write_text("fake", encoding="utf-8")
+    tool.chmod(0o700)
+    monkeypatch.setattr(profiling, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+
+    def failed_probe(device_id, *_args, **_kwargs):
+        TPUInstructionProfiler.fail_closed_pcie_device(
+            device_id,
+            reason="read-only PCIe probe process group could not be fully reaped",
+            process_group=7654,
+        )
+        raise TPUProfilingError("probe group remains live")
+
+    monkeypatch.setattr(
+        TPUInstructionProfiler, "run_supervised_pcie_probe", staticmethod(failed_probe))
+
+    with pytest.raises(matrix.BoardHealthError, match="probe group remains live") as raised:
+        matrix.board_health(0, tool, quarantine_on_failure=True)
+
+    evidence = raised.value.evidence
+    assert evidence["failure_reason"] == "probe-or-snapshot-invalid"
+    assert evidence["quarantine"]["reason"] == (
+        "read-only PCIe probe process group could not be fully reaped")
+    assert evidence["quarantine"]["process_group"] == 7654
+    assert (tmp_path / "tilelang-tpu-device-0.session.json").is_file()
+
+
+def test_preflight_board_health_failure_does_not_persist_quarantine(monkeypatch, tmp_path):
+    from tilelang.jit import TPUInstructionProfiler
+    from tilelang.jit.adapter import tpu_profiling as profiling
+
+    tool = tmp_path / "tpu-smi"
+    tool.write_text("fake", encoding="utf-8")
+    tool.chmod(0o700)
+    fault = _board_payload()
+    fault["card0"]["chip0"]["status"] = "Fault"
+    monkeypatch.setattr(profiling, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+    monkeypatch.setattr(
+        TPUInstructionProfiler,
+        "run_supervised_pcie_probe",
+        staticmethod(lambda *_args, **_kwargs: SimpleNamespace(
+            stdout=json.dumps(fault), stderr="", returncode=0, timed_out=False,
+            left_live_descendant=False, cleanup_complete=True)),
+    )
+
+    with pytest.raises(matrix.BoardHealthError, match="exact Active"):
+        matrix.board_health(0, tool)
+
+    assert not (tmp_path / "tilelang-tpu-device-0.quarantine.json").exists()
+    assert not (tmp_path / "tilelang-tpu-device-0.session.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("completed", "diagnostic"),
+    (
+        (SimpleNamespace(stdout="{", stderr="", returncode=0, timed_out=False,
+                         left_live_descendant=False, cleanup_complete=True), "invalid JSON"),
+        (SimpleNamespace(stdout="", stderr="", returncode=None, timed_out=True,
+                         left_live_descendant=False, cleanup_complete=True),
+         "remaining deadline"),
+    ),
+)
+def test_preflight_board_health_rejects_malformed_or_timed_out_probe(
+        monkeypatch, tmp_path, completed, diagnostic):
+    from tilelang.jit import TPUInstructionProfiler
+    from tilelang.jit.adapter import tpu_profiling as profiling
+
+    tool = tmp_path / "tpu-smi"
+    tool.write_text("fake", encoding="utf-8")
+    tool.chmod(0o700)
+    monkeypatch.setattr(profiling, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+    monkeypatch.setattr(
+        TPUInstructionProfiler,
+        "run_supervised_pcie_probe",
+        staticmethod(lambda *_args, **_kwargs: completed),
+    )
+
+    with pytest.raises(matrix.BoardHealthError, match=diagnostic) as raised:
+        matrix.board_health(0, tool)
+
+    assert raised.value.evidence["failure_reason"] == "probe-or-snapshot-invalid"
+    assert not (tmp_path / "tilelang-tpu-device-0.quarantine.json").exists()
+    assert not (tmp_path / "tilelang-tpu-device-0.session.json").exists()
+
+
 def _numeric_payload(case, *, chip="sg2260e", programming_model="tpukernel",
                      runtime_mode="cmodel"):
     return {
@@ -775,8 +1054,15 @@ def test_main_refuses_even_an_existing_empty_output_directory(monkeypatch, tmp_p
         matrix.main()
 
 
-def test_failed_board_postflight_is_not_retried(monkeypatch, tmp_path):
+@pytest.mark.parametrize("interrupted", (False, True))
+def test_failed_board_postflight_is_not_retried(monkeypatch, tmp_path, interrupted):
     import importlib
+
+    class BoardHealthError(RuntimeError):
+
+        def __init__(self, message):
+            super().__init__(message)
+            self.evidence = {"samples": [{"tpu_util": "9%"}], "settled": False}
 
     tilelang_jit = importlib.import_module("tilelang.jit")
 
@@ -819,10 +1105,12 @@ def test_failed_board_postflight_is_not_retried(monkeypatch, tmp_path):
 
     health_calls = []
 
-    def health(device_id, tpu_smi):
-        health_calls.append((device_id, tpu_smi))
+    def health(device_id, tpu_smi, *, quarantine_on_failure=False):
+        health_calls.append((device_id, tpu_smi, quarantine_on_failure))
         if len(health_calls) == 2:
-            raise RuntimeError("postflight board health failed")
+            if interrupted:
+                raise KeyboardInterrupt
+            raise BoardHealthError("postflight board health failed")
         return {"device_id": device_id, "status": "Active"}
 
     monkeypatch.setattr(matrix, "board_health", health)
@@ -851,16 +1139,39 @@ def test_failed_board_postflight_is_not_retried(monkeypatch, tmp_path):
 
     monkeypatch.setattr(tilelang_jit, "TPUInstructionProfiler", FakeProfiler)
 
-    status = matrix.run_matrix(
-        args,
-        tmp_path,
-        output,
-        (("sg2260e", "tpukernel", case),),
-        {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(scratch)},
-    )
+    def invoke_matrix():
+        return matrix.run_matrix(
+            args, tmp_path, output, (("sg2260e", "tpukernel", case),),
+            {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(scratch)})
 
-    assert status == 1
+    if interrupted:
+        with pytest.raises(KeyboardInterrupt):
+            invoke_matrix()
+    else:
+        assert invoke_matrix() == 1
     assert len(health_calls) == 2
-    result = json.loads((output / "summary.json").read_text())["results"][0]
-    assert result["error"] == "postflight board health failed"
+    assert health_calls == [
+        (0, Path("/sbin/tpu-smi"), False),
+        (0, Path("/sbin/tpu-smi"), True),
+    ]
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["completed_case_count"] == 1
+    assert summary["cancelled_case_count"] == (1 if interrupted else 0)
+    assert summary["failed_case_count"] == (0 if interrupted else 1)
+    result = summary["results"][0]
+    assert result["status"] == ("cancelled" if interrupted else "failed")
+    assert result["execution_status"] == "passed"
+    assert result["failed_phase"] == "board-postflight-settle"
+    assert result["error"] == (
+        "board postflight was interrupted" if interrupted else
+        "postflight board health failed")
     assert "board_after_failure" not in result
+    assert result["artifact_dir"] == str(report.output_dir)
+    assert result["raw_instruction_count"] == 1
+    assert result["numeric"] == _numeric_payload(
+        case, chip="sg2260e", programming_model="tpukernel", runtime_mode="pcie")
+    if interrupted:
+        assert "board_postflight_failure" not in result
+    else:
+        assert result["board_postflight_failure"] == {
+            "samples": [{"tpu_util": "9%"}], "settled": False}

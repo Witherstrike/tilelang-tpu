@@ -320,6 +320,7 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
         "completed_case_count": 0,
         "passed_case_count": 0,
         "failed_case_count": 0,
+        "cancelled_case_count": 0,
         "target_scope": matrix_target_scope(
             (chip, "tpukernel") for chip in chips),
         "scheduled": [
@@ -398,6 +399,7 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                 command = [sys.executable, str(worker), "--dtype", dtype, "--case", case]
                 launch_attempted = False
                 postflight_attempted = False
+                result: Optional[dict[str, Any]] = None
                 try:
                     if args.runtime_mode == "pcie":
                         assert_source_identity_unchanged(repo_root, summary)
@@ -427,19 +429,35 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                         tpu_smi = Path(
                             summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
                         postflight_attempted = True
-                        result["board_postflight"] = board_health(0, tpu_smi)
+                        result["board_postflight"] = board_health(
+                            0, tpu_smi, quarantine_on_failure=True)
                     summary["cases"][key] = result
                     print(f"PASS {key} raw={len(report.raw_instructions)} "
                           f"timed={len(report.instruction_timings)}", flush=True)
-                except KeyboardInterrupt:
+                except KeyboardInterrupt as error:
                     summary["status"] = "cancelled"
                     summary["stopped_after"] = key
+                    if postflight_attempted and result is not None:
+                        result.update({
+                            "status": "cancelled",
+                            "execution_status": "passed",
+                            "failed_phase": "board-postflight-settle",
+                            "error_type": "KeyboardInterrupt",
+                            "error": "board postflight was interrupted",
+                        })
+                        postflight_evidence = getattr(error, "evidence", None)
+                        if isinstance(postflight_evidence, Mapping):
+                            result["board_postflight_failure"] = dict(postflight_evidence)
+                        summary["cases"][key] = result
+                        summary["completed_case_count"] += 1
+                        summary["cancelled_case_count"] += 1
                     if (args.runtime_mode == "pcie" and launch_attempted and
                             not postflight_attempted):
                         try:
                             tpu_smi = Path(
                                 summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
-                            summary["board_after_cancel"] = board_health(0, tpu_smi)
+                            summary["board_after_cancel"] = board_health(
+                                0, tpu_smi, quarantine_on_failure=True)
                         except Exception as health_error:
                             summary["board_after_cancel_error"] = (
                                 f"{type(health_error).__name__}: {health_error}")
@@ -447,14 +465,27 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                     _write_summary(summary_path, summary)
                     raise
                 except Exception as exc:
-                    result = {"status": "failed", "error_type": type(exc).__name__,
-                              "error": str(exc)}
+                    if postflight_attempted and result is not None:
+                        result.update({
+                            "status": "failed",
+                            "execution_status": "passed",
+                            "failed_phase": "board-postflight-settle",
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        })
+                        postflight_evidence = getattr(exc, "evidence", None)
+                        if postflight_evidence is not None:
+                            result["board_postflight_failure"] = postflight_evidence
+                    else:
+                        result = {"status": "failed", "error_type": type(exc).__name__,
+                                  "error": str(exc)}
                     if (args.runtime_mode == "pcie" and launch_attempted and
                             not postflight_attempted):
                         try:
                             tpu_smi = Path(
                                 summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
-                            result["board_after_failure"] = board_health(0, tpu_smi)
+                            result["board_after_failure"] = board_health(
+                                0, tpu_smi, quarantine_on_failure=True)
                         except Exception as health_error:
                             result["board_after_failure_error"] = (
                                 f"{type(health_error).__name__}: {health_error}")

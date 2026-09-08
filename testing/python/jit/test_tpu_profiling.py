@@ -1075,7 +1075,7 @@ def test_pcie_device_quarantine_is_persistent_and_never_auto_cleared(tmp_path, m
     marker = tmp_path / "tilelang-tpu-device-3.quarantine.json"
 
     with TPUInstructionProfiler.exclusive_pcie_device(3):
-        observed = tpu_profiling_module._quarantine_pcie_device(
+        observed = TPUInstructionProfiler.fail_closed_pcie_device(
             3, process_group=8765, reason="unit-test unreaped process group")
         assert observed == marker
         with pytest.raises(TPUProfilingError, match="became unsafe"):
@@ -1086,9 +1086,83 @@ def test_pcie_device_quarantine_is_persistent_and_never_auto_cleared(tmp_path, m
     assert payload["status"] == "quarantined"
     assert payload["device_id"] == 3
     assert payload["process_group"] == 8765
+    assert payload["process_group_known"] is True
     with pytest.raises(TPUProfilingError, match="fail-closed"):
         with TPUInstructionProfiler.exclusive_pcie_device(3):
             pass
+
+
+def test_pcie_device_fail_closed_without_observed_process_group(tmp_path, monkeypatch):
+    monkeypatch.setattr(tpu_profiling_module, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+    quarantine = tmp_path / "tilelang-tpu-device-12.quarantine.json"
+    session = tmp_path / "tilelang-tpu-device-12.session.json"
+
+    with TPUInstructionProfiler.exclusive_pcie_device(12):
+        observed = TPUInstructionProfiler.fail_closed_pcie_device(
+            12, reason="postflight board idle state was not established")
+        assert observed == quarantine
+
+    payload = json.loads(quarantine.read_text(encoding="utf-8"))
+    assert payload["reason"] == "postflight board idle state was not established"
+    assert payload["process_group"] is None
+    assert payload["process_group_known"] is False
+    assert session.is_file()
+
+
+def test_pcie_device_fail_closed_is_idempotent_inside_unsafe_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(tpu_profiling_module, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+    quarantine = tmp_path / "tilelang-tpu-device-18.quarantine.json"
+
+    with TPUInstructionProfiler.exclusive_pcie_device(18):
+        first = TPUInstructionProfiler.fail_closed_pcie_device(
+            18, reason="probe process group was not reaped", process_group=4321)
+        second = TPUInstructionProfiler.fail_closed_pcie_device(
+            18, reason="postflight observation was incomplete")
+
+    assert first == quarantine
+    assert second == quarantine
+    payload = json.loads(quarantine.read_text(encoding="utf-8"))
+    assert payload["reason"] == "probe process group was not reaped"
+    assert payload["process_group"] == 4321
+    assert (tmp_path / "tilelang-tpu-device-18.session.json").is_file()
+
+
+@pytest.mark.parametrize("reason", [None, "", " ", " leading", "trailing ", "line\nbreak", 17])
+def test_pcie_device_fail_closed_rejects_unstable_reason_without_poisoning_session(
+        tmp_path, monkeypatch, reason):
+    monkeypatch.setattr(tpu_profiling_module, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+    session = tmp_path / "tilelang-tpu-device-13.session.json"
+    quarantine = tmp_path / "tilelang-tpu-device-13.quarantine.json"
+
+    with TPUInstructionProfiler.exclusive_pcie_device(13):
+        with pytest.raises(ValueError, match="reason must be a non-empty printable string"):
+            TPUInstructionProfiler.fail_closed_pcie_device(13, reason=reason)
+        assert session.is_file()
+
+    assert not session.exists()
+    assert not quarantine.exists()
+
+
+@pytest.mark.parametrize("process_group", [False, 0, -1, 1.5, "123"])
+def test_pcie_device_fail_closed_rejects_invalid_process_group_without_poisoning_session(
+        tmp_path, monkeypatch, process_group):
+    monkeypatch.setattr(tpu_profiling_module, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+
+    with TPUInstructionProfiler.exclusive_pcie_device(14):
+        with pytest.raises(ValueError, match="process_group must be a positive integer or None"):
+            TPUInstructionProfiler.fail_closed_pcie_device(
+                14, reason="postflight incomplete", process_group=process_group)
+
+    assert not (tmp_path / "tilelang-tpu-device-14.session.json").exists()
+    assert not (tmp_path / "tilelang-tpu-device-14.quarantine.json").exists()
+
+
+def test_pcie_device_fail_closed_requires_owned_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(tpu_profiling_module, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+
+    with pytest.raises(TPUProfilingError, match="without owning its session lock"):
+        TPUInstructionProfiler.fail_closed_pcie_device(
+            15, reason="postflight board idle state was not established")
 
 
 def test_pcie_quarantine_creation_failure_retains_active_session(tmp_path, monkeypatch):
@@ -1108,7 +1182,7 @@ def test_pcie_quarantine_creation_failure_retains_active_session(tmp_path, monke
 
         monkeypatch.setattr(tpu_profiling_module.os, "open", fail_quarantine_open)
         with pytest.raises(TPUProfilingError, match="session marker .* retained fail-closed"):
-            tpu_profiling_module._quarantine_pcie_device(
+            TPUInstructionProfiler.fail_closed_pcie_device(
                 6, process_group=999, reason="simulated incomplete cleanup")
         with pytest.raises(TPUProfilingError, match="became unsafe"):
             with TPUInstructionProfiler.exclusive_pcie_device(6):
@@ -1118,6 +1192,32 @@ def test_pcie_quarantine_creation_failure_retains_active_session(tmp_path, monke
     assert not quarantine.exists()
     with pytest.raises(TPUProfilingError, match="incomplete prior session"):
         with TPUInstructionProfiler.exclusive_pcie_device(6):
+            pass
+
+
+def test_pcie_fail_closed_keyboard_interrupt_retains_active_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(tpu_profiling_module, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+    session = tmp_path / "tilelang-tpu-device-16.session.json"
+    quarantine = tmp_path / "tilelang-tpu-device-16.quarantine.json"
+    real_open = os.open
+
+    def interrupt_quarantine_open(path, flags, mode=0o777, *, dir_fd=None):
+        if Path(path) == quarantine:
+            raise KeyboardInterrupt
+        if dir_fd is None:
+            return real_open(path, flags, mode)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(tpu_profiling_module.os, "open", interrupt_quarantine_open)
+    with pytest.raises(KeyboardInterrupt):
+        with TPUInstructionProfiler.exclusive_pcie_device(16):
+            TPUInstructionProfiler.fail_closed_pcie_device(
+                16, reason="postflight observation was interrupted")
+
+    assert session.is_file()
+    assert not quarantine.exists()
+    with pytest.raises(TPUProfilingError, match="incomplete prior session"):
+        with TPUInstructionProfiler.exclusive_pcie_device(16):
             pass
 
 

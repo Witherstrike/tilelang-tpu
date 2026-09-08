@@ -229,10 +229,12 @@ def _patch_pcie_preflight(monkeypatch, events):
         events.append("toolchain-guard")
         assert expected == toolchain
 
-    def health(device_id, tpu_smi):
+    def health(device_id, tpu_smi, *, quarantine_on_failure=False):
         events.append("board-health")
         assert device_id == 0
         assert tpu_smi == Path("/sbin/tpu-smi")
+        if events.count("board-health") > 1:
+            assert quarantine_on_failure is True
         return {"device_id": device_id, "status": "Active"}
 
     monkeypatch.setattr(matrix_module, "_validate_pcie_promotion", promote)
@@ -749,8 +751,16 @@ def test_pcie_per_case_identity_guard_runs_before_dispatch(monkeypatch, tmp_path
     assert "board_after_failure" not in result
 
 
-def test_failed_postflight_is_not_retried_on_a_suspect_board(monkeypatch, tmp_path):
+@pytest.mark.parametrize("interrupted", (False, True))
+def test_failed_postflight_is_not_retried_on_a_suspect_board(
+        monkeypatch, tmp_path, interrupted):
     events = []
+
+    class BoardHealthError(RuntimeError):
+
+        def __init__(self, message):
+            super().__init__(message)
+            self.evidence = {"samples": [{"tpu_util": "9%"}], "settled": False}
 
     class FakeProfiler:
 
@@ -759,37 +769,62 @@ def test_failed_postflight_is_not_retried_on_a_suspect_board(monkeypatch, tmp_pa
 
         def run_pcie(self, command, *, environment):
             del command, environment
+            events.append("dispatch")
             return _report()
 
     monkeypatch.setattr(matrix_module, "TPUInstructionProfiler", FakeProfiler)
     _patch_pcie_preflight(monkeypatch, events)
     health_calls = []
 
-    def health(device_id, tpu_smi):
-        health_calls.append((device_id, tpu_smi))
+    def health(device_id, tpu_smi, *, quarantine_on_failure=False):
+        health_calls.append((device_id, tpu_smi, quarantine_on_failure))
         if len(health_calls) == 2:
-            raise RuntimeError("postflight board health failed")
+            if interrupted:
+                raise KeyboardInterrupt
+            raise BoardHealthError("postflight board health failed")
         return {"device_id": device_id, "status": "Active"}
 
     monkeypatch.setattr(matrix_module, "board_health", health)
     output_dir = tmp_path / "matrix"
     output_dir.mkdir()
 
-    status = matrix_module._run_matrix(
-        _matrix_args("pcie"),
-        tmp_path,
-        output_dir,
-        (("sg2260e", "rv"),),
-        ("elementwise-add",),
-        {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(tmp_path / "scratch")},
-    )
+    def invoke_matrix():
+        return matrix_module._run_matrix(
+            _matrix_args("pcie"), tmp_path, output_dir, (("sg2260e", "rv"),),
+            ("elementwise-add", "elementwise-sub"),
+            {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(tmp_path / "scratch")})
 
-    assert status == 1
+    if interrupted:
+        with pytest.raises(KeyboardInterrupt):
+            invoke_matrix()
+    else:
+        assert invoke_matrix() == 1
     assert len(health_calls) == 2
-    result = json.loads((output_dir / "summary.json").read_text())["cases"][
-        "sg2260e/rv/elementwise-add"]
+    assert events.count("dispatch") == 1
+    assert health_calls == [
+        (0, Path("/sbin/tpu-smi"), False),
+        (0, Path("/sbin/tpu-smi"), True),
+    ]
+    summary = json.loads((output_dir / "summary.json").read_text())
+    assert summary["completed_case_count"] == 1
+    assert summary["cancelled_case_count"] == (1 if interrupted else 0)
+    assert summary["failed_case_count"] == (0 if interrupted else 1)
+    result = summary["cases"]["sg2260e/rv/elementwise-add"]
     assert "board_after_failure" not in result
-    assert result["error"] == "postflight board health failed"
+    assert result["status"] == ("cancelled" if interrupted else "failed")
+    assert result["execution_status"] == "passed"
+    assert result["failed_phase"] == "board-postflight-settle"
+    assert result["error"] == (
+        "board postflight was interrupted" if interrupted else
+        "postflight board health failed")
+    assert result["artifact_dir"] == "profile"
+    assert result["raw_instruction_count"] == 1
+    assert result["numeric"] == {"fixture": "worker-payload"}
+    if interrupted:
+        assert "board_postflight_failure" not in result
+    else:
+        assert result["board_postflight_failure"] == {
+            "samples": [{"tpu_util": "9%"}], "settled": False}
 
 
 def test_final_identity_capture_failure_cannot_leave_passing_summary(

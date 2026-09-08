@@ -106,11 +106,18 @@ def _pcie_device_session_path(device_id: int) -> Path:
     return _PCIE_DEVICE_LOCK_ROOT / f"tilelang-tpu-device-{device_id}.session.json"
 
 
-def _pcie_device_lock_owned(device_id: int) -> bool:
+def _pcie_device_session_owned(device_id: int) -> bool:
     held = getattr(_PCIE_DEVICE_LOCK_STATE, "held", {})
     state = held.get(device_id)
-    return (isinstance(state, dict) and state.get("depth", 0) > 0 and
-            state.get("safe_to_release") is not False)
+    return isinstance(state, dict) and state.get("depth", 0) > 0
+
+
+def _pcie_device_lock_owned(device_id: int) -> bool:
+    """Return whether this thread may still issue commands in its session."""
+
+    if not _pcie_device_session_owned(device_id):
+        return False
+    return _PCIE_DEVICE_LOCK_STATE.held[device_id].get("safe_to_release") is not False
 
 
 def _assert_pcie_device_not_quarantined(device_id: int) -> None:
@@ -123,8 +130,9 @@ def _assert_pcie_device_not_quarantined(device_id: int) -> None:
         detail = f"unreadable marker: {error}"
     raise TPUProfilingError(
         f"TPU device {device_id} is fail-closed by {marker}. A prior supervised "
-        "process group could not be fully reaped. Inspect the recorded PGID and "
-        "recover the board manually before removing the marker"
+        "PCIe session could not establish a safe final board state. Inspect the "
+        "recorded reason and any available PGID, then recover the board manually "
+        "before removing the marker"
         f"{': ' + detail if detail else '.'}")
 
 
@@ -171,17 +179,44 @@ def _create_pcie_device_session(device_id: int) -> Path:
     return marker
 
 
-def _quarantine_pcie_device(device_id: int, *, process_group: int, reason: str) -> Path:
-    """Persistently fail-close one device after incomplete process-tree cleanup.
+def _validate_pcie_quarantine_reason(reason: str) -> str:
+    """Return a stable, human-readable reason suitable for a durable marker."""
+
+    if not isinstance(reason, str) or not reason or reason != reason.strip() or \
+            not reason.isprintable():
+        raise ValueError(
+            "reason must be a non-empty printable string without surrounding whitespace")
+    return reason
+
+
+def _validate_pcie_process_group(process_group: Optional[int]) -> Optional[int]:
+    """Validate an observed process group, or preserve an explicitly unknown one."""
+
+    if process_group is not None and (
+            isinstance(process_group, bool) or not isinstance(process_group, int) or
+            process_group <= 0):
+        raise ValueError("process_group must be a positive integer or None")
+    return process_group
+
+
+def _quarantine_pcie_device(
+    device_id: int,
+    *,
+    process_group: Optional[int],
+    reason: str,
+) -> Path:
+    """Persistently fail-close one device after its safe state becomes uncertain.
 
     The marker is intentionally never removed automatically. ``tpu-smi`` can
     report an idle card while a process remains blocked in the driver, so only
-    an operator who has inspected the recorded PGID and recovered the board may
-    remove it. Callers must own the session lock to prevent a competing launch
-    between detecting the failure and creating the marker.
+    an operator who has inspected the reason, any recorded PGID, and recovered
+    the board may remove it. Callers must own the session lock to prevent a
+    competing launch between detecting the failure and creating the marker.
     """
 
-    if not _pcie_device_lock_owned(device_id):
+    reason = _validate_pcie_quarantine_reason(reason)
+    process_group = _validate_pcie_process_group(process_group)
+    if not _pcie_device_session_owned(device_id):
         raise TPUProfilingError(
             f"Cannot quarantine TPU device {device_id} without owning its session lock")
     # Set this before touching the quarantine path.  Creating that second
@@ -196,6 +231,7 @@ def _quarantine_pcie_device(device_id: int, *, process_group: int, reason: str) 
         "status": "quarantined",
         "device_id": device_id,
         "process_group": process_group,
+        "process_group_known": process_group is not None,
         "reason": reason,
         "owner_pid": os.getpid(),
         "host": socket.gethostname(),
@@ -1321,6 +1357,35 @@ class TPUInstructionProfiler:
                 0 <= device_id <= 2**31 - 1):
             raise ValueError("device_id must be a non-negative 32-bit integer")
         return _exclusive_pcie_device_lock(device_id)
+
+    @staticmethod
+    def fail_closed_pcie_device(
+        device_id: int,
+        *,
+        reason: str,
+        process_group: Optional[int] = None,
+    ) -> Path:
+        """Permanently stop further launches when a board is no longer proven safe.
+
+        The caller must already own :meth:`exclusive_pcie_device`. The active
+        session is first marked unsafe in memory, ensuring its durable session
+        marker survives every exception (including ``KeyboardInterrupt``).
+        Creation of the more descriptive quarantine marker is then attempted.
+        ``process_group=None`` records that no responsible PGID was observed,
+        which is expected for an inconclusive postflight board-health check.
+
+        Neither marker is removed automatically. An operator must inspect and
+        recover the board before clearing them.
+        """
+
+        if isinstance(device_id, bool) or not isinstance(device_id, int) or not (
+                0 <= device_id <= 2**31 - 1):
+            raise ValueError("device_id must be a non-negative 32-bit integer")
+        return _quarantine_pcie_device(
+            device_id,
+            process_group=process_group,
+            reason=reason,
+        )
 
     @staticmethod
     def run_supervised_pcie_probe(

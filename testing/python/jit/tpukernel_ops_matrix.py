@@ -764,6 +764,11 @@ def _summary_case(result: Mapping[str, Any], result_path: Path, output_dir: Path
         compact["failure"] = result["failure"]
     if result.get("result_file_error") is not None:
         compact["result_file_error"] = result["result_file_error"]
+    for field in (
+            "execution_status", "execution_failure", "failed_phase", "board_postflight",
+            "board_postflight_error", "board_postflight_failure"):
+        if field in result:
+            compact[field] = result[field]
     if isinstance(worker_result, dict):
         if "metrics" in worker_result:
             compact["metrics"] = worker_result["metrics"]
@@ -803,6 +808,7 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
         "completed_case_count": 0,
         "passed_case_count": 0,
         "failed_case_count": 0,
+        "cancelled_case_count": 0,
         "target_scope": matrix_target_scope(
             (entry["chip"], "tpukernel") for entry in scheduled),
         "scheduled": scheduled,
@@ -899,20 +905,35 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                 _case_directory(output_dir, chip, args.runtime_mode, case) / "result.json")
             if args.runtime_mode == "pcie" and result.get("launch_attempted"):
                 assert args.device_id is not None
+                postflight_exception: Optional[BaseException] = None
                 try:
                     tpu_smi = Path(
                         summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
-                    result["board_postflight"] = board_health(args.device_id, tpu_smi)
-                except Exception as health_error:
+                    result["board_postflight"] = board_health(
+                        args.device_id, tpu_smi, quarantine_on_failure=True)
+                except BaseException as health_error:
+                    postflight_exception = health_error
+                    execution_status = result["status"]
+                    execution_failure = result.get("failure")
+                    result["execution_status"] = execution_status
+                    if execution_failure is not None:
+                        result["execution_failure"] = execution_failure
+                    result["failed_phase"] = "board-postflight-settle"
                     result["board_postflight_error"] = (
                         f"{type(health_error).__name__}: {health_error}")
-                    if result["status"] == "passed":
-                        result["status"] = "failed"
-                        result["failure"] = (
-                            "board postflight failed: " + result["board_postflight_error"])
+                    health_evidence = getattr(health_error, "evidence", None)
+                    if isinstance(health_evidence, Mapping):
+                        result["board_postflight_failure"] = dict(health_evidence)
+                    result["status"] = (
+                        "cancelled" if isinstance(health_error, KeyboardInterrupt) else "failed")
+                    postflight_failure = (
+                        "board postflight failed: " + result["board_postflight_error"])
+                    result["failure"] = (
+                        f"{execution_failure}; {postflight_failure}"
+                        if execution_failure else postflight_failure)
                 try:
                     _write_json(result_path, result)
-                except BaseException as error:
+                except Exception as error:
                     diagnostic = (
                         f"result file write failed: {type(error).__name__}: {error}")
                     result["status"] = "failed"
@@ -920,6 +941,17 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                         f"{result['failure']}; {diagnostic}"
                         if result.get("failure") else diagnostic)
                     result["result_file_error"] = diagnostic
+                if result["status"] == "cancelled":
+                    summary["results"].append(
+                        _summary_case(result, result_path, output_dir))
+                    summary["completed_case_count"] += 1
+                    summary["cancelled_case_count"] += 1
+                    summary["status"] = "cancelled"
+                    summary["stopped_after"] = key
+                    summary["finished_at"] = _utc_now()
+                    _write_json(summary_path, summary)
+                    assert postflight_exception is not None
+                    raise postflight_exception
             summary["results"].append(_summary_case(result, result_path, output_dir))
             summary["completed_case_count"] += 1
             if result["status"] == "passed":

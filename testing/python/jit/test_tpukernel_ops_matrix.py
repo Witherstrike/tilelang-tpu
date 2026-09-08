@@ -286,7 +286,7 @@ def test_pcie_matrix_pins_snapshot_guards_each_case_and_checks_board(
         lambda _environment, _identity: events.append("toolchain-guard"))
     monkeypatch.setattr(
         matrix, "board_health",
-        lambda device, smi: events.append("board") or {
+        lambda device, smi, **_kwargs: events.append("board") or {
             "device_id": device, "tpu_smi": str(smi), "status": "Active"})
 
     def run_one(_args, environment, out, worker, chip, selected_case):
@@ -326,7 +326,12 @@ def test_pcie_matrix_pins_snapshot_guards_each_case_and_checks_board(
     assert summary["results"][0]["status"] == "passed"
 
 
-def test_failed_postflight_is_not_retried(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("interrupted", "execution_failed"),
+    ((False, False), (True, False), (False, True)),
+)
+def test_failed_postflight_is_not_retried(
+        monkeypatch, tmp_path, interrupted, execution_failed):
     source = _source_identity()
     toolchain = _toolchain_identity("pcie")
     case = _case()
@@ -352,9 +357,11 @@ def test_failed_postflight_is_not_retried(monkeypatch, tmp_path):
     monkeypatch.setattr(matrix, "assert_source_identity_unchanged", lambda *_args: None)
     monkeypatch.setattr(matrix, "assert_toolchain_identity_unchanged", lambda *_args: None)
 
-    def health(*_args):
-        board_calls.append("board")
+    def health(*_args, **kwargs):
+        board_calls.append(dict(kwargs))
         if len(board_calls) == 2:
+            if interrupted:
+                raise KeyboardInterrupt
             raise RuntimeError("postflight unhealthy")
         return {"status": "Active"}
 
@@ -362,7 +369,7 @@ def test_failed_postflight_is_not_retried(monkeypatch, tmp_path):
 
     def run_one(_args, _environment, out, _worker, chip, selected_case):
         result = {
-            "status": "passed",
+            "status": "failed" if execution_failed else "passed",
             "case": selected_case.to_json(),
             "chip": chip,
             "runtime_mode": "pcie",
@@ -370,19 +377,39 @@ def test_failed_postflight_is_not_retried(monkeypatch, tmp_path):
             "launch_attempted": True,
             "worker_result": {"metrics": {"passed": True}},
         }
+        if execution_failed:
+            result["failure"] = "numeric mismatch"
         matrix._write_json(
             matrix._case_directory(out, chip, "pcie", selected_case) / "result.json", result)
         return result
 
     monkeypatch.setattr(matrix, "_run_one", run_one)
-    status = matrix._run_matrix(
-        _args("pcie"), tmp_path, output_dir, ("sg2260e",), (case,),
-        {"TMPDIR": str(scratch)})
+    def invoke_matrix():
+        return matrix._run_matrix(
+            _args("pcie"), tmp_path, output_dir, ("sg2260e",), (case,),
+            {"TMPDIR": str(scratch)})
 
-    assert status == 1
-    assert board_calls == ["board", "board"]
+    if interrupted:
+        with pytest.raises(KeyboardInterrupt):
+            invoke_matrix()
+    else:
+        assert invoke_matrix() == 1
+    assert board_calls == [{}, {"quarantine_on_failure": True}]
     summary = json.loads((output_dir / "summary.json").read_text())
-    assert summary["results"][0]["failure"].startswith("board postflight failed")
+    assert summary["completed_case_count"] == 1
+    assert summary["cancelled_case_count"] == (1 if interrupted else 0)
+    assert summary["failed_case_count"] == (0 if interrupted else 1)
+    result = summary["results"][0]
+    assert result["failure"].startswith(
+        "numeric mismatch; board postflight failed" if execution_failed else
+        "board postflight failed")
+    assert result["execution_status"] == (
+        "failed" if execution_failed else "passed")
+    if execution_failed:
+        assert result["execution_failure"] == "numeric mismatch"
+    assert result["failed_phase"] == "board-postflight-settle"
+    assert result["status"] == (
+        "cancelled" if interrupted else "failed")
 
 
 def test_pcie_worker_uses_fail_closed_supervisor_and_unsets_inherited_profile_controls(
