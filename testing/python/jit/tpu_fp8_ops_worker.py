@@ -3,8 +3,8 @@
 """Isolated numerical worker for the TPU-Kernel FP8 capability contract."""
 
 import argparse
+import json
 import os
-import re
 from typing import Tuple
 
 import torch
@@ -16,6 +16,16 @@ _DTYPES = {
     "e4m3": ("e4m3_float8", torch.float8_e4m3fn),
     "e5m2": ("e5m2_float8", torch.float8_e5m2),
 }
+_RESULT_PREFIX = "TPU_FP8_NUMERIC_RESULT="
+_RESULT_SCHEMA_VERSION = 1
+
+
+def _emit_result(payload) -> None:
+    print(
+        _RESULT_PREFIX + json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), allow_nan=False),
+        flush=True,
+    )
 
 _PCIE_GATE_VARIABLES = (
     "TILELANG_TPU_ALLOW_PCIE_LOAD",
@@ -47,6 +57,8 @@ def _profile_selection() -> Tuple[str, str]:
             raise RuntimeError("CModel FP8 worker refuses PCIe recorder/device state: " +
                                ", ".join(inherited_gates))
     else:
+        if chip != "sg2260e":
+            raise RuntimeError("PCIe FP8 worker accepts only chip=sg2260e")
         required = {
             "TILELANG_TPU_ALLOW_PCIE_LOAD": "1",
             "TILELANG_TPU_ALLOW_PCIE_PROFILE": "1",
@@ -58,8 +70,8 @@ def _profile_selection() -> Tuple[str, str]:
             raise RuntimeError("PCIe FP8 worker requires explicit load/profile/recorder gates: " +
                                ", ".join(invalid))
         device_id = os.environ.get("TILELANG_TPU_DEVICE_ID", "")
-        if re.fullmatch(r"[0-9]+", device_id) is None or int(device_id) > 2**31 - 1:
-            raise RuntimeError("PCIe FP8 worker requires a valid numeric device id")
+        if device_id != "0":
+            raise RuntimeError("PCIe FP8 worker accepts only numeric device id 0")
     return chip, runtime_mode
 
 
@@ -166,6 +178,8 @@ def _run_cast(direction: str, dtype: str, torch_dtype: torch.dtype, chip: str,
 
 def _run_elementwise(operation: str, dtype: str, torch_dtype: torch.dtype, chip: str,
                      runtime_mode: str, *, broadcast_rhs: bool) -> None:
+    if operation not in ("add", "sub", "mul", "max"):
+        raise ValueError(f"unsupported FP8 elementwise operation: {operation}")
     rhs_shape = (1, 1) if broadcast_rhs else (1, 64)
 
     @T.prim_func
@@ -181,8 +195,10 @@ def _run_elementwise(operation: str, dtype: str, torch_dtype: torch.dtype, chip:
                 T.ppl_add(out, lhs, rhs)
             elif operation == "sub":
                 T.ppl_subtract(out, lhs, rhs)
-            else:
+            elif operation == "mul":
                 T.ppl_mul(out, lhs, rhs)
+            else:
+                T.ppl_max(out, lhs, rhs)
             T.ppl_copy(out, C)
 
     lhs_pattern = torch.tensor(
@@ -204,8 +220,13 @@ def _run_elementwise(operation: str, dtype: str, torch_dtype: torch.dtype, chip:
         "add": torch.add,
         "sub": torch.sub,
         "mul": torch.mul,
+        "max": torch.maximum,
     }[operation](lhs.float(), rhs.float())
     expected = expected_fp32.to(torch_dtype)
+    if operation == "max":
+        if not torch.equal(output.view(torch.uint8), expected.view(torch.uint8)):
+            raise RuntimeError("FP8 max changed the selected operand encoding")
+        return
     if not torch.equal(output.view(torch.uint8), expected.view(torch.uint8)):
         _assert_close(output, expected, atol=0.25, rtol=0.0)
 
@@ -342,9 +363,11 @@ def main() -> None:
             "add",
             "sub",
             "mul",
+            "max",
             "add-broadcast",
             "sub-broadcast",
             "mul-broadcast",
+            "max-broadcast",
             "add-scalar",
             "mul-scalar",
             "rope",
@@ -357,48 +380,72 @@ def main() -> None:
         required=True,
     )
     args = parser.parse_args()
-    chip, runtime_mode = _profile_selection()
-    dtype, torch_dtype = _DTYPES[args.dtype]
-    if args.case in ("copy", "copy-global-to-global"):
-        _run_copy(
-            dtype,
-            torch_dtype,
-            chip,
-            runtime_mode,
-            direct_global=args.case == "copy-global-to-global",
-        )
-    elif args.case == "fill-zero":
-        _run_fill_zero(dtype, torch_dtype, chip, runtime_mode)
-    elif args.case.startswith("cast-"):
-        _run_cast(args.case[len("cast-"):], dtype, torch_dtype, chip, runtime_mode)
-    elif args.case in ("add", "sub", "mul", "add-broadcast", "sub-broadcast", "mul-broadcast"):
-        operation = _elementwise_operation(args.case)
-        _run_elementwise(
-            operation,
-            dtype,
-            torch_dtype,
-            chip,
-            runtime_mode,
-            broadcast_rhs=args.case.endswith("-broadcast"),
-        )
-    elif args.case in ("add-scalar", "mul-scalar"):
-        _run_scalar(
-            args.case[:-len("-scalar")],
-            dtype,
-            torch_dtype,
-            chip,
-            runtime_mode,
-        )
-    elif args.case == "rope":
-        _run_rope(dtype, torch_dtype, chip, runtime_mode)
-    elif args.case == "gather":
-        _run_gather(dtype, torch_dtype, chip, runtime_mode)
-    else:
-        _run_gemm(args.case, dtype, torch_dtype, chip, runtime_mode)
-    print(
-        f"TPU_FP8_WORKER_OK chip={chip} dtype={args.dtype} case={args.case}",
-        flush=True,
-    )
+    chip = os.environ.get("TILELANG_TPU_PROFILE_CHIP", "")
+    runtime_mode = os.environ.get("TILELANG_TPU_PROFILE_RUNTIME_MODE", "")
+    try:
+        chip, runtime_mode = _profile_selection()
+        dtype, torch_dtype = _DTYPES[args.dtype]
+        if args.case in ("copy", "copy-global-to-global"):
+            _run_copy(
+                dtype,
+                torch_dtype,
+                chip,
+                runtime_mode,
+                direct_global=args.case == "copy-global-to-global",
+            )
+        elif args.case == "fill-zero":
+            _run_fill_zero(dtype, torch_dtype, chip, runtime_mode)
+        elif args.case.startswith("cast-"):
+            _run_cast(args.case[len("cast-"):], dtype, torch_dtype, chip, runtime_mode)
+        elif args.case in (
+                "add", "sub", "mul", "max", "add-broadcast", "sub-broadcast",
+                "mul-broadcast", "max-broadcast"):
+            operation = _elementwise_operation(args.case)
+            _run_elementwise(
+                operation,
+                dtype,
+                torch_dtype,
+                chip,
+                runtime_mode,
+                broadcast_rhs=args.case.endswith("-broadcast"),
+            )
+        elif args.case in ("add-scalar", "mul-scalar"):
+            _run_scalar(
+                args.case[:-len("-scalar")],
+                dtype,
+                torch_dtype,
+                chip,
+                runtime_mode,
+            )
+        elif args.case == "rope":
+            _run_rope(dtype, torch_dtype, chip, runtime_mode)
+        elif args.case == "gather":
+            _run_gather(dtype, torch_dtype, chip, runtime_mode)
+        else:
+            _run_gemm(args.case, dtype, torch_dtype, chip, runtime_mode)
+    except BaseException as error:
+        _emit_result({
+            "schema_version": _RESULT_SCHEMA_VERSION,
+            "status": "failed",
+            "chip": chip,
+            "programming_model": "tpukernel",
+            "runtime_mode": runtime_mode,
+            "dtype": args.dtype,
+            "case": args.case,
+            "error_type": type(error).__name__,
+            "error": str(error),
+        })
+        raise
+    _emit_result({
+        "schema_version": _RESULT_SCHEMA_VERSION,
+        "status": "passed",
+        "chip": chip,
+        "programming_model": "tpukernel",
+        "runtime_mode": runtime_mode,
+        "dtype": args.dtype,
+        "case": args.case,
+        "metrics": {"passed": True},
+    })
 
 
 if __name__ == "__main__":

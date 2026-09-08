@@ -6,6 +6,7 @@ The project provides TPU support for BM1690 and SG2260E. A complete TPU target
 selects both compile-time axes as
 `target="tpu -mcpu=<chip> -tpu-programming-model=<tpukernel|rv>"`; the separate
 `runtime_mode="cmodel|pcie"` selects how that program is hosted.
+
 ## Highlights
 
 - TileLang frontend with TPU target support
@@ -77,16 +78,18 @@ pip install -e . -v
 ### 3. Run a TPU demo
 
 ```bash
-# SG2260E TPU-Kernel CModel numerical baseline
-PPL_PROJECT_ROOT=/path/to/ppl-1.7 python tpu_demo/matmul/tpu_test_matmul_fp16.py
+# SG2260E RV Tensor CModel numerical example
+PPL_PROJECT_ROOT=/path/to/ppl-1.7 python3 -m tpu_demo.run \
+  --case matmul.float16 \
+  --chip sg2260e \
+  --programming-model rv \
+  --runtime-mode cmodel
 ```
 
-The other historical demos are development examples, not a blanket SG2260E
-support claim: review their complete Target and runtime selection before
-running them. Do not run a PCIe demo until its CModel numerical case has passed
-and an external watchdog is in place.
-
-For a more detailed setup guide, see [`tpu_demo/instruction.md`](./tpu_demo/instruction.md).
+The public demo registry contains import-safe elementwise, matmul, RMSNorm,
+RMSNorm split-k, RoPE, SwiGLU, and FlashAttention examples. It is not a blanket
+hardware-support claim; the exact staged evidence and the only supported PCIe
+workflow are documented in [`tpu_demo/README.md`](./tpu_demo/README.md).
 
 ## Programming Model
 
@@ -122,31 +125,46 @@ may locate the PPL SDK and runtime, but they never replace either compile-time
 field in the explicit TPU Target, so a CPU-only process cannot silently become a
 TPU job.
 
-Selecting `-tpu-programming-model=rv` exposes a direct, low-level bridge to the
-PPL 1.7 RV Tensor ABI. `T.rvt_*` calls require explicit CR/TR/GR descriptor setup.
-The generic
+Portable `T.ppl_copy/fill/gemm/add/subtract/mul/div/max` expressions are lowered
+to `tl.tpu.*` first, then selected as TPU-Kernel or RV Tensor instructions from
+the complete target. The current public demo registry exercises RV elementwise
+add/sub/mul/div and matmul for FP16, BF16, and FP32. Selecting
+`-tpu-programming-model=rv` also exposes a direct expert bridge to the PPL 1.7 RV
+Tensor ABI. `T.rvt_*` calls require explicit CR/TR/GR descriptor setup. The generic
 `T.rvt_call` escape hatch only supports APIs whose C arguments are representable
 by TIR; APIs taking C structs by value need dedicated helpers first. Raw
 `T.rvt_*` and high-level `T.ppl_*` calls also cannot share one kernel, because
 their descriptor and command-stream ownership models are different.
 
-The recorded SG2260E evidence covers FP32 add/sub/mul/div and a fixed-shape FP16
-matmul in both CModel and supervised PCIe runs; see the reports under
-`research/`. This scope must not be extrapolated to arbitrary dtype, shape,
-tail, multi-core execution, or raw `T.rvt_*` programs.
+Runtime support remains scoped by exact dtype, shape, variant, target, and
+execution mode. See the machine-readable
+[`contract.json`](./research/tpu-op-contract/contract.json) and the high-level
+[`design and validation report`](./research/tpu-demo-ops/README.md); no result may
+be extrapolated to arbitrary shapes, tails, multi-core execution, or raw
+`T.rvt_*` programs.
 
 All TPU JIT entry points default to the fail-safe `cmodel` runtime when no
 runtime mode is supplied. PCIe
 loading is fail-closed because loading the runtime can touch the board even
-before a dispatch. Only after a CModel numerical smoke test should a supervised
-PCIe bring-up explicitly set both variables below, select `runtime_mode="pcie"`,
-and run one dispatch under an external watchdog:
+before a dispatch. Board execution is accepted only through the staged matrix
+runner after matching BM1690 and SG2260E CModel summaries have passed on the same
+clean source/toolchain identity:
 
 ```bash
-export TILELANG_TPU_ALLOW_PCIE_LOAD=1
-export TILELANG_TPU_DEVICE_ID=<verified-board-id>
-timeout --kill-after=5s 30s python your_single_dispatch_smoke.py
+python3 testing/python/jit/tpu_demo_ops_matrix.py \
+  --runtime-mode pcie --chip sg2260e --device-id 0 \
+  --allow-pcie --allow-pcie-profile --all-pcie-cases \
+  --bm-cmodel-summary <bm-summary.json> \
+  --sg-cmodel-summary <sg-summary.json> \
+  --output-dir <new-not-yet-existing-artifact-directory>
 ```
+
+The runner verifies the single-card topology and a content-addressed manifest
+of the selected compiler/PPL/runtime inputs, holds one device lock across the whole invocation, compiles from a
+read-only snapshot of the promoted Git commit, and rechecks source/toolchain
+identity before every launch. Timeout or incomplete process-group cleanup stops
+the matrix; a persistent session/quarantine marker keeps later runs fail-closed
+until an operator has inspected and recovered the board.
 
 TPU JIT compilation writes each kernel and its host wrapper to a private
 temporary workspace; it no longer depends on a process-global `PPL_KERNEL_PATH`
@@ -165,11 +183,12 @@ Inside TPU kernels, the common building blocks are exposed as TileLang DSL intri
 - `T.ppl_copy`
 - `T.ppl_fill`
 - `T.ppl_gemm`
+- `T.ppl_add`, `T.ppl_subtract`, `T.ppl_mul`, `T.ppl_div`, `T.ppl_max`
+- `T.ppl_add_C`, `T.ppl_mul_C`
+- `T.ppl_exp`, `T.ppl_sigmoid`, `T.ppl_rsqrt`
 - `T.ppl_reduce_sum`
 - `T.ppl_reduce_max`
-- `T.ppl_add`, `T.ppl_subtract`, `T.ppl_mul`, `T.ppl_div`
-- `T.ppl_add_C`, `T.ppl_mul_C`
-- `T.ppl_rsqrt`
+- `T.ppl_gather`, `T.ppl_topk`
 - `T.ppl_rope_add`
 
 ## Examples
@@ -178,10 +197,10 @@ The current examples mainly cover operators commonly used in Llama and DeepSeek 
 
 Representative examples include:
 
+- Elementwise add/subtract/multiply/divide
 - Matmul
-- RMSNorm
+- RMSNorm and split-k RMSNorm
 - RoPE
-- Reduce
 - SwiGLU
 - FlashAttention
 
@@ -191,14 +210,15 @@ Representative examples include:
 - [`src/target/`](./src/target/): TPU codegen and runtime modules
 - [`src/tl_templates/tpu/`](./src/tl_templates/tpu/): checked-in TPU code templates; JIT artifacts use private temporary workspaces
 - [`tilelang/jit/adapter/`](./tilelang/jit/adapter/): TPU JIT wrapper and library generation flow
-- [`tpu_demo/`](./tpu_demo/): TPU demos and bring-up scripts
+- [`tpu_demo/`](./tpu_demo/): import-safe high-level examples and their case registry
+- [`testing/python/jit/`](./testing/python/jit/): low-level probes and staged matrix runners
 
 ## Development Notes
 
 - If you modify C++ code, rebuild the native components before rerunning demos:
 
 ```bash
-make -j 10
+cmake --build <configured-build-directory> --parallel 10
 ```
 
 - Format the repository with:

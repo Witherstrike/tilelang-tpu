@@ -4,6 +4,7 @@
 
 from pathlib import Path
 from contextlib import suppress
+import fcntl
 import hashlib
 import importlib
 import json
@@ -454,12 +455,15 @@ def test_kill_and_drain_remains_bounded_when_process_cannot_be_reaped(monkeypatc
     monkeypatch.setattr(tpu_profiling_module, "_PROCESS_PIPE_DRAIN_S", 0.001)
 
     process = StuckProcess()
-    stdout, stderr = tpu_profiling_module._terminate_and_collect(process)
+    terminated = tpu_profiling_module._terminate_and_collect(process)
 
-    assert stdout == "partial stdout"
-    assert "partial stderr" in stderr
-    assert "did not close its output pipes" in stderr
-    assert "could not be reaped" in stderr
+    assert terminated.stdout == "partial stdout"
+    assert "partial stderr" in terminated.stderr
+    assert "did not close its output pipes" in terminated.stderr
+    assert "could not be reaped" in terminated.stderr
+    assert terminated.cleanup_complete is False
+    assert terminated.left_live_descendant is True
+    assert terminated.process_group == process.pid
     assert [item for item in signals if item[1] != 0] == [
         (process.pid, signal.SIGTERM),
         (process.pid, signal.SIGKILL),
@@ -892,12 +896,45 @@ def test_pcie_decoder_config_normalizes_only_explicit_pcie_paths(tmp_path):
             runtime_mode="pcie",
             pcie_decoder_pythonpath=package_path,
         )
-    with pytest.raises(ValueError, match="not a directory"):
+    with pytest.raises(ValueError, match="not a directory or importable"):
         TPUProfilingConfig(
             chip="sg2260e",
             runtime_mode="pcie",
             pcie_decoder_pythonpath=(tmp_path / "missing",),
         )
+
+
+def test_pcie_decoder_pythonpath_accepts_importable_archive(tmp_path):
+    import zipfile
+
+    archive = tmp_path / "decoder.body"
+    with zipfile.ZipFile(archive, "w") as output:
+        output.writestr("decoder_package/__init__.py", "")
+
+    config = TPUProfilingConfig(
+        chip="sg2260e",
+        runtime_mode="pcie",
+        pcie_decoder_pythonpath=(archive,),
+    )
+
+    assert config.pcie_decoder_pythonpath == (archive.resolve(),)
+
+
+def test_pcie_decoder_python_preserves_virtualenv_symlink(tmp_path):
+    interpreter = tmp_path / "python-real"
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(interpreter.stat().st_mode | stat.S_IXUSR)
+    virtualenv_launcher = tmp_path / "venv-python"
+    virtualenv_launcher.symlink_to(interpreter)
+
+    config = TPUProfilingConfig(
+        chip="sg2260e",
+        runtime_mode="pcie",
+        pcie_decoder_python=virtualenv_launcher,
+    )
+
+    assert config.pcie_decoder_python == virtualenv_launcher.absolute()
+    assert config.pcie_decoder_python != interpreter.resolve()
 
 
 def test_pcie_decoder_preflight_is_offline_and_returns_api_identity(tmp_path):
@@ -989,6 +1026,130 @@ def test_pcie_profile_requires_all_gates_before_spawning(tmp_path):
                 "TILELANG_TPU_DEVICE_ID": "0",
             },
         )
+
+
+def test_pcie_device_lock_is_session_wide_reentrant_and_exclusive(tmp_path, monkeypatch):
+    monkeypatch.setattr(tpu_profiling_module, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+    lock_path = tmp_path / "tilelang-tpu-device-17.lock"
+    session_path = tmp_path / "tilelang-tpu-device-17.session.json"
+
+    with TPUInstructionProfiler.exclusive_pcie_device(17) as outer:
+        assert outer == lock_path
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        assert session["status"] == "active"
+        assert session["device_id"] == 17
+        with TPUInstructionProfiler.exclusive_pcie_device(17) as nested:
+            assert nested == lock_path
+            assert session_path.is_file()
+        with lock_path.open("a+", encoding="utf-8") as competitor:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(competitor.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    assert not session_path.exists()
+    with lock_path.open("a+", encoding="utf-8") as available:
+        fcntl.flock(available.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(available.fileno(), fcntl.LOCK_UN)
+
+
+def test_pcie_device_lock_rejects_crash_persistent_prior_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(tpu_profiling_module, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+    marker = tmp_path / "tilelang-tpu-device-8.session.json"
+    marker.write_text(
+        json.dumps({"status": "active", "device_id": 8, "owner_pid": 1234}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TPUProfilingError, match="incomplete prior session"):
+        with TPUInstructionProfiler.exclusive_pcie_device(8):
+            pass
+
+    assert marker.is_file()
+
+
+def test_pcie_device_quarantine_is_persistent_and_never_auto_cleared(tmp_path, monkeypatch):
+    monkeypatch.setattr(tpu_profiling_module, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+    marker = tmp_path / "tilelang-tpu-device-3.quarantine.json"
+
+    with TPUInstructionProfiler.exclusive_pcie_device(3):
+        observed = tpu_profiling_module._quarantine_pcie_device(
+            3, process_group=8765, reason="unit-test unreaped process group")
+        assert observed == marker
+        with pytest.raises(TPUProfilingError, match="became unsafe"):
+            with TPUInstructionProfiler.exclusive_pcie_device(3):
+                pass
+
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert payload["status"] == "quarantined"
+    assert payload["device_id"] == 3
+    assert payload["process_group"] == 8765
+    with pytest.raises(TPUProfilingError, match="fail-closed"):
+        with TPUInstructionProfiler.exclusive_pcie_device(3):
+            pass
+
+
+def test_pcie_quarantine_creation_failure_retains_active_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(tpu_profiling_module, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+    session = tmp_path / "tilelang-tpu-device-6.session.json"
+    quarantine = tmp_path / "tilelang-tpu-device-6.quarantine.json"
+
+    with TPUInstructionProfiler.exclusive_pcie_device(6):
+        real_open = os.open
+
+        def fail_quarantine_open(path, flags, mode=0o777, *, dir_fd=None):
+            if Path(path) == quarantine:
+                raise PermissionError("simulated read-only lock directory")
+            if dir_fd is None:
+                return real_open(path, flags, mode)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(tpu_profiling_module.os, "open", fail_quarantine_open)
+        with pytest.raises(TPUProfilingError, match="session marker .* retained fail-closed"):
+            tpu_profiling_module._quarantine_pcie_device(
+                6, process_group=999, reason="simulated incomplete cleanup")
+        with pytest.raises(TPUProfilingError, match="became unsafe"):
+            with TPUInstructionProfiler.exclusive_pcie_device(6):
+                pass
+
+    assert session.is_file()
+    assert not quarantine.exists()
+    with pytest.raises(TPUProfilingError, match="incomplete prior session"):
+        with TPUInstructionProfiler.exclusive_pcie_device(6):
+            pass
+
+
+def test_pcie_probe_quarantines_incomplete_process_group_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setattr(tpu_profiling_module, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
+    incomplete = tpu_profiling_module.TPUSupervisedCommandResult(
+        stdout="",
+        stderr="stuck",
+        returncode=None,
+        timed_out=True,
+        left_live_descendant=True,
+        cleanup_complete=False,
+        process_group=4567,
+    )
+    monkeypatch.setattr(
+        tpu_profiling_module, "run_tpu_supervised_command", lambda *args, **kwargs: incomplete)
+
+    with TPUInstructionProfiler.exclusive_pcie_device(4):
+        with pytest.raises(TPUProfilingError, match="quarantined"):
+            TPUInstructionProfiler.run_supervised_pcie_probe(
+                4, [sys.executable, "-c", "pass"], cwd=tmp_path)
+
+    marker = tmp_path / "tilelang-tpu-device-4.quarantine.json"
+    assert json.loads(marker.read_text(encoding="utf-8"))["process_group"] == 4567
+
+
+def test_pcie_probe_requires_session_lock(tmp_path):
+    with pytest.raises(TPUProfilingError, match="requires ownership"):
+        TPUInstructionProfiler.run_supervised_pcie_probe(
+            5, [sys.executable, "-c", "pass"], cwd=tmp_path)
+
+
+@pytest.mark.parametrize("device_id", (-1, 2**31, True, "0"))
+def test_pcie_device_lock_rejects_invalid_device_ids(device_id):
+    with pytest.raises(ValueError, match="non-negative 32-bit"):
+        TPUInstructionProfiler.exclusive_pcie_device(device_id)
 
 
 def test_pcie_profile_decodes_with_preinstalled_vendor_packages(tmp_path):

@@ -9,6 +9,7 @@ object; PCIe is accepted only when the profiler supplies every safety gate.
 """
 
 import argparse
+import json
 import os
 
 import torch
@@ -16,11 +17,30 @@ import torch
 import tilelang
 import tilelang.language as T
 
+_RESULT_PREFIX = "TPU_CORE_NUMERIC_RESULT="
+_RESULT_SCHEMA_VERSION = 1
+
 _COPY_CASES = {
     "copy-fp32-local-roundtrip": ("float32", "local"),
     "copy-fp32-global-to-global": ("float32", "global"),
     "copy-fp16-local-roundtrip": ("float16", "local"),
     "copy-fp16-global-to-global": ("float16", "global"),
+}
+
+_MAX_CASES = {
+    "elementwise-max-fp16-dense": ("float16", "dense"),
+    "elementwise-max-bf16-dense": ("bfloat16", "dense"),
+    "elementwise-max-fp32-dense": ("float32", "dense"),
+    "elementwise-max-fp16-broadcast": ("float16", "broadcast"),
+    "elementwise-max-bf16-broadcast": ("bfloat16", "broadcast"),
+    "elementwise-max-fp32-broadcast": ("float32", "broadcast"),
+    "elementwise-max-fp32-negative-infinity": ("float32", "negative-infinity"),
+}
+
+_BROADCAST_CASES = {
+    f"elementwise-{operation}-{dtype}-broadcast": (operation, dtype)
+    for operation in ("add", "sub", "mul", "div")
+    for dtype in ("fp16", "bf16", "fp32")
 }
 
 
@@ -32,7 +52,13 @@ def _profile_selection():
     chip = os.environ.get("TILELANG_TPU_PROFILE_CHIP")
     programming_model = os.environ.get("TILELANG_TPU_PROFILE_PROGRAMMING_MODEL")
     runtime_mode = os.environ.get("TILELANG_TPU_PROFILE_RUNTIME_MODE")
-    if not chip or not programming_model or runtime_mode not in ("cmodel", "pcie"):
+    if chip not in ("bm1690", "sg2260e"):
+        raise RuntimeError("missing or invalid TileLang TPU chip selection.")
+    if programming_model not in ("tpukernel", "rv"):
+        raise RuntimeError("missing or invalid TileLang TPU programming-model selection.")
+    if chip == "bm1690" and programming_model == "rv":
+        raise RuntimeError("BM1690 does not implement the RV Tensor programming model.")
+    if runtime_mode not in ("cmodel", "pcie"):
         raise RuntimeError("missing or invalid TileLang TPU profile selection.")
     if os.environ.get("TILELANG_TPU_BENCHMARK_RUNS") != "0":
         raise RuntimeError("instruction profiling requires exactly one TileLang launch.")
@@ -43,14 +69,24 @@ def _profile_selection():
                 raise RuntimeError(
                     f"CModel profile worker inherited forbidden PCIe setting {name}.")
     else:
+        if chip != "sg2260e":
+            raise RuntimeError("PCIe core-op worker accepts only chip=sg2260e.")
         for name in ("TILELANG_TPU_ALLOW_PCIE_LOAD", "TILELANG_TPU_ALLOW_PCIE_PROFILE",
                      "BMLIB_ENABLE_ALL_PROFILE"):
             if os.environ.get(name) != "1":
                 raise RuntimeError(f"PCIe profile worker is missing safety gate {name}=1.")
         device_id = os.environ.get("TILELANG_TPU_DEVICE_ID", "")
-        if not device_id.isdecimal():
-            raise RuntimeError("PCIe profile worker requires a numeric device ID.")
+        if device_id != "0":
+            raise RuntimeError("PCIe core-op worker accepts only numeric device id 0.")
     return chip, programming_model, runtime_mode
+
+
+def _emit_result(payload) -> None:
+    print(
+        _RESULT_PREFIX + json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), allow_nan=False),
+        flush=True,
+    )
 
 
 @T.prim_func
@@ -148,20 +184,35 @@ def _matmul(chip: str, programming_model: str, runtime_mode: str) -> None:
         raise RuntimeError(f"{programming_model} matmul mismatch; max abs difference={difference}")
 
 
-def _elementwise(operation: str, chip: str, programming_model: str, runtime_mode: str) -> None:
+def _elementwise(operation: str, chip: str, programming_model: str, runtime_mode: str, *,
+                 dtype: str = "float32", variant: str = "dense") -> None:
+    if dtype not in ("float16", "bfloat16", "float32"):
+        raise ValueError(f"unsupported elementwise dtype {dtype!r}")
+    if variant not in ("dense", "broadcast", "negative-infinity"):
+        raise ValueError(f"unsupported elementwise variant {variant!r}")
+    if variant == "negative-infinity" and (operation != "max" or dtype != "float32"):
+        raise ValueError("the negative-infinity sentinel is an FP32 max probe")
+
+    shape = (64, 64)
+    rhs_shape = (64, 1) if variant == "broadcast" else shape
+    tile_shape = (32, 32)
+    rhs_tile_shape = (32, 1) if variant == "broadcast" else tile_shape
 
     @T.prim_func
     def elementwise(
-            A: T.Tensor((64, 64), "float32"),
-            B: T.Tensor((64, 64), "float32"),
-            C: T.Tensor((64, 64), "float32"),
+            A: T.Tensor(shape, dtype),
+            B: T.Tensor(rhs_shape, dtype),
+            C: T.Tensor(shape, dtype),
     ):
         with T.Kernel(2, 2, is_cpu=True) as (bx, by):
-            A_shared = T.alloc_shared((32, 32), "float32")
-            B_shared = T.alloc_shared((32, 32), "float32")
-            C_shared = T.alloc_shared((32, 32), "float32")
+            A_shared = T.alloc_shared(tile_shape, dtype)
+            B_shared = T.alloc_shared(rhs_tile_shape, dtype)
+            C_shared = T.alloc_shared(tile_shape, dtype)
             T.ppl_copy(A[by * 32, bx * 32], A_shared)
-            T.ppl_copy(B[by * 32, bx * 32], B_shared)
+            if variant == "broadcast":
+                T.ppl_copy(B[by * 32, 0], B_shared)
+            else:
+                T.ppl_copy(B[by * 32, bx * 32], B_shared)
             if operation == "add":
                 T.ppl_add(C_shared, A_shared, B_shared)
             elif operation == "sub":
@@ -170,6 +221,8 @@ def _elementwise(operation: str, chip: str, programming_model: str, runtime_mode
                 T.ppl_mul(C_shared, A_shared, B_shared)
             elif operation == "div":
                 T.ppl_div(C_shared, A_shared, B_shared)
+            elif operation == "max":
+                T.ppl_max(C_shared, A_shared, B_shared)
             T.ppl_copy(C_shared, C[by * 32, bx * 32])
 
     torch.manual_seed(0)
@@ -180,22 +233,57 @@ def _elementwise(operation: str, chip: str, programming_model: str, runtime_mode
                 f"-tpu-programming-model={programming_model}"),
         runtime_mode=runtime_mode,
     )
-    a = torch.randn(64, 64, dtype=torch.float32)
+    torch_dtype = {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }[dtype]
+    if variant == "negative-infinity":
+        finite = torch.linspace(-8.0, 8.0, steps=shape[0] * shape[1],
+                                dtype=torch.float32).reshape(shape)
+        a = finite.clone()
+        b = torch.flip(finite, dims=(1,)).clone()
+        a[:, 0::4] = -float("inf")
+        b[:, 1::4] = -float("inf")
+        a[:, 2::4] = -float("inf")
+        b[:, 2::4] = -float("inf")
+    else:
+        a = torch.randn(shape, dtype=torch.float32).to(torch_dtype)
     if operation == "div":
         # Keep the divisor bounded away from zero; rvt_fdiv is a documented
         # reciprocal-sqrt approximation rather than strict IEEE division.
-        b = torch.rand(64, 64, dtype=torch.float32) * 1.5 + 0.5
-    else:
-        b = torch.randn(64, 64, dtype=torch.float32)
-    c = torch.zeros(64, 64, dtype=torch.float32)
+        b = (torch.rand(rhs_shape, dtype=torch.float32) * 1.5 + 0.5).to(torch_dtype)
+    elif variant != "negative-infinity":
+        b = torch.randn(rhs_shape, dtype=torch.float32).to(torch_dtype)
+    c = torch.zeros(shape, dtype=torch_dtype)
     kernel(a, b, c)
     reference = {
         "add": torch.add,
         "sub": torch.sub,
         "mul": torch.mul,
         "div": torch.div,
+        "max": torch.maximum,
     }[operation](a, b)
-    atol, rtol = ((1e-2, 1e-2) if operation == "div" else (1e-5, 1e-5))
+    if operation == "max":
+        if not torch.equal(c, reference):
+            mismatches = int(torch.count_nonzero(c != reference))
+            raise RuntimeError(
+                f"{programming_model} elementwise-max {dtype} {variant} mismatch; "
+                f"unequal elements={mismatches}; actual={c.reshape(-1)[:8].tolist()}; "
+                f"expected={reference.reshape(-1)[:8].tolist()}")
+        return
+    if operation == "div":
+        atol, rtol = {
+            "float16": (1e-2, 1e-2),
+            "bfloat16": (3e-2, 3e-2),
+            "float32": (1e-5, 1e-5),
+        }[dtype]
+    else:
+        atol, rtol = {
+            "float16": (5e-3, 5e-3),
+            "bfloat16": (2e-2, 2e-2),
+            "float32": (1e-5, 1e-5),
+        }[dtype]
     if not torch.allclose(c, reference, atol=atol, rtol=rtol):
         difference = float(torch.max(torch.abs(reference - c)))
         raise RuntimeError(f"{programming_model} elementwise-{operation} mismatch; "
@@ -264,28 +352,59 @@ def main() -> None:
             "elementwise-sub",
             "elementwise-mul",
             "elementwise-div",
+            *_BROADCAST_CASES,
+            *_MAX_CASES,
             *_COPY_CASES,
             "rv-control",
         ),
         required=True,
     )
     args = parser.parse_args()
-    chip, programming_model, runtime_mode = _profile_selection()
-    if args.case in ("matmul", "tpukernel-matmul"):
-        _matmul(chip, programming_model, runtime_mode)
-    elif args.case.startswith("elementwise-"):
-        _elementwise(args.case[len("elementwise-"):], chip, programming_model, runtime_mode)
-    elif args.case in _COPY_CASES:
-        dtype, transfer = _COPY_CASES[args.case]
-        _copy(dtype, transfer, chip, programming_model, runtime_mode)
-    else:
-        _rv_control(chip, programming_model, runtime_mode)
-    print(
-        "TPU_PROFILE_WORKER_OK "
-        f"case={args.case} chip={chip} programming_model={programming_model} "
-        f"runtime_mode={runtime_mode}",
-        flush=True,
-    )
+    chip = os.environ.get("TILELANG_TPU_PROFILE_CHIP", "")
+    programming_model = os.environ.get("TILELANG_TPU_PROFILE_PROGRAMMING_MODEL", "")
+    runtime_mode = os.environ.get("TILELANG_TPU_PROFILE_RUNTIME_MODE", "")
+    try:
+        chip, programming_model, runtime_mode = _profile_selection()
+        if args.case in ("matmul", "tpukernel-matmul"):
+            _matmul(chip, programming_model, runtime_mode)
+        elif args.case in _MAX_CASES:
+            dtype, variant = _MAX_CASES[args.case]
+            _elementwise("max", chip, programming_model, runtime_mode,
+                         dtype=dtype, variant=variant)
+        elif args.case in _BROADCAST_CASES:
+            operation, dtype_token = _BROADCAST_CASES[args.case]
+            dtype = {"fp16": "float16", "bf16": "bfloat16", "fp32": "float32"}[
+                dtype_token]
+            _elementwise(operation, chip, programming_model, runtime_mode,
+                         dtype=dtype, variant="broadcast")
+        elif args.case.startswith("elementwise-"):
+            _elementwise(args.case[len("elementwise-"):], chip, programming_model, runtime_mode)
+        elif args.case in _COPY_CASES:
+            dtype, transfer = _COPY_CASES[args.case]
+            _copy(dtype, transfer, chip, programming_model, runtime_mode)
+        else:
+            _rv_control(chip, programming_model, runtime_mode)
+    except BaseException as error:
+        _emit_result({
+            "schema_version": _RESULT_SCHEMA_VERSION,
+            "status": "failed",
+            "case": args.case,
+            "chip": chip,
+            "programming_model": programming_model,
+            "runtime_mode": runtime_mode,
+            "error_type": type(error).__name__,
+            "error": str(error),
+        })
+        raise
+    _emit_result({
+        "schema_version": _RESULT_SCHEMA_VERSION,
+        "status": "passed",
+        "case": args.case,
+        "chip": chip,
+        "programming_model": programming_model,
+        "runtime_mode": runtime_mode,
+        "metrics": {"passed": True},
+    })
 
 
 if __name__ == "__main__":

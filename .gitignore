@@ -130,3 +130,5 @@ tilelang/jit/adapter/cython/.cycache
 !/research/tpu-backend-design/
 !/research/tpu-backend-design/README.md
 !/research/tpu-backend-design/test-report.md
+!/research/tpu-demo-ops/
+!/research/tpu-demo-ops/README.md

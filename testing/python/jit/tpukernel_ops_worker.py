@@ -134,11 +134,15 @@ def build_case_specs() -> Tuple[CaseSpec, ...]:
         add("gemm", dtype, "accumulate", accumulate=True, transpose_b=False)
         add("gemm", dtype, "transpose-b", accumulate=False, transpose_b=True)
 
-    for operation in ("add", "sub", "mul", "div"):
+    for operation in ("add", "sub", "mul", "div", "max"):
         for dtype in _FLOAT_DTYPES:
             add(operation, dtype)
         # W-broadcast is a distinct lowering path (zero rhs W-stride).
         add(operation, "float32", "broadcast", broadcast_rhs=True)
+    # Exercise the online-softmax identity used by FlashAttention explicitly:
+    # max(-inf, x), max(x, -inf), and max(-inf, -inf) must all preserve the
+    # exact FP32 operand value/encoding selected by the semantic operation.
+    add("max", "float32", "negative-infinity", negative_infinity_sentinel=True)
 
     for operation, value in (("add-scalar", -0.25), ("mul-scalar", 0.75)):
         for dtype in _FLOAT_DTYPES:
@@ -487,10 +491,24 @@ def _run_elementwise(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any
                 T.ppl_mul(dst_local, lhs_local, rhs_local)
             elif operation == "div":
                 T.ppl_div(dst_local, lhs_local, rhs_local)
+            elif operation == "max":
+                T.ppl_max(dst_local, lhs_local, rhs_local)
             T.ppl_copy(dst_local, dst)
 
-    lhs = _random_float(torch, shape, dtype, generator)
-    rhs = _random_float(torch, rhs_shape, dtype, generator, positive=operation == "div")
+    if operation == "max" and spec.parameters.get("negative_infinity_sentinel"):
+        if dtype != "float32" or rhs_shape != shape:
+            raise AssertionError("the max negative-infinity sentinel is a dense FP32 probe")
+        finite = torch.linspace(-8.0, 8.0, steps=shape[0] * shape[1],
+                                dtype=torch.float32).reshape(shape)
+        lhs = finite.clone()
+        rhs = torch.flip(finite, dims=(1,)).clone()
+        lhs[:, 0::4] = -float("inf")
+        rhs[:, 1::4] = -float("inf")
+        lhs[:, 2::4] = -float("inf")
+        rhs[:, 2::4] = -float("inf")
+    else:
+        lhs = _random_float(torch, shape, dtype, generator)
+        rhs = _random_float(torch, rhs_shape, dtype, generator, positive=operation == "div")
     dst = torch.zeros(shape, dtype=_torch_dtype(torch, dtype))
     timing = _compile_and_launch(tilelang, kernel, (lhs, rhs, dst), chip, runtime_mode)
     lhs_f32 = lhs.float()
@@ -501,9 +519,13 @@ def _run_elementwise(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any
         expected_f32 = lhs_f32 - rhs_f32
     elif operation == "mul":
         expected_f32 = lhs_f32 * rhs_f32
-    else:
+    elif operation == "div":
         expected_f32 = lhs_f32 / rhs_f32
+    else:
+        expected_f32 = torch.maximum(lhs_f32, rhs_f32)
     expected = expected_f32.to(_torch_dtype(torch, dtype))
+    if operation == "max":
+        return _comparison(dst, expected, atol=0.0, rtol=0.0, exact=True), timing
     atol, rtol = _tolerance(dtype, operation)
     return _comparison(dst, expected, atol=atol, rtol=rtol), timing
 
@@ -819,6 +841,7 @@ def _run_case(spec: CaseSpec, chip: str, runtime_mode: str) -> Dict[str, Any]:
         "sub": _run_elementwise,
         "mul": _run_elementwise,
         "div": _run_elementwise,
+        "max": _run_elementwise,
         "add-scalar": _run_scalar,
         "mul-scalar": _run_scalar,
         "exp": _run_exp,

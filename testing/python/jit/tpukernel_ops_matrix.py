@@ -2,8 +2,9 @@
 # Licensed under the MIT License.
 """Run the TPU-Kernel numerical conformance matrix in isolated processes.
 
-The default matrix is CModel-only and covers BM1690 plus SG2260E.  PCIe is
-impossible to enter without ``--runtime-mode pcie --allow-pcie --device-id``.
+The default matrix is CModel-only and covers BM1690 plus SG2260E. PCIe is
+restricted to SG2260E device 0 and requires two acknowledgements, an explicit
+case scope, and matching clean BM1690/SG2260E CModel summaries.
 Every case owns a fresh parent-death-supervised process group.  On a timeout
 or first failure, the runner sends SIGTERM to that group, waits a bounded
 grace interval, follows with SIGKILL if necessary, records the partial JSON
@@ -19,10 +20,13 @@ Examples::
         --output-dir research/artifacts/tpukernel-reductions \
         --chip sg2260e --op reduce-sum --op reduce-max
 
-    # Deliberately dangerous: run only after the CModel matrix passes.
+    # Deliberately dangerous: use exact clean CModel summaries from this runner.
     python testing/python/jit/tpukernel_ops_matrix.py \
         --output-dir research/artifacts/tpukernel-pcie \
-        --runtime-mode pcie --allow-pcie --device-id 0 --chip sg2260e
+        --runtime-mode pcie --allow-pcie --allow-pcie-load \
+        --device-id 0 --chip sg2260e --op add \
+        --bm-cmodel-summary research/artifacts/tpukernel-bm/summary.json \
+        --sg-cmodel-summary research/artifacts/tpukernel-sg/summary.json
 """
 
 from __future__ import annotations
@@ -31,9 +35,9 @@ import argparse
 from contextlib import suppress
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
-import shutil
 import signal
 import subprocess
 import sys
@@ -52,17 +56,67 @@ from tpukernel_ops_worker import (
 )
 
 if __package__:
-    from .tpu_matrix_common import git_source_identity
+    from .tpu_matrix_common import (
+        git_source_identity,
+        matrix_target_scope,
+        unique_prefixed_json_payload_text,
+        validate_promotion_stages,
+    )
+    from .tpu_demo_ops_matrix import (
+        _COMMON_TOOLCHAIN_FIELDS,
+        assert_source_identity_unchanged,
+        assert_toolchain_identity_unchanged,
+        board_health,
+        materialize_execution_snapshot,
+        pin_native_worker_libraries,
+        pin_worker_environment,
+        remove_execution_scratch,
+        toolchain_identity,
+        worker_environment as _base_worker_environment,
+        write_json as _write_json,
+    )
 else:
-    from tpu_matrix_common import git_source_identity
+    from tpu_matrix_common import (
+        git_source_identity,
+        matrix_target_scope,
+        unique_prefixed_json_payload_text,
+        validate_promotion_stages,
+    )
+    from tpu_demo_ops_matrix import (
+        _COMMON_TOOLCHAIN_FIELDS,
+        assert_source_identity_unchanged,
+        assert_toolchain_identity_unchanged,
+        board_health,
+        materialize_execution_snapshot,
+        pin_native_worker_libraries,
+        pin_worker_environment,
+        remove_execution_scratch,
+        toolchain_identity,
+        worker_environment as _base_worker_environment,
+        write_json as _write_json,
+    )
 
 _INTEGER_DTYPES = ("int8", "uint8", "int16", "uint16", "int32", "uint32")
 _ALL_DTYPES = _FLOAT_DTYPES + _INTEGER_DTYPES
 _OPERATIONS = tuple(sorted({case.operation for case in build_case_specs()}))
 _SCHEMA_VERSION = 1
+_MATRIX_KIND = "tpukernel_ops"
 _PROCESS_PIPE_DRAIN_S = 5.0
 _TPU_PROCESS_SUPERVISOR = (
     Path(__file__).resolve().parents[3] / "tilelang" / "jit" / "_tpu_profile_supervisor.py")
+_PCIE_CHILD_UNSET_KEYS = (
+    "TILELANG_TPU_ALLOW_PCIE_PROFILE",
+    "TILELANG_TPU_PROFILE_SESSION",
+    "TILELANG_TPU_PROFILE_CHIP",
+    "TILELANG_TPU_PROFILE_PROGRAMMING_MODEL",
+    "TILELANG_TPU_PROFILE_RUNTIME_MODE",
+    "TILELANG_TPU_PROFILE_OUTPUT_DIR",
+    "BMLIB_ENABLE_ALL_PROFILE",
+    "FILE_DUMP_CMD",
+    "PROFILE_BOOK_KEEPING",
+    "PROFILE_RECORD_SIZE",
+    "TPU_RT_CORE_NUM",
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -83,8 +137,7 @@ def _parse_args() -> argparse.Namespace:
         choices=_CHIPS,
         action="append",
         dest="chips",
-        help=("repeat to select chips; CModel defaults to both chips, while "
-              "PCIe requires exactly one explicit chip"),
+        help="select exactly one explicit chip for each matrix invocation",
     )
     parser.add_argument(
         "--op",
@@ -125,9 +178,29 @@ def _parse_args() -> argparse.Namespace:
         help="mandatory explicit acknowledgement for PCIe execution",
     )
     parser.add_argument(
+        "--allow-pcie-load",
+        action="store_true",
+        help="second mandatory acknowledgement that this matrix loads the physical board",
+    )
+    parser.add_argument(
         "--device-id",
         type=int,
         help="mandatory non-negative board id for PCIe execution",
+    )
+    parser.add_argument(
+        "--bm-cmodel-summary",
+        type=Path,
+        help="clean BM1690 CModel summary required to promote exact PCIe cases",
+    )
+    parser.add_argument(
+        "--sg-cmodel-summary",
+        type=Path,
+        help="clean SG2260E CModel summary required to promote exact PCIe cases",
+    )
+    parser.add_argument(
+        "--all-pcie-cases",
+        action="store_true",
+        help="explicitly acknowledge scheduling the full supported PCIe matrix",
     )
     parser.add_argument(
         "--list-cases",
@@ -138,20 +211,47 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
-    if args.timeout <= 0:
-        raise ValueError("--timeout must be positive")
-    if args.kill_grace < 0:
-        raise ValueError("--kill-grace must be non-negative")
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        raise ValueError("--timeout must be finite and positive")
+    if not math.isfinite(args.kill_grace) or args.kill_grace < 0:
+        raise ValueError("--kill-grace must be finite and non-negative")
+    for option, values in (("--chip", args.chips), ("--op", args.operations),
+                           ("--dtype", args.dtypes), ("--case", args.case_ids)):
+        if values and len(values) != len(set(values)):
+            raise RuntimeError(f"duplicate {option} selections are not allowed")
+    if args.list_cases:
+        if (args.allow_pcie or args.allow_pcie_load or args.device_id is not None or
+                args.bm_cmodel_summary is not None or args.sg_cmodel_summary is not None or
+                args.all_pcie_cases):
+            raise RuntimeError("hardware execution controls are invalid with --list-cases")
+        return
     if args.runtime_mode == "pcie":
-        if not args.allow_pcie:
-            raise RuntimeError("PCIe numerical execution requires explicit --allow-pcie")
-        if args.device_id is None or args.device_id < 0 or args.device_id > 2**31 - 1:
-            raise RuntimeError("PCIe numerical execution requires a valid --device-id")
-        if args.chips is None or len(set(args.chips)) != 1:
-            raise RuntimeError("PCIe numerical execution requires exactly one explicit --chip; "
-                               "run different chip targets in separate invocations")
-    elif args.allow_pcie or args.device_id is not None:
-        raise RuntimeError("--allow-pcie/--device-id are invalid for CModel execution")
+        if not args.allow_pcie or not args.allow_pcie_load:
+            raise RuntimeError(
+                "PCIe numerical execution requires --allow-pcie and --allow-pcie-load")
+        if (isinstance(args.device_id, bool) or not isinstance(args.device_id, int) or
+                args.device_id != 0):
+            raise RuntimeError("this single-card validation host accepts only --device-id 0")
+        if args.chips is None or tuple(dict.fromkeys(args.chips)) != ("sg2260e",):
+            raise RuntimeError(
+                "this machine can run PCIe cases only for explicit --chip sg2260e")
+        filters_selected = bool(args.operations or args.case_ids)
+        if args.all_pcie_cases and (filters_selected or args.dtypes):
+            raise RuntimeError(
+                "--all-pcie-cases cannot be combined with --op/--case/--dtype filters")
+        if not args.all_pcie_cases and not filters_selected:
+            raise RuntimeError(
+                "PCIe requires an explicit --op/--case subset or --all-pcie-cases")
+        if args.bm_cmodel_summary is None or args.sg_cmodel_summary is None:
+            raise RuntimeError(
+                "PCIe requires --bm-cmodel-summary and --sg-cmodel-summary promotion evidence")
+    else:
+        if (args.allow_pcie or args.allow_pcie_load or args.device_id is not None or
+                args.bm_cmodel_summary is not None or args.sg_cmodel_summary is not None or
+                args.all_pcie_cases):
+            raise RuntimeError("PCIe controls are invalid for CModel execution")
+        if args.chips is None or len(args.chips) != 1:
+            raise RuntimeError("CModel promotion requires exactly one explicit --chip")
     if not args.list_cases and args.output_dir is None:
         raise RuntimeError("--output-dir is required unless --list-cases is used")
 
@@ -177,26 +277,10 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-
-
-def _worker_environment(repo_root: Path, scratch_dir: Path, case: CaseSpec, chip: str,
+def _worker_environment(base_environment: Mapping[str, str], scratch_dir: Path,
+                        case: CaseSpec, chip: str,
                         args: argparse.Namespace) -> dict[str, str]:
-    environment = os.environ.copy()
-    ppl_root = environment.get("PPL_PROJECT_ROOT")
-    if not ppl_root:
-        raise RuntimeError("PPL_PROJECT_ROOT must identify the configured PPL 1.7 SDK")
-    environment["PPL_PROJECT_ROOT"] = str(Path(ppl_root).expanduser().resolve())
-
-    inherited_pythonpath = environment.get("PYTHONPATH", "")
-    inherited_paths = tuple(
-        os.path.abspath(item) for item in inherited_pythonpath.split(os.pathsep) if item)
-    environment["PYTHONPATH"] = os.pathsep.join(dict.fromkeys((str(repo_root), *inherited_paths)))
+    environment = dict(base_environment)
     environment["TMPDIR"] = str(scratch_dir)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["TILELANG_TPU_BENCHMARK_RUNS"] = "0"
@@ -227,6 +311,128 @@ def _worker_environment(repo_root: Path, scratch_dir: Path, case: CaseSpec, chip
     else:
         environment["TPU_RT_CORE_NUM"] = str(_CORE_COUNTS[chip])
     return environment
+
+
+def _json_normalized(value: Any) -> Any:
+    """Normalize tuple-bearing declarative specs like an actual JSON summary."""
+
+    return json.loads(json.dumps(value, sort_keys=True, allow_nan=False))
+
+
+def _validate_numeric_identity(payload: Mapping[str, Any], *, case: CaseSpec,
+                               chip: str, runtime_mode: str) -> None:
+    """Reject a successful marker unless it names this exact scheduled probe."""
+
+    expected = {
+        "status": "passed",
+        "case": _json_normalized(case.to_json()),
+        "chip": chip,
+        "programming_model": "tpukernel",
+        "runtime_mode": runtime_mode,
+    }
+    for field, value in expected.items():
+        if payload.get(field) != value:
+            raise RuntimeError(
+                f"worker result has wrong {field}: expected {value!r}, "
+                f"observed {payload.get(field)!r}")
+    if not isinstance(payload.get("metrics"), dict):
+        raise RuntimeError("worker result has no numerical metrics object")
+
+
+def _validate_pcie_promotion(repo_root: Path, args: argparse.Namespace,
+                             cases: tuple[CaseSpec, ...],
+                             current_toolchain: Mapping[str, Any],
+                             pcie_started_at: str) -> dict[str, Any]:
+    """Require clean, content-identical CModel success for every PCIe case."""
+
+    assert args.bm_cmodel_summary is not None and args.sg_cmodel_summary is not None
+    if (current_toolchain.get("runtime_mode") != "pcie" or
+            not isinstance(current_toolchain.get("pcie"), dict)):
+        raise RuntimeError("PCIe promotion requires a complete PCIe toolchain identity")
+    current = git_source_identity(repo_root)
+    if current.get("implementation_worktree_dirty") is not False:
+        raise RuntimeError(
+            "PCIe promotion requires the current implementation worktree to be clean")
+    highlights = ("git_commit", "source_state_sha256")
+    if any(not isinstance(current.get(field), str) or not current[field]
+           for field in highlights):
+        raise RuntimeError("PCIe promotion requires a verifiable source identity")
+
+    bm, sg = validate_promotion_stages(
+        args.bm_cmodel_summary,
+        args.sg_cmodel_summary,
+        matrix_kind=_MATRIX_KIND,
+        schema_version=_SCHEMA_VERSION,
+        bm_allowed_scope=(("bm1690", "tpukernel"),),
+        sg_allowed_scope=(("sg2260e", "tpukernel"),),
+        pcie_started_at=pcie_started_at,
+    )
+    for label, payload in (("BM1690", bm), ("SG2260E", sg)):
+        if payload.get("git_commit") != current["git_commit"]:
+            raise RuntimeError(f"{label} TPU-Kernel summary commit does not match current source")
+        if payload.get("source_state_sha256") != current["source_state_sha256"]:
+            raise RuntimeError(
+                f"{label} TPU-Kernel summary source digest does not match current source")
+        if payload.get("programming_model") != "tpukernel":
+            raise RuntimeError(f"{label} promotion summary is not TPU-Kernel evidence")
+        observed_toolchain = payload.get("toolchain_identity")
+        if not isinstance(observed_toolchain, dict):
+            raise RuntimeError(f"{label} TPU-Kernel summary has no toolchain identity")
+        if observed_toolchain.get("runtime_mode") != "cmodel":
+            raise RuntimeError(f"{label} TPU-Kernel summary has the wrong runtime mode")
+        for field in _COMMON_TOOLCHAIN_FIELDS:
+            if observed_toolchain.get(field) != current_toolchain.get(field):
+                raise RuntimeError(
+                    f"{label} TPU-Kernel toolchain identity for {field} does not match")
+
+    def exact_results(payload: Mapping[str, Any], chip: str) -> dict[str, Mapping[str, Any]]:
+        raw_results = payload.get("results")
+        if not isinstance(raw_results, list):
+            raise RuntimeError("TPU-Kernel promotion summary has no result list")
+        indexed: dict[str, Mapping[str, Any]] = {}
+        for result in raw_results:
+            if not isinstance(result, dict):
+                raise RuntimeError("TPU-Kernel promotion summary contains a non-object result")
+            raw_case = result.get("case")
+            if not isinstance(raw_case, dict) or not isinstance(raw_case.get("case_id"), str):
+                raise RuntimeError("TPU-Kernel promotion result has no exact case id")
+            if result.get("chip") != chip:
+                continue
+            case_id = raw_case["case_id"]
+            if case_id in indexed:
+                raise RuntimeError(f"duplicate TPU-Kernel promotion result: {chip}/{case_id}")
+            indexed[case_id] = result
+        return indexed
+
+    bm_results = exact_results(bm, "bm1690")
+    sg_results = exact_results(sg, "sg2260e")
+    missing = []
+    for case in cases:
+        expected_case = _json_normalized(case.to_json())
+        for chip, results in (("bm1690", bm_results), ("sg2260e", sg_results)):
+            result = results.get(case.case_id)
+            if result is None or result.get("status") != "passed":
+                missing.append(f"cmodel/{chip}/{case.case_id}")
+                continue
+            if result.get("runtime_mode") != "cmodel" or result.get("case") != expected_case:
+                raise RuntimeError(
+                    f"TPU-Kernel promotion result identity mismatch: {chip}/{case.case_id}")
+            if not isinstance(result.get("metrics"), dict):
+                raise RuntimeError(
+                    f"TPU-Kernel promotion result has no metrics: {chip}/{case.case_id}")
+    if missing:
+        raise RuntimeError(
+            "PCIe TPU-Kernel promotion evidence is missing passing exact cases: "
+            + ", ".join(sorted(missing)))
+    return {
+        "git_commit": current["git_commit"],
+        "source_state_sha256": current["source_state_sha256"],
+        "bm1690_summary": bm["_resolved_path"],
+        "bm1690_summary_sha256": bm["_sha256"],
+        "sg2260e_summary": sg["_resolved_path"],
+        "sg2260e_summary_sha256": sg["_sha256"],
+        "validated_case_count": len(cases),
+    }
 
 
 def _process_group_exists(process_group: int) -> bool:
@@ -358,18 +564,9 @@ def _spawn_guarded_worker(command: Sequence[str], *, cwd: Path,
     )
 
 
-def _worker_payload(stdout: str) -> Optional[dict[str, Any]]:
-    for line in reversed(stdout.splitlines()):
-        if line.startswith(_RESULT_PREFIX):
-            try:
-                payload = json.loads(line[len(_RESULT_PREFIX):])
-            except json.JSONDecodeError as error:
-                raise RuntimeError(
-                    f"worker result marker contains invalid JSON: {error}") from error
-            if not isinstance(payload, dict):
-                raise RuntimeError("worker result marker must contain a JSON object")
-            return payload
-    return None
+def _worker_payload(stdout: str) -> dict[str, Any]:
+    return unique_prefixed_json_payload_text(
+        stdout, _RESULT_PREFIX, "TPU-Kernel worker")
 
 
 def _case_directory(output_dir: Path, chip: str, runtime_mode: str, case: CaseSpec) -> Path:
@@ -379,8 +576,8 @@ def _case_directory(output_dir: Path, chip: str, runtime_mode: str, case: CaseSp
     return output_dir / "cases" / runtime_mode / chip / case.case_id
 
 
-def _run_one(args: argparse.Namespace, repo_root: Path, output_dir: Path, worker: Path, chip: str,
-             case: CaseSpec) -> dict[str, Any]:
+def _run_one(args: argparse.Namespace, base_environment: Mapping[str, str], output_dir: Path,
+             worker: Path, chip: str, case: CaseSpec) -> dict[str, Any]:
     case_dir = _case_directory(output_dir, chip, args.runtime_mode, case)
     case_dir.mkdir(parents=True, exist_ok=True)
     scratch_dir = Path(tempfile.mkdtemp(prefix=".scratch-", dir=case_dir))
@@ -395,10 +592,12 @@ def _run_one(args: argparse.Namespace, repo_root: Path, output_dir: Path, worker
         "--runtime-mode",
         args.runtime_mode,
     ]
+    launched_command = list(command)
     try:
-        environment = _worker_environment(repo_root, scratch_dir, case, chip, args)
+        environment = _worker_environment(base_environment, scratch_dir, case, chip, args)
     except BaseException:
-        shutil.rmtree(scratch_dir, ignore_errors=True)
+        if scratch_dir.exists():
+            remove_execution_scratch(scratch_dir)
         raise
     started_at = _utc_now()
     begin = time.monotonic()
@@ -407,6 +606,7 @@ def _run_one(args: argparse.Namespace, repo_root: Path, output_dir: Path, worker
     stderr = ""
     termination: Optional[dict[str, Any]] = None
     timed_out = False
+    launch_attempted = False
     launch_error: Optional[str] = None
     returncode: Optional[int] = None
     try:
@@ -414,46 +614,89 @@ def _run_one(args: argparse.Namespace, repo_root: Path, output_dir: Path, worker
         # only the explicit JSON report escapes into case_dir.  The shared
         # supervisor additionally guarantees cleanup if this runner itself is
         # killed by an outer watchdog.
-        process = _spawn_guarded_worker(command, cwd=scratch_dir, environment=environment)
-        try:
-            stdout, stderr = process.communicate(timeout=args.timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            # Do not append TimeoutExpired's partial copies: the bounded drain
-            # returns the complete captured streams when all descriptors close,
-            # or its own latest partial copies when a stuck/escaped descendant
-            # retains an inherited pipe.
-            stdout, stderr, termination = _terminate_and_collect(process, args.kill_grace)
-        returncode = process.poll()
-        if returncode == 0 and termination is None and \
-                _process_group_exists(process.pid):
-            # A successful direct worker is not allowed to background ordinary
-            # children.  Once the supervisor exits, its parent-death contract
-            # no longer protects such processes, so clean the group and fail
-            # this case before another TPU workload can start.
-            termination = _terminate_process_group(process, args.kill_grace)
-            launch_error = ("RuntimeError: successful worker left a live descendant in "
-                            "its supervised process group")
+        if args.runtime_mode == "pcie":
+            from tilelang.jit import TPUInstructionProfiler
+
+            assert args.device_id is not None
+            launch_attempted = True
+            # The shared supervisor deliberately overlays an environment on
+            # its own process environment. Put the numerical worker below
+            # ``env -u`` so inherited profiling/CModel controls cannot leak
+            # back in after this runner has sanitized them.
+            pcie_command = ["/usr/bin/env"]
+            for name in _PCIE_CHILD_UNSET_KEYS:
+                pcie_command.extend(("-u", name))
+            pcie_command.extend(command)
+            launched_command = pcie_command
+            supervised = TPUInstructionProfiler.run_supervised_pcie_probe(
+                args.device_id,
+                pcie_command,
+                cwd=scratch_dir,
+                environment=environment,
+                timeout_s=args.timeout,
+            )
+            stdout = supervised.stdout
+            stderr = supervised.stderr
+            timed_out = supervised.timed_out
+            returncode = supervised.returncode
+            if (supervised.timed_out or supervised.left_live_descendant or
+                    not supervised.cleanup_complete):
+                termination = {
+                    "process_group": supervised.process_group,
+                    "left_live_descendant": supervised.left_live_descendant,
+                    "cleanup_complete": supervised.cleanup_complete,
+                }
+        else:
+            launch_attempted = True
+            process = _spawn_guarded_worker(command, cwd=scratch_dir, environment=environment)
+            try:
+                stdout, stderr = process.communicate(timeout=args.timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                # Do not append TimeoutExpired's partial copies: the bounded drain
+                # returns the complete captured streams when all descriptors close,
+                # or its own latest partial copies when a stuck/escaped descendant
+                # retains an inherited pipe.
+                stdout, stderr, termination = _terminate_and_collect(process, args.kill_grace)
             returncode = process.poll()
-        if returncode not in (0, None) and termination is None:
-            # The direct worker may have exited while compiler/runtime children
-            # survived.  Clean its still-addressable process group on first
-            # failure before any subsequent case could start.
-            termination = _terminate_process_group(process, args.kill_grace)
-            returncode = process.poll()
+            if returncode == 0 and termination is None and \
+                    _process_group_exists(process.pid):
+                # A successful direct worker is not allowed to background ordinary
+                # children.  Once the supervisor exits, its parent-death contract
+                # no longer protects such processes, so clean the group and fail
+                # this case before another TPU workload can start.
+                termination = _terminate_process_group(process, args.kill_grace)
+                launch_error = ("RuntimeError: successful worker left a live descendant in "
+                                "its supervised process group")
+                returncode = process.poll()
+            if returncode not in (0, None) and termination is None:
+                # The direct worker may have exited while compiler/runtime children
+                # survived.  Clean its still-addressable process group on first
+                # failure before any subsequent case could start.
+                termination = _terminate_process_group(process, args.kill_grace)
+                returncode = process.poll()
     except BaseException as error:
         launch_error = f"{type(error).__name__}: {error}"
         if process is not None:
             termination = _terminate_process_group(process, args.kill_grace)
             returncode = process.poll()
     finally:
-        shutil.rmtree(scratch_dir, ignore_errors=True)
+        if scratch_dir.exists():
+            try:
+                remove_execution_scratch(scratch_dir)
+            except BaseException as error:
+                cleanup_error = f"scratch cleanup failed: {type(error).__name__}: {error}"
+                launch_error = (
+                    f"{launch_error}; {cleanup_error}" if launch_error else cleanup_error)
 
     elapsed = time.monotonic() - begin
     parsed_payload: Optional[dict[str, Any]] = None
     parse_error: Optional[str] = None
     try:
         parsed_payload = _worker_payload(stdout)
+        if parsed_payload is not None and parsed_payload.get("status") == "passed":
+            _validate_numeric_identity(
+                parsed_payload, case=case, chip=chip, runtime_mode=args.runtime_mode)
     except RuntimeError as error:
         parse_error = str(error)
 
@@ -485,16 +728,24 @@ def _run_one(args: argparse.Namespace, repo_root: Path, output_dir: Path, worker
         "started_at": started_at,
         "elapsed_seconds": elapsed,
         "timeout_seconds": args.timeout,
-        "command": command,
+        "command": launched_command,
         "returncode": returncode,
         "timed_out": timed_out,
+        "launch_attempted": launch_attempted,
         "failure": failure,
         "termination": termination,
         "worker_result": parsed_payload,
         "stdout": stdout,
         "stderr": stderr,
     }
-    _write_json(case_dir / "result.json", result)
+    try:
+        _write_json(case_dir / "result.json", result)
+    except BaseException as error:
+        diagnostic = f"result file write failed: {type(error).__name__}: {error}"
+        result["status"] = "failed"
+        result["failure"] = (
+            f"{result['failure']}; {diagnostic}" if result.get("failure") else diagnostic)
+        result["result_file_error"] = diagnostic
     return result
 
 
@@ -510,6 +761,8 @@ def _summary_case(result: Mapping[str, Any], result_path: Path, output_dir: Path
     }
     if result.get("failure") is not None:
         compact["failure"] = result["failure"]
+    if result.get("result_file_error") is not None:
+        compact["result_file_error"] = result["result_file_error"]
     if isinstance(worker_result, dict):
         if "metrics" in worker_result:
             compact["metrics"] = worker_result["metrics"]
@@ -518,14 +771,14 @@ def _summary_case(result: Mapping[str, Any], result_path: Path, output_dir: Path
     return compact
 
 
-def _run_matrix(args: argparse.Namespace, chips: tuple[str, ...], cases: tuple[CaseSpec,
-                                                                               ...]) -> int:
-    assert args.output_dir is not None
-    repo_root = Path(__file__).resolve().parents[3]
-    worker = Path(__file__).with_name("tpukernel_ops_worker.py")
-    output_dir = args.output_dir.expanduser().resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
+                chips: tuple[str, ...], cases: tuple[CaseSpec, ...],
+                base_environment: Mapping[str, str]) -> int:
     summary_path = output_dir / "summary.json"
+    execution_root = repo_root
+    worker_environment_values = dict(base_environment)
+    scheduled_case_specs = tuple(
+        case for chip in chips for case in cases if chip in case.supported_chips)
     scheduled = [{
         "chip": chip,
         "case": case.to_json()
@@ -535,6 +788,7 @@ def _run_matrix(args: argparse.Namespace, chips: tuple[str, ...], cases: tuple[C
                            "selected chip set")
     summary: dict[str, Any] = {
         "schema_version": _SCHEMA_VERSION,
+        "matrix_kind": _MATRIX_KIND,
         "status": "running",
         "complete": False,
         "programming_model": "tpukernel",
@@ -548,12 +802,65 @@ def _run_matrix(args: argparse.Namespace, chips: tuple[str, ...], cases: tuple[C
         "completed_case_count": 0,
         "passed_case_count": 0,
         "failed_case_count": 0,
+        "target_scope": matrix_target_scope(
+            (entry["chip"], "tpukernel") for entry in scheduled),
         "scheduled": scheduled,
         "results": [],
     }
     summary.update(git_source_identity(repo_root))
     _write_json(summary_path, summary)
 
+    try:
+        summary["toolchain_identity"] = toolchain_identity(
+            worker_environment_values, args.runtime_mode)
+        worker_environment_values = pin_native_worker_libraries(
+            worker_environment_values, summary["toolchain_identity"])
+        if args.runtime_mode == "pcie":
+            assert args.device_id is not None
+            summary["promotion_evidence"] = _validate_pcie_promotion(
+                repo_root,
+                args,
+                scheduled_case_specs,
+                summary["toolchain_identity"],
+                summary["started_at"],
+            )
+            snapshot_root = Path(worker_environment_values["TMPDIR"]) / "execution-source"
+            summary["execution_snapshot"] = materialize_execution_snapshot(
+                repo_root,
+                snapshot_root,
+                summary["promotion_evidence"]["git_commit"],
+            )
+            execution_root = snapshot_root
+            worker_environment_values = pin_worker_environment(
+                worker_environment_values,
+                repo_root=repo_root,
+                snapshot_root=snapshot_root,
+                toolchain_identity=summary["toolchain_identity"],
+            )
+            tpu_smi = Path(summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
+            summary["board_preflight"] = board_health(args.device_id, tpu_smi)
+        _write_json(summary_path, summary)
+    except KeyboardInterrupt:
+        summary.update({
+            "status": "cancelled",
+            "failed_phase": "preflight",
+            "finished_at": _utc_now(),
+        })
+        _write_json(summary_path, summary)
+        raise
+    except Exception as error:
+        summary.update({
+            "status": "failed",
+            "failed_phase": "preflight",
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "finished_at": _utc_now(),
+        })
+        _write_json(summary_path, summary)
+        print(f"STOP preflight: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
+        return 1
+
+    worker = execution_root / "testing/python/jit/tpukernel_ops_worker.py"
     for chip in chips:
         for case in cases:
             if chip not in case.supported_chips:
@@ -561,10 +868,16 @@ def _run_matrix(args: argparse.Namespace, chips: tuple[str, ...], cases: tuple[C
             key = f"{args.runtime_mode}/{chip}/{case.case_id}"
             print(f"RUN {key}", flush=True)
             try:
-                result = _run_one(args, repo_root, output_dir, worker, chip, case)
+                if args.runtime_mode == "pcie":
+                    assert_source_identity_unchanged(repo_root, summary)
+                    assert_toolchain_identity_unchanged(
+                        worker_environment_values, summary["toolchain_identity"])
+                result = _run_one(
+                    args, worker_environment_values, output_dir, worker, chip, case)
             except BaseException as error:
-                # This path covers runner bookkeeping failures.  No worker can
-                # be live here: _run_one always terminates its group in finally.
+                # This path covers runner bookkeeping failures. CModel cleanup
+                # is bounded in _run_one; an unreapable PCIe group has already
+                # made the device session persistently fail-closed.
                 result = {
                     "schema_version": _SCHEMA_VERSION,
                     "status": "failed",
@@ -583,6 +896,29 @@ def _run_matrix(args: argparse.Namespace, chips: tuple[str, ...], cases: tuple[C
 
             result_path = (
                 _case_directory(output_dir, chip, args.runtime_mode, case) / "result.json")
+            if args.runtime_mode == "pcie" and result.get("launch_attempted"):
+                assert args.device_id is not None
+                try:
+                    tpu_smi = Path(
+                        summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
+                    result["board_postflight"] = board_health(args.device_id, tpu_smi)
+                except Exception as health_error:
+                    result["board_postflight_error"] = (
+                        f"{type(health_error).__name__}: {health_error}")
+                    if result["status"] == "passed":
+                        result["status"] = "failed"
+                        result["failure"] = (
+                            "board postflight failed: " + result["board_postflight_error"])
+                try:
+                    _write_json(result_path, result)
+                except BaseException as error:
+                    diagnostic = (
+                        f"result file write failed: {type(error).__name__}: {error}")
+                    result["status"] = "failed"
+                    result["failure"] = (
+                        f"{result['failure']}; {diagnostic}"
+                        if result.get("failure") else diagnostic)
+                    result["result_file_error"] = diagnostic
             summary["results"].append(_summary_case(result, result_path, output_dir))
             summary["completed_case_count"] += 1
             if result["status"] == "passed":
@@ -598,6 +934,49 @@ def _run_matrix(args: argparse.Namespace, chips: tuple[str, ...], cases: tuple[C
             _write_json(summary_path, summary)
             print(f"STOP {key}: {result.get('failure')}", file=sys.stderr, flush=True)
             return 1
+
+    try:
+        ending_source = git_source_identity(repo_root)
+        ending_toolchain = toolchain_identity(worker_environment_values, args.runtime_mode)
+    except KeyboardInterrupt:
+        summary.update({
+            "status": "cancelled",
+            "complete": False,
+            "failed_phase": "final-identity-check",
+            "finished_at": _utc_now(),
+        })
+        _write_json(summary_path, summary)
+        raise
+    except Exception as error:
+        summary.update({
+            "status": "failed",
+            "complete": False,
+            "failed_phase": "final-identity-check",
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "finished_at": _utc_now(),
+        })
+        _write_json(summary_path, summary)
+        print(f"STOP final identity check: {type(error).__name__}: {error}",
+              file=sys.stderr, flush=True)
+        return 1
+    source_fields = ("git_commit", "implementation_worktree_dirty", "source_state_sha256")
+    source_changed = any(
+        ending_source.get(field) != summary.get(field) for field in source_fields)
+    toolchain_changed = ending_toolchain != summary.get("toolchain_identity")
+    if source_changed or toolchain_changed:
+        summary.update({
+            "status": "failed",
+            "complete": False,
+            "failed_phase": "final-identity-check",
+            "source_changed_during_run": ending_source if source_changed else None,
+            "toolchain_changed_during_run": toolchain_changed,
+            "finished_at": _utc_now(),
+        })
+        _write_json(summary_path, summary)
+        print("STOP source/toolchain identity changed during matrix execution",
+              file=sys.stderr, flush=True)
+        return 1
 
     summary["status"] = "passed"
     summary["complete"] = True
@@ -629,7 +1008,70 @@ def main() -> int:
                 sort_keys=True,
                 allow_nan=False))
         return 0
-    return _run_matrix(args, chips, cases)
+    assert args.output_dir is not None
+    repo_root = Path(__file__).resolve().parents[3]
+    output_dir = args.output_dir.expanduser().resolve()
+    if (output_dir / "summary.json").exists():
+        raise RuntimeError(f"refusing to overwrite an existing matrix summary in {output_dir}")
+    if output_dir.is_dir() and any(output_dir.iterdir()):
+        raise RuntimeError(f"refusing to mix a matrix with non-empty directory {output_dir}")
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        output_dir.mkdir(exist_ok=False)
+    except FileExistsError as error:
+        raise RuntimeError(
+            f"refusing to reuse an existing matrix output directory {output_dir}") from error
+
+    scratch_dir = Path(tempfile.mkdtemp(prefix=".scratch-", dir=output_dir))
+    try:
+        environment = _base_worker_environment(repo_root, args.runtime_mode, args.device_id)
+        environment["TMPDIR"] = str(scratch_dir)
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        if args.runtime_mode == "pcie":
+            from tilelang.jit import TPUInstructionProfiler
+
+            assert args.device_id is not None
+            lock_acquired = False
+            try:
+                with TPUInstructionProfiler.exclusive_pcie_device(args.device_id):
+                    lock_acquired = True
+                    return _run_matrix(
+                        args, repo_root, output_dir, chips, cases, environment)
+            except Exception as error:
+                summary_path = output_dir / "summary.json"
+                failure: dict[str, Any] = {}
+                if summary_path.is_file():
+                    try:
+                        candidate = json.loads(summary_path.read_text(encoding="utf-8"))
+                        if isinstance(candidate, dict):
+                            failure.update(candidate)
+                    except (OSError, ValueError):
+                        pass
+                if not failure:
+                    failure.update({
+                        "schema_version": _SCHEMA_VERSION,
+                        "matrix_kind": _MATRIX_KIND,
+                        "programming_model": "tpukernel",
+                        "runtime_mode": "pcie",
+                        "started_at": _utc_now(),
+                    })
+                    failure.update(git_source_identity(repo_root))
+                failure.update({
+                    "status": "failed",
+                    "complete": False,
+                    "failed_phase": "pcie-session" if lock_acquired else "device-lock",
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                    "finished_at": _utc_now(),
+                })
+                _write_json(summary_path, failure)
+                print(f"PCIe session stopped: {type(error).__name__}: {error}",
+                      file=sys.stderr, flush=True)
+                return 1
+        return _run_matrix(args, repo_root, output_dir, chips, cases, environment)
+    finally:
+        if scratch_dir.exists():
+            remove_execution_scratch(scratch_dir)
 
 
 if __name__ == "__main__":

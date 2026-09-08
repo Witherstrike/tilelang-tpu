@@ -438,18 +438,18 @@ class LibraryGenerator(object):
         kernel_host_o = os.path.join(src_dir, "kernel_host.o")
         main_o = os.path.join(src_dir, "main.o")
         self._run_tpu_command(
-            ["g++", *host_common, "-c",
+            ["/usr/bin/c++", *host_common, "-c",
              os.path.join(src_dir, "kernel.cpp"), "-o", kernel_host_o], "Compile TPU host wrapper",
             timeout)
         self._run_tpu_command(
-            ["g++", *host_common, "-c",
+            ["/usr/bin/c++", *host_common, "-c",
              os.path.join(src_dir, "main.cpp"), "-o", main_o], "Compile TPU host entry", timeout)
         host_libraries = ["-ltpuv7_rt"]
         if profiling:
             host_libraries.append("-ltpudnn")
         host_libraries.append("-lpthread")
         self._run_tpu_command([
-            "g++", "-shared", "-fPIC", "-Wl,--no-undefined", "-o",
+            "/usr/bin/c++", "-shared", "-fPIC", "-Wl,--no-undefined", "-o",
             os.path.join(src_dir, "main.so"), kernel_host_o, main_o, f"-L{pcie_runtime_lib}",
             f"-L{layout.backend_lib}",
             f"-Wl,--disable-new-dtags,-rpath,{pcie_runtime_lib}:{layout.backend_lib}",

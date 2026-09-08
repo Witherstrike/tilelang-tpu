@@ -16,7 +16,7 @@ CModel/PCIe 实现、使用方式、安全边界，以及 2026-09-04 至 2026-09
 | SG2260E + TPU-Kernel FP8 + PCIe | 与基础浮点共用受监管 worker/decoder | `e5e3087` 两格式各 19 项，共 38/38、38 个 raw 目录、134 条 timing | 只证明固定 shape、输入域与 selector，不外推到 BM1690 或更广 FP8 边界 |
 | SG2260E + RV + PCIe | 与 TPU-Kernel 共用 TPUDNN host 与受监管解码路径 | `e5e3087` 核心 9/9，数值、非空 raw profile 与 decoded timing 均通过，共 108 条 ns timing | 仅覆盖四则、GEMM 与四个 FP16/FP32 copy case；未外推到其他 RV selector |
 
-因此，CModel 的 raw 命令收集与 PCIe 的 recorder/decoder 路径均已发挥作用。`e5e3087` 的核心 CModel profiling 矩阵是 27/27，每例 raw trace 非空；本机没有兼容 CModel decoder，本轮未启用 CModel 后处理，所有 case 的 `timed_instruction_count` 仍为 0。这份 CModel 证据只能回答“生成了哪些命令”，不能回答“每条命令运行了多久”。
+因此，CModel 的 raw 命令收集与 PCIe 的 recorder/decoder 路径均已发挥作用。`e5e3087` 的核心 CModel profiling 矩阵是 27/27，每例 raw trace 非空；该旧工件生成时未启用 CModel 后处理，所有 case 的 `timed_instruction_count` 为 0。现行 demo/core/FP8 runner 默认尝试显式配置的 PerfAI；本机 PPL 1.7 与 `/opt` 均没有兼容的 `AutoRunner.sh`，所以新运行会明确记录 `parser_status=unavailable` 并保留 raw，而不会伪造 duration。这类 CModel 证据只能回答“生成了哪些命令”，不能回答“每条命令运行了多久”。
 
 当前结构化逐指令解码证据来自同一 clean `e5e3087` 实现基线：SG2260E/TPU-Kernel matmul 1/1、36 条 ns timing，SG2260E/RV 核心矩阵 9/9、108 条 ns timing，SG2260E/TPU-Kernel FP8 38/38、134 条 ns timing。三份 summary 都启用了 `numeric-raw-and-decoded-timing` 严格验收，并记录 `bigTpuProfile 0.3.5` 与实际 parser API 身份。运行前后板卡均为 `Active`、利用率 0%，结束后未发现受控进程残留。这里的单次 recorder 结果只用于指令映射和链路诊断，不用于宣称统计性能。
 
@@ -144,12 +144,14 @@ TileLang 的生产路径。TileLang 自带的 PCIe decoder 只接受 `parse()` �
 路径。
 
 框架不会自动安装或升级包。`TPUProfilingConfig.pcie_decoder_python` 可指定专用解释器，
-`pcie_decoder_pythonpath` 可指定一个或多个 decoder-only import root；这些目录替换而不是追加
+`pcie_decoder_pythonpath` 可指定一个或多个 decoder-only import root（目录或 Python 可导入的
+zip/wheel archive）；这些路径替换而不是追加
 decoder 子进程的 `PYTHONPATH`，不会进入 fresh-compile/数值 worker。decoder 子进程还会删除
 load/profile 确认、device id、recorder 和 TileLang profile-session 环境，因而离线解析没有再次
 触碰板卡的授权条件。未显式配置时仍沿用当前解释器与既有环境，以保持原调用兼容。
 
-`preflight_pcie_decoder()` 不创建 runtime、不加载板卡，只在有界 supervisor 下导入
+`pcie_decoder_python` 保留调用方给出的虚拟环境 launcher 路径，不解析成它所指向的系统
+Python；否则会丢失该虚拟环境的依赖发现。`preflight_pcie_decoder()` 不创建 runtime、不加载板卡，只在有界 supervisor 下导入
 `bigTpuProfile`，验证 `BMProfileParserPerfAI.parse` 可调用，并返回 `package`、
 `package_version`、`parser_api`。核心与 FP8 矩阵在 `--require-decoded-timing` 时先执行该检查；
 preflight 失败会在第一个硬件 worker 之前写入失败 summary 并停止。正式 decoder JSON 和

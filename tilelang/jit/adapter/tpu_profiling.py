@@ -38,8 +38,15 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Mapping, MutableMapping, Optional, Sequence, Tuple, Union
+import zipfile
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - importability guard for non-POSIX hosts
+    fcntl = None
 
 from tilelang.engine.tpu_config import TPURuntimeConfig, TPUTargetSpec
 from tilelang.jit.adapter.ppl_layout import resolve_ppl_layout
@@ -86,6 +93,212 @@ _PCIE_HARDWARE_ENVIRONMENT_KEYS = frozenset((
     "TILELANG_TPU_PROFILE_SESSION",
 ))
 
+_PCIE_DEVICE_LOCK_STATE = threading.local()
+_PCIE_DEVICE_LOCK_ROOT = Path("/run/lock")
+
+
+def _pcie_device_quarantine_path(device_id: int) -> Path:
+    return _PCIE_DEVICE_LOCK_ROOT / f"tilelang-tpu-device-{device_id}.quarantine.json"
+
+
+def _pcie_device_session_path(device_id: int) -> Path:
+    return _PCIE_DEVICE_LOCK_ROOT / f"tilelang-tpu-device-{device_id}.session.json"
+
+
+def _pcie_device_lock_owned(device_id: int) -> bool:
+    held = getattr(_PCIE_DEVICE_LOCK_STATE, "held", {})
+    state = held.get(device_id)
+    return (isinstance(state, dict) and state.get("depth", 0) > 0 and
+            state.get("safe_to_release") is not False)
+
+
+def _assert_pcie_device_not_quarantined(device_id: int) -> None:
+    marker = _pcie_device_quarantine_path(device_id)
+    if not marker.exists():
+        return
+    try:
+        detail = marker.read_text(encoding="utf-8").strip()
+    except OSError as error:
+        detail = f"unreadable marker: {error}"
+    raise TPUProfilingError(
+        f"TPU device {device_id} is fail-closed by {marker}. A prior supervised "
+        "process group could not be fully reaped. Inspect the recorded PGID and "
+        "recover the board manually before removing the marker"
+        f"{': ' + detail if detail else '.'}")
+
+
+def _create_pcie_device_session(device_id: int) -> Path:
+    """Create a crash-persistent lease for one outermost PCIe session.
+
+    ``flock`` is released by the kernel when a matrix parent dies.  That is
+    useful for ordinary serialization but unsafe as the only board guard: a
+    descendant blocked in the driver can outlive the parent.  This marker is
+    removed only by the lock context's orderly exit, so SIGKILL, parent death,
+    or interpreter abort leaves the next invocation fail-closed.
+    """
+
+    marker = _pcie_device_session_path(device_id)
+    payload = {
+        "schema_version": 1,
+        "status": "active",
+        "device_id": device_id,
+        "owner_pid": os.getpid(),
+        "host": socket.gethostname(),
+        "created_unix_ns": time.time_ns(),
+    }
+    encoded = (json.dumps(payload, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
+    try:
+        descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as error:
+        try:
+            detail = marker.read_text(encoding="utf-8").strip()
+        except OSError as read_error:
+            detail = f"unreadable marker: {read_error}"
+        raise TPUProfilingError(
+            f"TPU device {device_id} has an incomplete prior session recorded by "
+            f"{marker}. Inspect the board and prior owner before removing the marker"
+            f"{': ' + detail if detail else '.'}") from error
+    try:
+        with os.fdopen(descriptor, "wb", closefd=True) as output:
+            output.write(encoded)
+            output.flush()
+            os.fsync(output.fileno())
+    except BaseException:
+        # A partial marker is still the safe state: it prevents another launch
+        # until an operator has inspected the board.
+        raise
+    return marker
+
+
+def _quarantine_pcie_device(device_id: int, *, process_group: int, reason: str) -> Path:
+    """Persistently fail-close one device after incomplete process-tree cleanup.
+
+    The marker is intentionally never removed automatically. ``tpu-smi`` can
+    report an idle card while a process remains blocked in the driver, so only
+    an operator who has inspected the recorded PGID and recovered the board may
+    remove it. Callers must own the session lock to prevent a competing launch
+    between detecting the failure and creating the marker.
+    """
+
+    if not _pcie_device_lock_owned(device_id):
+        raise TPUProfilingError(
+            f"Cannot quarantine TPU device {device_id} without owning its session lock")
+    # Set this before touching the quarantine path.  Creating that second
+    # marker can itself fail (for example ENOSPC or EACCES); the already
+    # durable session marker must then survive lock release and keep the board
+    # fail-closed.
+    held = _PCIE_DEVICE_LOCK_STATE.held
+    held[device_id]["safe_to_release"] = False
+    marker = _pcie_device_quarantine_path(device_id)
+    payload = {
+        "schema_version": 1,
+        "status": "quarantined",
+        "device_id": device_id,
+        "process_group": process_group,
+        "reason": reason,
+        "owner_pid": os.getpid(),
+        "host": socket.gethostname(),
+        "created_unix_ns": time.time_ns(),
+    }
+    encoded = (json.dumps(payload, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
+    try:
+        descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return marker
+    except OSError as error:
+        session_path = held[device_id]["session_path"]
+        raise TPUProfilingError(
+            f"Cannot create PCIe quarantine marker {marker}: {error}. "
+            f"The active session marker {session_path} is retained fail-closed") from error
+    try:
+        with os.fdopen(descriptor, "wb", closefd=True) as output:
+            output.write(encoded)
+            output.flush()
+            os.fsync(output.fileno())
+    except BaseException:
+        # Even a partial marker remains fail-closed. Do not unlink it and
+        # accidentally permit another board launch.
+        raise
+    return marker
+
+
+@contextmanager
+def _exclusive_pcie_device_lock(device_id: int):
+    """Serialize a PCIe session, allowing nested ownership in one thread."""
+
+    if fcntl is None or not sys.platform.startswith("linux"):
+        raise TPUProfilingError(
+            "Safe PCIe device ownership requires Linux flock support")
+    held = getattr(_PCIE_DEVICE_LOCK_STATE, "held", None)
+    if held is None:
+        held = {}
+        _PCIE_DEVICE_LOCK_STATE.held = held
+    if device_id in held:
+        if held[device_id].get("safe_to_release") is False:
+            raise TPUProfilingError(
+                f"TPU device {device_id} became unsafe during this PCIe session; "
+                "no further command may be launched")
+        _assert_pcie_device_not_quarantined(device_id)
+        held[device_id]["depth"] += 1
+        try:
+            yield held[device_id]["path"]
+        finally:
+            held[device_id]["depth"] -= 1
+        return
+
+    lock_path = _PCIE_DEVICE_LOCK_ROOT / f"tilelang-tpu-device-{device_id}.lock"
+    try:
+        lock_file = lock_path.open("a+", encoding="utf-8")
+    except OSError as error:
+        raise TPUProfilingError(
+            f"Cannot open PCIe device lock {lock_path}: {error}") from error
+    with lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            message = (
+                f"TPU device {device_id} is already owned by another TileLang PCIe session")
+            raise TPUProfilingError(message) from error
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(f"pid={os.getpid()}\n")
+        lock_file.flush()
+        _assert_pcie_device_not_quarantined(device_id)
+        session_path = _create_pcie_device_session(device_id)
+        held[device_id] = {
+            "depth": 1,
+            "path": lock_path,
+            "session_path": session_path,
+            "safe_to_release": True,
+        }
+        try:
+            yield lock_path
+        finally:
+            state = held.get(device_id)
+            if state is None or state["depth"] != 1:
+                raise TPUProfilingError(
+                    f"PCIe device {device_id} lock ownership became inconsistent")
+            try:
+                if state["safe_to_release"]:
+                    try:
+                        session_path.unlink()
+                    except FileNotFoundError as error:
+                        # An external removal defeats the crash-detection
+                        # invariant. Persist a stronger marker before releasing
+                        # the file lock.
+                        quarantine = _quarantine_pcie_device(
+                            device_id,
+                            process_group=os.getpid(),
+                            reason=(
+                                "active PCIe session marker disappeared before orderly exit"),
+                        )
+                        raise TPUProfilingError(
+                            f"PCIe session marker disappeared; device {device_id} is "
+                            f"quarantined by {quarantine}") from error
+            finally:
+                held.pop(device_id, None)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
 
 class TPUProfilingError(RuntimeError):
     """Base class for TPU profiling failures that preserve collected artifacts."""
@@ -112,7 +325,10 @@ def _normalize_decoder_python(value: PathLike) -> Path:
         raise TypeError("pcie_decoder_python must be a path-like value.") from exc
     if not isinstance(raw_value, str) or not raw_value.strip():
         raise ValueError("pcie_decoder_python must be a non-empty filesystem path.")
-    path = Path(raw_value).expanduser().resolve()
+    # Keep a virtual-environment launcher spelling intact. Resolving the
+    # ``bin/python`` symlink to /usr/bin/python discards pyvenv.cfg discovery
+    # and silently loses the decoder's installed dependencies.
+    path = Path(os.path.abspath(Path(raw_value).expanduser()))
     if not path.is_file():
         raise ValueError(f"pcie_decoder_python is not a file: {path}")
     if not os.access(path, os.X_OK):
@@ -121,15 +337,15 @@ def _normalize_decoder_python(value: PathLike) -> Path:
 
 
 def _normalize_decoder_pythonpath(values: Sequence[PathLike]) -> Tuple[Path, ...]:
-    """Resolve an explicit decoder-only import path without accepting strings as lists."""
+    """Resolve decoder-only directories or importable zip/wheel archives."""
 
     if isinstance(values, (str, bytes, os.PathLike)):
-        raise TypeError("pcie_decoder_pythonpath must be a sequence of directory paths, "
+        raise TypeError("pcie_decoder_pythonpath must be a sequence of import paths, "
                         "not one path-like value.")
     try:
         raw_values = tuple(values)
     except TypeError as exc:
-        raise TypeError("pcie_decoder_pythonpath must be a sequence of directory paths.") from exc
+        raise TypeError("pcie_decoder_pythonpath must be a sequence of import paths.") from exc
     normalized = []
     for value in raw_values:
         try:
@@ -139,10 +355,12 @@ def _normalize_decoder_pythonpath(values: Sequence[PathLike]) -> Tuple[Path, ...
         if not isinstance(raw_value, str) or not raw_value.strip():
             raise ValueError("pcie_decoder_pythonpath entries must be non-empty paths.")
         path = Path(raw_value).expanduser().resolve()
-        if not path.is_dir():
-            raise ValueError(f"pcie_decoder_pythonpath entry is not a directory: {path}")
+        if not path.is_dir() and not (path.is_file() and zipfile.is_zipfile(path)):
+            raise ValueError(
+                "pcie_decoder_pythonpath entry is not a directory or importable "
+                f"zip/wheel archive: {path}")
         if path in normalized:
-            raise ValueError(f"pcie_decoder_pythonpath contains a duplicate directory: {path}")
+            raise ValueError(f"pcie_decoder_pythonpath contains a duplicate entry: {path}")
         normalized.append(path)
     return tuple(normalized)
 
@@ -555,6 +773,19 @@ class _GuardedProcessOutput:
     cleanup_complete: bool
 
 
+@dataclass(frozen=True)
+class TPUSupervisedCommandResult:
+    """Bounded result from a command running below the TPU process supervisor."""
+
+    stdout: str
+    stderr: str
+    returncode: Optional[int]
+    timed_out: bool
+    left_live_descendant: bool
+    cleanup_complete: bool
+    process_group: int
+
+
 def _communicate_guarded_process(process: subprocess.Popen, *,
                                  timeout: float) -> _GuardedProcessOutput:
     """Collect one guarded command and reject a successful leader-only exit.
@@ -591,7 +822,7 @@ def _timeout_output_as_text(value: Any) -> str:
     return str(value)
 
 
-def _terminate_and_collect(process: subprocess.Popen) -> Tuple[str, str]:
+def _terminate_and_collect(process: subprocess.Popen) -> TPUSupervisedCommandResult:
     """Terminate a guarded group and drain its pipes with a final hard bound.
 
     A killed command descendant can retain an inherited pipe while stuck in a
@@ -605,7 +836,19 @@ def _terminate_and_collect(process: subprocess.Popen) -> Tuple[str, str]:
     reaped = _kill_process_group(process, process_group=process_group)
     try:
         stdout, stderr = process.communicate(timeout=_PROCESS_PIPE_DRAIN_S)
-        return stdout, stderr
+        if not reaped:
+            diagnostic = ("TileLang TPU watchdog: process group "
+                          f"{process_group} could not be fully reaped")
+            stderr = f"{stderr}\n{diagnostic}\n" if stderr else diagnostic + "\n"
+        return TPUSupervisedCommandResult(
+            stdout=stdout,
+            stderr=stderr,
+            returncode=process.poll(),
+            timed_out=True,
+            left_live_descendant=not reaped,
+            cleanup_complete=reaped,
+            process_group=process_group,
+        )
     except subprocess.TimeoutExpired as exc:
         stdout = _timeout_output_as_text(exc.output)
         stderr = _timeout_output_as_text(exc.stderr)
@@ -618,7 +861,67 @@ def _terminate_and_collect(process: subprocess.Popen) -> Tuple[str, str]:
             if pipe is not None:
                 with suppress(OSError):
                     pipe.close()
-        return stdout, stderr
+        return TPUSupervisedCommandResult(
+            stdout=stdout,
+            stderr=stderr,
+            returncode=process.poll(),
+            timed_out=True,
+            left_live_descendant=not reaped,
+            cleanup_complete=reaped,
+            process_group=process_group,
+        )
+
+
+def run_tpu_supervised_command(
+    command: Sequence[PathLike],
+    *,
+    cwd: PathLike,
+    environment: Optional[Mapping[str, str]] = None,
+    timeout_s: float,
+    fail_closed_device_id: Optional[int] = None,
+) -> TPUSupervisedCommandResult:
+    """Run a finite command without an unbounded timeout cleanup path.
+
+    Timeout and process-group cleanup state are returned explicitly so a board
+    caller cannot mistake a timed-out command for a cleanly stopped process
+    tree.
+    """
+
+    if not command:
+        raise ValueError("supervised TPU command must not be empty")
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError("supervised TPU command timeout must be finite and positive")
+    if fail_closed_device_id is not None and not _pcie_device_lock_owned(
+            fail_closed_device_id):
+        raise TPUProfilingError(
+            "fail-closed supervised command requires ownership of its PCIe device lock")
+    process = _spawn_guarded_profile_process(
+        tuple(os.fspath(item) for item in command),
+        cwd=Path(cwd).expanduser().resolve(),
+        environment=_copy_environment(environment),
+    )
+    try:
+        output = _communicate_guarded_process(process, timeout=timeout_s)
+        return TPUSupervisedCommandResult(
+            stdout=output.stdout,
+            stderr=output.stderr,
+            returncode=process.returncode,
+            timed_out=False,
+            left_live_descendant=output.left_live_descendant,
+            cleanup_complete=output.cleanup_complete,
+            process_group=process.pid,
+        )
+    except subprocess.TimeoutExpired:
+        return _terminate_and_collect(process)
+    except BaseException:
+        terminated = _terminate_and_collect(process)
+        if fail_closed_device_id is not None and not terminated.cleanup_complete:
+            _quarantine_pcie_device(
+                fail_closed_device_id,
+                process_group=terminated.process_group,
+                reason="supervised PCIe command cancellation could not fully reap its group",
+            )
+        raise
 
 
 def _write_worker_logs(output_dir: Path, stdout: str, stderr: str) -> Tuple[Path, Path]:
@@ -995,6 +1298,57 @@ class TPUInstructionProfiler:
     def __init__(self, config: TPUProfilingConfig):
         self.config = config
 
+    @staticmethod
+    def exclusive_pcie_device(device_id: int):
+        """Own one logical PCIe device across a complete supervised session."""
+
+        if isinstance(device_id, bool) or not isinstance(device_id, int) or not (
+                0 <= device_id <= 2**31 - 1):
+            raise ValueError("device_id must be a non-negative 32-bit integer")
+        return _exclusive_pcie_device_lock(device_id)
+
+    @staticmethod
+    def run_supervised_pcie_probe(
+        device_id: int,
+        command: Sequence[PathLike],
+        *,
+        cwd: PathLike,
+        environment: Optional[Mapping[str, str]] = None,
+        timeout_s: float = 10.0,
+    ) -> TPUSupervisedCommandResult:
+        """Run a read-only board probe under an already-owned device lock.
+
+        Incomplete process-group cleanup permanently quarantines the device.
+        The method does not acquire the lock itself so callers can keep one
+        lock across a complete promotion session; nested public lock ownership
+        remains available for standalone probes.
+        """
+
+        if isinstance(device_id, bool) or not isinstance(device_id, int) or not (
+                0 <= device_id <= 2**31 - 1):
+            raise ValueError("device_id must be a non-negative 32-bit integer")
+        if not _pcie_device_lock_owned(device_id):
+            raise TPUProfilingError(
+                f"PCIe probe requires ownership of TPU device {device_id}'s session lock")
+        _assert_pcie_device_not_quarantined(device_id)
+        result = run_tpu_supervised_command(
+            command,
+            cwd=cwd,
+            environment=environment,
+            timeout_s=timeout_s,
+            fail_closed_device_id=device_id,
+        )
+        if not result.cleanup_complete:
+            marker = _quarantine_pcie_device(
+                device_id,
+                process_group=result.process_group,
+                reason="read-only PCIe probe process group could not be fully reaped",
+            )
+            raise TPUProfilingError(
+                f"PCIe probe left process group {result.process_group} alive; "
+                f"TPU device {device_id} is quarantined by {marker}")
+        return result
+
     def _validate_ppl_dependencies(self, environment: Mapping[str, str]) -> None:
         """Fail before spawning when a TileLang/PPL worker declares its SDK.
 
@@ -1051,8 +1405,8 @@ class TPUInstructionProfiler:
             guarded_output = _communicate_guarded_process(decoder, timeout=timeout)
         except subprocess.TimeoutExpired:
             assert decoder is not None
-            stdout, stderr = _terminate_and_collect(decoder)
-            detail = (stderr or stdout).strip()
+            terminated = _terminate_and_collect(decoder)
+            detail = (terminated.stderr or terminated.stdout).strip()
             raise TPUProfilingError(
                 f"Offline PCIe decoder preflight exceeded {timeout:g}s and its process "
                 f"group was terminated{': ' + detail if detail else '.'}") from None
@@ -1125,6 +1479,21 @@ class TPUInstructionProfiler:
                  command: Sequence[PathLike],
                  *,
                  environment: Optional[Mapping[str, str]] = None) -> TPUProfileReport:
+        """Run one PCIe worker while holding the shared per-device lock."""
+
+        if self.config.runtime_mode != "pcie":
+            raise TPUProfilingError("run_pcie only supports runtime_mode='pcie'.")
+        resolved = _copy_environment(environment)
+        self.pcie_profile_environment_overrides(resolved)
+        device_id = int(resolved["TILELANG_TPU_DEVICE_ID"])
+        with _exclusive_pcie_device_lock(device_id):
+            return self._run_pcie_locked(command, environment=environment)
+
+    def _run_pcie_locked(
+            self,
+            command: Sequence[PathLike],
+            *,
+            environment: Optional[Mapping[str, str]] = None) -> TPUProfileReport:
         """Run one explicitly authorized PCIe profile worker.
 
         The generated TileLang host wraps the same ``tpuRt`` stream/module in a
@@ -1144,7 +1513,9 @@ class TPUInstructionProfiler:
         normalized_command = tuple(os.fspath(item) for item in command)
         deadline = _profile_deadline(float(self.config.timeout_s))
         worker_env = _copy_environment(environment)
+        worker_env.pop("TPU_RT_CORE_NUM", None)
         worker_env.update(self.pcie_profile_environment_overrides(worker_env))
+        device_id = int(worker_env["TILELANG_TPU_DEVICE_ID"])
         self._validate_ppl_dependencies(worker_env)
         output_dir = _profile_output_dir(self.config)
         worker_env.pop("FILE_DUMP_CMD", None)
@@ -1175,27 +1546,53 @@ class TPUInstructionProfiler:
             guarded_output = _communicate_guarded_process(process, timeout=remaining)
             stdout, stderr = guarded_output.stdout, guarded_output.stderr
         except subprocess.TimeoutExpired:
-            stdout, stderr = _terminate_and_collect(process)
+            terminated = _terminate_and_collect(process)
+            stdout, stderr = terminated.stdout, terminated.stderr
             stdout_path, stderr_path = _write_worker_logs(output_dir, stdout, stderr)
+            quarantine = ""
+            if not terminated.cleanup_complete:
+                marker = _quarantine_pcie_device(
+                    device_id,
+                    process_group=terminated.process_group,
+                    reason="PCIe profile worker timed out and could not be fully reaped",
+                )
+                quarantine = (
+                    f" Process group {terminated.process_group} remains live; device "
+                    f"{device_id} is quarantined by {marker}.")
+            cleanup = ("was terminated" if terminated.cleanup_complete else
+                       "could not be fully reaped")
             raise TPUProfilingTimeoutError(
                 f"PCIe TPU profile session exceeded its total {self.config.timeout_s}s "
-                f"deadline and its worker process group was terminated. Logs: "
-                f"{stdout_path}, {stderr_path}") from None
+                f"deadline; its worker process group {cleanup}. Logs: "
+                f"{stdout_path}, {stderr_path}.{quarantine}") from None
         except BaseException:
             # Preserve cancellation semantics while applying the same bounded
             # process-tree cleanup and pipe drain as an explicit timeout.
-            with suppress(Exception):
-                _terminate_and_collect(process)
+            terminated = _terminate_and_collect(process)
+            if not terminated.cleanup_complete:
+                _quarantine_pcie_device(
+                    device_id,
+                    process_group=terminated.process_group,
+                    reason="PCIe profile worker cancellation could not fully reap its process group",
+                )
             raise
 
         stdout_path, stderr_path = _write_worker_logs(output_dir, stdout, stderr)
         if guarded_output.left_live_descendant:
             cleanup = ("was terminated"
                        if guarded_output.cleanup_complete else "could not be fully reaped")
+            quarantine = ""
+            if not guarded_output.cleanup_complete:
+                marker = _quarantine_pcie_device(
+                    device_id,
+                    process_group=process.pid,
+                    reason="PCIe profile worker left an unreaped descendant",
+                )
+                quarantine = f" Device {device_id} is quarantined by {marker}."
             raise TPUProfilingCommandError(
                 "PCIe TPU profile worker exited while leaving a live descendant; "
                 f"its supervised process group {cleanup}. Logs: "
-                f"{stdout_path}, {stderr_path}")
+                f"{stdout_path}, {stderr_path}.{quarantine}")
         if process.returncode != 0:
             raise TPUProfilingCommandError(
                 f"PCIe TPU profile worker exited with status {process.returncode}. "
@@ -1249,7 +1646,8 @@ class TPUInstructionProfiler:
                         decoder_stderr = decoder_guarded_output.stderr
                 except subprocess.TimeoutExpired:
                     assert decoder is not None
-                    decoder_stdout, decoder_stderr = _terminate_and_collect(decoder)
+                    terminated = _terminate_and_collect(decoder)
+                    decoder_stdout, decoder_stderr = terminated.stdout, terminated.stderr
                     parser_stdout, parser_stderr = _write_parser_logs(output_dir, decoder_stdout,
                                                                       decoder_stderr)
                     parser_status = "timed-out"
@@ -1415,7 +1813,8 @@ class TPUInstructionProfiler:
             guarded_output = _communicate_guarded_process(process, timeout=remaining)
             stdout, stderr = guarded_output.stdout, guarded_output.stderr
         except subprocess.TimeoutExpired:
-            stdout, stderr = _terminate_and_collect(process)
+            terminated = _terminate_and_collect(process)
+            stdout, stderr = terminated.stdout, terminated.stderr
             stdout_path, stderr_path = _write_worker_logs(output_dir, stdout, stderr)
             raise TPUProfilingTimeoutError(
                 f"CModel TPU profile session exceeded its total {self.config.timeout_s}s "
@@ -1507,8 +1906,9 @@ class TPUInstructionProfiler:
                                 )
                                 remaining = _remaining_timeout(deadline)
                                 if remaining <= 0:
-                                    parser_stdout_text, parser_stderr_text = \
-                                        _terminate_and_collect(parser)
+                                    terminated = _terminate_and_collect(parser)
+                                    parser_stdout_text = terminated.stdout
+                                    parser_stderr_text = terminated.stderr
                                     parser_stdout, parser_stderr = _write_parser_logs(
                                         output_dir, parser_stdout_text, parser_stderr_text)
                                     parser_status = "deadline-exhausted"
@@ -1527,8 +1927,9 @@ class TPUInstructionProfiler:
                                         parser_stderr_text = \
                                             parser_guarded_output.stderr
                                     except subprocess.TimeoutExpired:
-                                        parser_stdout_text, parser_stderr_text = \
-                                            _terminate_and_collect(parser)
+                                        terminated = _terminate_and_collect(parser)
+                                        parser_stdout_text = terminated.stdout
+                                        parser_stderr_text = terminated.stderr
                                         parser_stdout, parser_stderr = _write_parser_logs(
                                             output_dir, parser_stdout_text, parser_stderr_text)
                                         parser_status = "timed-out"
