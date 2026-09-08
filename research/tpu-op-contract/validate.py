@@ -86,6 +86,10 @@ DTYPES = {
 }
 OPTIONAL_STAGES = {"sdk_declared"}
 BACKENDS = {"tpukernel", "rv"}
+SOURCE_IDENTITY_SCOPES = {
+    "tracked files excluding research/**",
+    "tracked and untracked files excluding research/**",
+}
 CONSTRAINT_STATUSES = {"enforced", "documented", "unverified", "known_gap"}
 CONSTRAINT_CATEGORIES = {
     "dtype", "shape", "layout", "memory", "value", "aliasing", "target", "scheduling"
@@ -535,19 +539,70 @@ def _validate_runtime_report(evidence_id: str, artifact: dict[str, Any], expecta
             records.append(record)
     elif isinstance(results, list):
         records = []
-        programming_model = artifact.get("programming_model")
-        _require_nonempty_string(f"evidence {evidence_id}.artifact.programming_model",
-                                 programming_model)
+        artifact_programming_model = artifact.get("programming_model")
+        if artifact_programming_model is not None:
+            _require_nonempty_string(
+                f"evidence {evidence_id}.artifact.programming_model",
+                artifact_programming_model,
+            )
+            if artifact_programming_model not in BACKENDS:
+                raise ContractError(
+                    f"evidence {evidence_id} local artifact has an invalid programming model")
+        result_keys: set[str] = set()
         for record in results:
             if not isinstance(record, dict):
                 raise ContractError(f"evidence {evidence_id} has malformed results")
             chip = record.get("chip")
             _require_nonempty_string(f"evidence {evidence_id}.result.chip", chip)
-            target_counts[f"{chip}.{programming_model}"] += 1
+            record_programming_model = record.get("programming_model")
+            if record_programming_model is None:
+                programming_model = artifact_programming_model
+            else:
+                _require_nonempty_string(
+                    f"evidence {evidence_id}.result.programming_model",
+                    record_programming_model,
+                )
+                programming_model = record_programming_model
+                if (artifact_programming_model is not None and
+                        programming_model != artifact_programming_model):
+                    raise ContractError(
+                        f"evidence {evidence_id} result programming model disagrees with "
+                        "its local artifact")
+            _require_nonempty_string(
+                f"evidence {evidence_id}.result.programming_model",
+                programming_model,
+            )
+            if programming_model not in BACKENDS:
+                raise ContractError(
+                    f"evidence {evidence_id} result has an invalid programming model")
+            record_runtime_mode = record.get("runtime_mode")
+            numeric = record.get("numeric")
+            if record_runtime_mode is None and isinstance(numeric, dict):
+                record_runtime_mode = numeric.get("runtime_mode")
+            if record_runtime_mode != runtime_mode:
+                raise ContractError(
+                    f"evidence {evidence_id} result runtime mode disagrees with its "
+                    "local artifact")
             case = record.get("case")
             case_id = case.get("case_id") if isinstance(case, dict) else None
             _require_nonempty_string(f"evidence {evidence_id}.result.case.case_id", case_id)
-            actual_case_ids.add(f"{chip}/{programming_model}/{case_id}")
+            canonical_case_id = f"{chip}/{programming_model}/{case_id}"
+            result_key = record.get("key")
+            if result_key is not None:
+                _require_nonempty_string(f"evidence {evidence_id}.result.key", result_key)
+                expected_key = f"{runtime_mode}/{canonical_case_id}"
+                if result_key != expected_key:
+                    raise ContractError(
+                        f"evidence {evidence_id} result key disagrees with its identity")
+                if result_key in result_keys:
+                    raise ContractError(
+                        f"evidence {evidence_id} local artifact has duplicate result keys")
+                result_keys.add(result_key)
+            elif artifact_programming_model is None:
+                raise ContractError(
+                    f"evidence {evidence_id} mixed-programming-model result lacks a key")
+            target_counts[f"{chip}.{programming_model}"] += 1
+            actual_case_ids.add(canonical_case_id)
             records.append(record)
     else:
         raise ContractError(
@@ -1036,8 +1091,8 @@ def validate(*, require_local_artifacts: bool = False) -> tuple[int, int, int, i
                         artifact.get("implementation_worktree_dirty") is not False):
                     raise ContractError(f"evidence {evidence_id} was not recorded from a clean "
                                         "implementation worktree")
-                if (identity_source == "runner_recorded" and artifact.get("source_identity_scope")
-                        != "tracked files excluding research/**"):
+                if (identity_source == "runner_recorded" and
+                        artifact.get("source_identity_scope") not in SOURCE_IDENTITY_SCOPES):
                     raise ContractError(
                         f"evidence {evidence_id} has an unknown implementation identity scope")
                 _validate_runtime_report(evidence_id, artifact, runtime_expectation)

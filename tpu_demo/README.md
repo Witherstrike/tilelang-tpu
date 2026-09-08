@@ -170,8 +170,10 @@ profile、严格 timing 或板卡健康检查任一失败，矩阵都会保存�
 并跳过剩余 case，不在同一 runtime 实例中重试。若进程组在有界 TERM→KILL 后仍未完全回收，
 设备会写入持久 quarantine marker；若 runner 被强制杀死，持久 session marker 会保留。两者
 都会让后续 invocation fail-closed，不能因 `tpu-smi` 看似空闲就继续。操作者必须先检查记录的
-PID/PGID、恢复板卡并确认无残留进程，再人工移除对应 marker。PCIe 前置检查与每个通过 case
-的后置检查都要求设备严格为 `Active` 且利用率为 `0%`。
+PID/PGID、恢复板卡并确认无残留进程，再人工移除对应 marker。PCIe 前置检查与每个 case 的
+后置检查都要求设备为 `Active`；runner 在整张设备锁内按单调总 deadline 轮询，只有同一物理
+设备连续两次间隔采样为 `0%` 才允许下一次 launch。命令返回后的短暂非零利用率属于待收敛
+状态，不会被误判为新任务可立即复用；超时、无效输出或设备身份变化仍会持久 fail-close。
 
 ## 结果解释
 
