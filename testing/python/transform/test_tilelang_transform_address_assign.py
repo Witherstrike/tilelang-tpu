@@ -252,6 +252,142 @@ def test_copy_aliases_use_canonical_allocations_and_write_effects():
     assert a_addr // BANK_SIZE == b_addr // BANK_SIZE
 
 
+def _liveness_buffer(name):
+    return tvm.tir.decl_buffer((32,), "float32", name=name, scope="shared")
+
+
+def _liveness_allocate(buffer, body):
+    return tvm.tir.Allocate(buffer.data, buffer.dtype, list(buffer.shape),
+                            tvm.tir.IntImm("bool", 1), tvm.tir.DeclBuffer(buffer, body))
+
+
+def _liveness_fill(buffer):
+    return tvm.tir.Evaluate(tvm.tir.call_extern("handle", "tl.tpu.fill", buffer.data, 1.0))
+
+
+def _liveness_copy(src, dst):
+    return tvm.tir.Evaluate(tvm.tir.call_extern("handle", "tl.tpu.copy", src.data, dst.data))
+
+
+def _liveness_attrs(body, target_spec):
+    function = tvm.tir.PrimFunc(tvm.tir.analysis.undefined_vars(body), body).with_attr(
+        "global_symbol", "main")
+    target = tvm.target.Target(target_spec)
+    mod = tvm.tir.transform.BindTarget(target)(tvm.IRModule({"main": function}))
+    return tilelang.transform.AddressAssign()(mod)["main"].attrs
+
+
+TPU_ADDRESS_TARGETS = [
+    "tpu -mcpu=bm1690 -tpu-programming-model=tpukernel",
+    "tpu -mcpu=sg2260e -tpu-programming-model=tpukernel",
+    "tpu -mcpu=sg2260e -tpu-programming-model=rv",
+]
+
+
+@pytest.mark.parametrize("target_spec", TPU_ADDRESS_TARGETS)
+@pytest.mark.parametrize("loop_kind", ["for", "symbolic", "while", "nested"])
+@pytest.mark.parametrize("initialize_before_loop", [False, True])
+def test_loop_external_allocations_cannot_alias_later_scratch(
+        target_spec, loop_kind, initialize_before_loop):
+    weight, scratch, out = [_liveness_buffer(name) for name in ("weight", "scratch", "out")]
+    read = _liveness_copy(weight, out)
+    if loop_kind == "nested":
+        # The read must reach the outer loop's end, beyond the inner loop.
+        read = tvm.tir.For(tvm.tir.Var("j", "int32"), 0, 2, tvm.tir.ForKind.SERIAL, read)
+    body = tvm.tir.SeqStmt([read, _liveness_fill(scratch), _liveness_copy(scratch, out)])
+    if loop_kind == "while":
+        body = tvm.tir.While(tvm.tir.Var("keep_running", "bool"), body)
+    else:
+        extent = tvm.tir.Var("n", "int32") if loop_kind == "symbolic" else 2
+        body = tvm.tir.For(tvm.tir.Var("i", "int32"), 0, extent, tvm.tir.ForKind.SERIAL, body)
+    if initialize_before_loop:
+        body = tvm.tir.SeqStmt([_liveness_fill(weight), body])
+    for buffer in (out, scratch, weight):
+        body = _liveness_allocate(buffer, body)
+    attrs = _liveness_attrs(body, target_spec)
+
+    # Formerly weight=0, scratch=0, out=128: the later write destroyed the
+    # next iteration's weight. A first use inside the loop needs protection
+    # too; allocation scope, rather than a preceding use, determines this.
+    assert [_addr(attrs, name) for name in ("weight", "scratch", "out")] == [0, 128, 256]
+
+
+@pytest.mark.parametrize("loop_extent", [None, 0, 1])
+def test_no_backedge_preserves_sequential_address_reuse(loop_extent):
+    weight, scratch, out = [_liveness_buffer(name) for name in ("weight", "scratch", "out")]
+    body = tvm.tir.SeqStmt([
+        _liveness_copy(weight, out), _liveness_fill(scratch), _liveness_copy(scratch, out)
+    ])
+    if loop_extent is not None:
+        body = tvm.tir.For(tvm.tir.Var("i", "int32"), 0, loop_extent, tvm.tir.ForKind.SERIAL,
+                           body)
+    body = tvm.tir.SeqStmt([_liveness_fill(weight), body])
+    for buffer in (out, scratch, weight):
+        body = _liveness_allocate(buffer, body)
+    attrs = _liveness_attrs(body, TPU_ADDRESS_TARGETS[0])
+
+    # Static zero/one-trip loops cannot carry a value over a backedge. The
+    # pass still visits their body, preserving its existing straight-line
+    # allocation policy; dead-loop elimination belongs to other passes.
+    assert [_addr(attrs, name) for name in ("weight", "scratch", "out")] == [0, 0, 128]
+
+
+def test_loop_local_allocations_keep_sequential_address_reuse():
+    weight, scratch, out = [_liveness_buffer(name) for name in ("weight", "scratch", "out")]
+    body = tvm.tir.SeqStmt([
+        _liveness_fill(weight), _liveness_copy(weight, out), _liveness_fill(scratch),
+        _liveness_copy(scratch, out)
+    ])
+    for buffer in (out, scratch, weight):
+        body = _liveness_allocate(buffer, body)
+    body = tvm.tir.For(tvm.tir.Var("i", "int32"), 0, 2, tvm.tir.ForKind.SERIAL, body)
+    attrs = _liveness_attrs(body, TPU_ADDRESS_TARGETS[0])
+
+    # Each iteration owns a fresh weight allocation and initializes it before
+    # use; the later scratch write cannot destroy a loop-carried value.
+    assert [_addr(attrs, name) for name in ("weight", "scratch", "out")] == [0, 0, 128]
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_loop_local_scratch_can_reuse_addresses_without_clobbering_external_weight(nested):
+    weight, scratch0, scratch1, out = [
+        _liveness_buffer(name) for name in ("weight", "scratch0", "scratch1", "out")
+    ]
+    body = tvm.tir.SeqStmt([
+        _liveness_copy(weight, out),
+        _liveness_allocate(scratch0, tvm.tir.SeqStmt([
+            _liveness_fill(scratch0), _liveness_copy(scratch0, out)
+        ])),
+        _liveness_allocate(scratch1, tvm.tir.SeqStmt([
+            _liveness_fill(scratch1), _liveness_copy(scratch1, out)
+        ])),
+    ])
+    body = tvm.tir.For(tvm.tir.Var("i", "int32"), 0, 2, tvm.tir.ForKind.SERIAL, body)
+    body = _liveness_allocate(weight, tvm.tir.SeqStmt([_liveness_fill(weight), body]))
+    if nested:
+        # Weight is local to the outer loop, external to the inner one;
+        # scratch0/1 are local to both and retain sequential reuse.
+        body = tvm.tir.For(tvm.tir.Var("j", "int32"), 0, 2, tvm.tir.ForKind.SERIAL, body)
+    attrs = _liveness_attrs(_liveness_allocate(out, body), TPU_ADDRESS_TARGETS[0])
+
+    expected = [128, 0, 256, 256] if nested else [0, 128, 256, 256]
+    assert [_addr(attrs, name) for name in ("weight", "out", "scratch0", "scratch1")] == expected
+
+
+def test_while_condition_local_read_survives_body_scratch_writes():
+    condition, scratch, out = [
+        _liveness_buffer(name) for name in ("condition", "scratch", "out")
+    ]
+    body = tvm.tir.While(
+        tvm.tir.BufferLoad(condition, [0]) > 0,
+        tvm.tir.SeqStmt([_liveness_fill(scratch), _liveness_copy(scratch, out)]))
+    for buffer in (out, scratch, condition):
+        body = _liveness_allocate(buffer, body)
+    attrs = _liveness_attrs(body, TPU_ADDRESS_TARGETS[0])
+
+    assert [_addr(attrs, name) for name in ("condition", "scratch", "out")] == [0, 128, 256]
+
+
 if __name__ == "__main__":
     test_ppl_gemm_readwrite_accumulator_is_separated_from_both_inputs()
     test_elementwise_reads_are_bank_separated_while_outputs_remain_flexible()

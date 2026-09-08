@@ -455,6 +455,12 @@ private:
       range.start = std::min<uint32_t>(range.start, current_loc_);
       range.end = std::max<uint32_t>(range.end, current_loc_ + 1);
     }
+    auto allocation = allocation_loop_depth_.find(buffer);
+    if (allocation != allocation_loop_depth_.end()) {
+      for (size_t depth = allocation->second; depth < loops_.size(); ++depth) {
+        loops_[depth].external_buffers_used.insert(buffer);
+      }
+    }
   }
 
   void MarkExprAs(const PrimExpr &expr, BufferAccessKind access_kind) {
@@ -600,7 +606,63 @@ private:
     StmtExprVisitor::VisitStmt_(op);
   }
 
+  void VisitStmt_(const AllocateNode *op) final {
+    auto buffer = buffer_var_to_buffer_.find(op->buffer_var.get());
+    ICHECK(buffer != buffer_var_to_buffer_.end());
+    allocation_loop_depth_[buffer->second] = loops_.size();
+    StmtExprVisitor::VisitStmt_(op);
+    allocation_loop_depth_.erase(buffer->second);
+  }
+
+  void BeginLoop() { loops_.push_back({NextLoc(), {}}); }
+
+  void FinishLoop() {
+    const uint32_t end = NextLoc();
+    // A single traversal misses the backedge: an externally allocated tensor
+    // read early in the body may be read again after later scratch writes.
+    // Without a definite-write analysis, keep every used external allocation
+    // live over the whole loop. Allocations inside this loop remain eligible
+    // for sequential reuse, but are protected across any nested loop.
+    for (const BufferNode *buffer : loops_.back().external_buffers_used) {
+      auto &range = live_ranges_->at(buffer);
+      range.start = std::min(range.start, loops_.back().start);
+      range.end = std::max(range.end, end);
+    }
+    loops_.pop_back();
+  }
+
+  void VisitStmt_(const ForNode *op) final {
+    VisitExpr(op->min);
+    VisitExpr(op->extent);
+    const auto *extent = op->extent.as<IntImmNode>();
+    // Static zero/one-trip loops have no backedge. Symbolic extents and
+    // static extents above one must conservatively preserve loop state.
+    const bool may_repeat = !extent || extent->value > 1;
+    if (may_repeat) {
+      BeginLoop();
+    }
+    VisitStmt(op->body);
+    if (may_repeat) {
+      FinishLoop();
+    }
+  }
+
+  void VisitStmt_(const WhileNode *op) final {
+    BeginLoop();
+    // The condition is re-evaluated on the backedge as well.
+    VisitExpr(op->condition);
+    VisitStmt(op->body);
+    FinishLoop();
+  }
+
+  struct LoopLiveScope {
+    uint32_t start;
+    std::unordered_set<const BufferNode *> external_buffers_used;
+  };
+
   std::unordered_map<const VarNode *, const BufferNode *> buffer_var_to_buffer_;
+  std::unordered_map<const BufferNode *, size_t> allocation_loop_depth_;
+  std::vector<LoopLiveScope> loops_;
   std::unordered_set<const BufferNode *> seen_buffers_;
   std::unordered_set<const BufferNode *> read_buffers_;
   std::unordered_set<const BufferNode *> write_buffers_;
