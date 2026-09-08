@@ -678,6 +678,8 @@ def test_main_holds_one_exclusive_device_session_and_cleans_only_scratch(
     def run(_args, _root, output_dir, environment):
         events.append("run")
         assert Path(environment["TMPDIR"]).is_dir()
+        assert environment["TILELANG_CACHE_DIR"] == str(
+            Path(environment["TMPDIR"]) / "tilelang-cache")
         (output_dir / "preserved.log").write_text("trace", encoding="utf-8")
         return 0
 
@@ -689,8 +691,8 @@ def test_main_holds_one_exclusive_device_session_and_cleans_only_scratch(
 
     monkeypatch.setattr(matrix, "_parse_args", lambda: args)
     monkeypatch.setattr(
-        matrix, "_worker_environment",
-        lambda _root, scratch, _mode, _device: {"TMPDIR": str(scratch)},
+        matrix, "worker_environment",
+        lambda _root, _mode, _device: {},
     )
     monkeypatch.setattr(matrix, "_run_matrix", run)
     monkeypatch.setattr(matrix, "TPUInstructionProfiler", FakeProfiler)

@@ -862,6 +862,8 @@ def test_main_holds_one_exclusive_device_session_and_cleans_scratch(
     def run(_args, _root, _output, _configurations, _cases, environment):
         events.append("run")
         assert Path(environment["TMPDIR"]).is_dir()
+        assert environment["TILELANG_CACHE_DIR"] == str(
+            Path(environment["TMPDIR"]) / "tilelang-cache")
         return 0
 
     original_cleanup = matrix_module.remove_execution_scratch

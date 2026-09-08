@@ -40,6 +40,7 @@ if __package__:
         board_health,
         materialize_execution_snapshot,
         pin_native_worker_libraries,
+        pin_worker_cache_environment,
         pin_worker_environment,
         remove_execution_scratch,
         toolchain_identity,
@@ -63,6 +64,7 @@ else:
         board_health,
         materialize_execution_snapshot,
         pin_native_worker_libraries,
+        pin_worker_cache_environment,
         pin_worker_environment,
         remove_execution_scratch,
         toolchain_identity,
@@ -597,7 +599,7 @@ def main() -> int:
     scratch_dir = Path(tempfile.mkdtemp(prefix=".scratch-", dir=output_dir))
     try:
         environment = _worker_environment(repo_root, args.runtime_mode, args.device_id)
-        environment["TMPDIR"] = str(scratch_dir)
+        environment = pin_worker_cache_environment(environment, scratch_dir)
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         if args.runtime_mode == "pcie":
             assert args.device_id is not None

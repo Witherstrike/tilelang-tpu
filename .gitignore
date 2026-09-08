@@ -90,9 +90,6 @@ tilelang/lib
 # tox
 .tox/
 
-# cython
-tilelang/jit/adapter/cython/.cycache
-
 # TPU template compile intermediates
 /src/tl_templates/tpu/kernel.c
 /src/tl_templates/tpu/kernel.cpp

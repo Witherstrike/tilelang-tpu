@@ -200,6 +200,22 @@ def worker_environment(repo_root: Path, runtime_mode: str,
     return environment
 
 
+def pin_worker_cache_environment(environment: Mapping[str, str],
+                                 scratch_dir: Path) -> dict[str, str]:
+    """Pin all TileLang-generated caches below one disposable worker scratch."""
+
+    resolved_scratch = scratch_dir.expanduser().resolve()
+    resolved_scratch.mkdir(parents=True, exist_ok=True)
+    if not resolved_scratch.is_dir():
+        raise RuntimeError(f"worker scratch path is not a directory: {resolved_scratch}")
+    pinned = dict(environment)
+    pinned["TMPDIR"] = str(resolved_scratch)
+    # This explicit setting makes workers independent of HOME and prevents a
+    # read-only execution snapshot from falling back to a source-local cache.
+    pinned["TILELANG_CACHE_DIR"] = str(resolved_scratch / "tilelang-cache")
+    return pinned
+
+
 def toolchain_identity(environment: Mapping[str, str],
                        runtime_mode: str) -> dict[str, Any]:
     """Hash every compiler, SDK, and runtime component used by this matrix."""
@@ -1125,7 +1141,7 @@ def main() -> int:
     scheduled = scheduled_cases(configurations, cases)
     environment = worker_environment(repo_root, args.runtime_mode, args.device_id)
     scratch_dir = Path(tempfile.mkdtemp(prefix=".scratch-", dir=output_dir))
-    environment["TMPDIR"] = str(scratch_dir)
+    environment = pin_worker_cache_environment(environment, scratch_dir)
     try:
         if args.runtime_mode == "pcie":
             from tilelang.jit import TPUInstructionProfiler

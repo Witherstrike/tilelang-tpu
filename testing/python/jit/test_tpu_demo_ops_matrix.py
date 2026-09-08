@@ -564,6 +564,7 @@ def test_pin_worker_environment_removes_shared_checkout_imports(tmp_path):
             (str(repo), str(repo / "3rdparty/tvm/python"), str(external))),
         "LD_LIBRARY_PATH": str(external),
         "PPL_PROJECT_ROOT": "/sdk/ppl-1.7",
+        "TILELANG_CACHE_DIR": str(tmp_path / "scratch/tilelang-cache"),
     }
     toolchain = {
         "compiler_runtime": {
@@ -593,6 +594,22 @@ def test_pin_worker_environment_removes_shared_checkout_imports(tmp_path):
         str(tvm_library.parent.resolve()),
         str(external.resolve()),
     ]
+    assert pinned["TILELANG_CACHE_DIR"] == str(tmp_path / "scratch/tilelang-cache")
+
+
+def test_pin_worker_cache_uses_disposable_scratch_without_home(tmp_path):
+    snapshot = tmp_path / "execution-source"
+    snapshot.mkdir()
+    snapshot.chmod(0o555)
+    scratch = tmp_path / "worker-scratch"
+
+    pinned = matrix.pin_worker_cache_environment(
+        {"TILELANG_CACHE_DIR": str(snapshot / ".cycache")}, scratch)
+
+    assert pinned["TMPDIR"] == str(scratch.resolve())
+    assert pinned["TILELANG_CACHE_DIR"] == str(scratch.resolve() / "tilelang-cache")
+    assert Path(pinned["TILELANG_CACHE_DIR"]).is_relative_to(scratch.resolve())
+    assert not Path(pinned["TILELANG_CACHE_DIR"]).is_relative_to(snapshot.resolve())
 
 
 @pytest.mark.parametrize(
@@ -641,8 +658,9 @@ def test_worker_environment_separates_cmodel_and_board_runtime(monkeypatch, tmp_
     assert pcie["TILELANG_TPU_PCIE_RUNTIME_PATH"] == str(board_runtime.resolve())
     assert cmodel["PPL_PERFAI_ROOT"] == str(perfai.resolve())
     assert pcie["PPL_PERFAI_ROOT"] == str(perfai.resolve())
+    assert cmodel["PATH"] == matrix._WORKER_TOOL_PATH
+    assert pcie["PATH"] == matrix._WORKER_TOOL_PATH
     assert cmodel["PATH"] == os.pathsep.join(("/usr/bin", "/bin"))
-    assert pcie["PATH"] == os.pathsep.join(("/usr/bin", "/bin"))
     assert "/caller/toolchain" not in cmodel["PATH"]
     assert "/caller/toolchain" not in pcie["PATH"]
 

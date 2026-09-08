@@ -35,6 +35,7 @@ if __package__:
         board_health,
         materialize_execution_snapshot,
         pin_native_worker_libraries,
+        pin_worker_cache_environment,
         pin_worker_environment,
         remove_execution_scratch,
         toolchain_identity,
@@ -59,6 +60,7 @@ else:
         board_health,
         materialize_execution_snapshot,
         pin_native_worker_libraries,
+        pin_worker_cache_environment,
         pin_worker_environment,
         remove_execution_scratch,
         toolchain_identity,
@@ -134,7 +136,7 @@ def _validate_args(args: argparse.Namespace) -> None:
 def _worker_environment(repo_root: Path, scratch: Path, runtime_mode: str,
                         device_id: Optional[int]) -> dict[str, str]:
     environment = worker_environment(repo_root, runtime_mode, device_id)
-    environment["TMPDIR"] = str(scratch)
+    environment = pin_worker_cache_environment(environment, scratch)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return environment
 

@@ -87,9 +87,13 @@ def test_direct_worker_environment_has_deterministic_host_tool_path(
         _args(runtime_mode),
     )
 
-    assert environment["PATH"] == os.pathsep.join(("/usr/bin", "/bin"))
+    expected_tool_path = os.pathsep.join(("/usr/bin", "/bin"))
+    assert environment["PATH"] == expected_tool_path
     assert "/caller/toolchain" not in environment["PATH"]
     assert shutil.which("ld", path=environment["PATH"]) == "/usr/bin/ld"
+    assert environment["TMPDIR"] == str((tmp_path / "scratch").resolve())
+    assert environment["TILELANG_CACHE_DIR"] == str(
+        (tmp_path / "scratch/tilelang-cache").resolve())
 
 
 def test_validate_args_requires_scoped_promoted_single_device_pcie():

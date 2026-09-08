@@ -2,6 +2,8 @@ import ctypes
 import gc
 import os
 from pathlib import Path
+import subprocess
+import sys
 import weakref
 
 import pytest
@@ -16,6 +18,7 @@ from tilelang.engine.param import KernelParam
 from tilelang.engine.tpu_config import TPURuntimeConfig, TPUTargetSpec
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.ctypes.adapter import CtypesKernelAdapter
+from tilelang.jit.adapter.cython import adapter as cython_adapter
 from tilelang.jit.adapter.cython.adapter import CythonKernelAdapter
 from tilelang.jit.adapter.tpu import (
     make_tpu_forward,
@@ -53,6 +56,71 @@ class _FakePPLLayout:
 
 
 _TEST_SDK_IDENTITY = ("/test/ppl", "/test/ppl/runtime", "/test/ppl/backend")
+
+
+def test_cython_adapter_cache_is_below_external_tilelang_cache(monkeypatch, tmp_path):
+    cache_root = tmp_path / "tilelang-cache"
+    monkeypatch.setenv("TILELANG_CACHE_DIR", str(cache_root))
+
+    cache_dir = cython_adapter._cython_cache_root()
+
+    assert cache_dir == cache_root.resolve() / "cython-adapter/v1"
+    assert cache_root.is_dir()
+    assert not cache_dir.is_relative_to(
+        Path(cython_adapter.__file__).resolve().parent)
+
+
+def test_importing_tpu_adapter_does_not_build_cython_wrapper(tmp_path):
+    cache_root = tmp_path / "import-cache"
+    environment = dict(os.environ)
+    environment.update({
+        "PATH": os.pathsep.join(("/usr/bin", "/bin")),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "TILELANG_CACHE_DIR": str(cache_root),
+    })
+
+    subprocess.run(
+        [sys.executable, "-c",
+         "import tilelang; from tilelang.jit.adapter.cython import CythonKernelAdapter"],
+        check=True,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    assert not (cache_root / "cython-adapter").exists()
+
+
+def test_cython_wrapper_build_uses_python_module_and_atomic_cache(monkeypatch,
+                                                                  tmp_path):
+    cache_root = tmp_path / "build-cache"
+    commands = []
+
+    class FakeWrapper:
+        pass
+
+    def fake_run(command, *, check):
+        assert check is True
+        commands.append([str(item) for item in command])
+        output = Path(command[command.index("-o") + 1])
+        output.write_bytes(b"generated")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setenv("TILELANG_CACHE_DIR", str(cache_root))
+    monkeypatch.setattr(cython_adapter, "get_cplus_compiler", lambda: "/usr/bin/g++")
+    monkeypatch.setattr(cython_adapter.subprocess, "run", fake_run)
+    monkeypatch.setattr(cython_adapter, "_load_cython_extension",
+                        lambda _library: FakeWrapper)
+
+    assert cython_adapter._load_cython_kernel_wrapper() is FakeWrapper
+    assert cython_adapter._load_cython_kernel_wrapper() is FakeWrapper
+    assert commands[0][:3] == [sys.executable, "-m", "cython"]
+    assert commands[1][0] == str(Path("/usr/bin/g++").resolve())
+    assert len(commands) == 2
+    assert len(list(cache_root.glob("cython-adapter/v1/*/manifest.json"))) == 1
+    assert len(list(cache_root.glob("cython-adapter/v1/*/cython_wrapper.so"))) == 1
+    assert not list(cache_root.rglob("*.tmp"))
 
 
 def _tpu_target(chip="sg2260e", programming_model="tpukernel"):

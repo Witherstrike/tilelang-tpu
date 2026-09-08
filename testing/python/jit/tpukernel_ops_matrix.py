@@ -69,6 +69,7 @@ if __package__:
         board_health,
         materialize_execution_snapshot,
         pin_native_worker_libraries,
+        pin_worker_cache_environment,
         pin_worker_environment,
         remove_execution_scratch,
         toolchain_identity,
@@ -89,6 +90,7 @@ else:
         board_health,
         materialize_execution_snapshot,
         pin_native_worker_libraries,
+        pin_worker_cache_environment,
         pin_worker_environment,
         remove_execution_scratch,
         toolchain_identity,
@@ -280,8 +282,7 @@ def _utc_now() -> str:
 def _worker_environment(base_environment: Mapping[str, str], scratch_dir: Path,
                         case: CaseSpec, chip: str,
                         args: argparse.Namespace) -> dict[str, str]:
-    environment = dict(base_environment)
-    environment["TMPDIR"] = str(scratch_dir)
+    environment = pin_worker_cache_environment(base_environment, scratch_dir)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["TILELANG_TPU_BENCHMARK_RUNS"] = "0"
     environment.update({

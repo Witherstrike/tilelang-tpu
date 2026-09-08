@@ -4,7 +4,7 @@
 
 from ..base import BaseKernelAdapter
 import ctypes
-from typing import List, Optional, Union, Callable, Dict, Tuple, Any
+from typing import List, Optional, Union, Callable, Dict, Tuple, Any, Mapping
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tilelang.engine.param import KernelParam
@@ -26,107 +26,195 @@ import torch
 import sys
 import sysconfig
 import hashlib
+import importlib.util
+import json
 import os
+import platform
+import shutil
+import subprocess
+import tempfile
+import threading
 from pathlib import Path
 import logging
 
 logger = logging.getLogger(__name__)
 
-current = os.path.dirname(os.path.abspath(__file__))
+_CYTHON_CACHE_SCHEMA = 1
+_CYTHON_BUILD_FLAGS = (
+    "-shared",
+    "-pthread",
+    "-fPIC",
+    "-fwrapv",
+    "-O2",
+    "-Wall",
+    "-fno-strict-aliasing",
+)
+_CYTHON_WRAPPER_LOCK = threading.Lock()
 
 
-def get_cython_compiler() -> Optional[str]:
-    """Return the path to the Cython compiler.
-
-    Returns
-    -------
-    out: Optional[str]
-        The path to the Cython compiler, or None if none was found.
-    """
-
-    cython_names = ["cython", "cython3"]
-    dirs_in_path = os.get_exec_path()
-    for cython_name in cython_names:
-        for d in dirs_in_path:
-            cython_path = os.path.join(d, cython_name)
-            if os.path.isfile(cython_path) and os.access(cython_path, os.X_OK):
-                return cython_path
-    return None
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-# Add cache management functions at module level
-def get_cache_dir() -> Path:
-    """Get the cache directory for the current Python version."""
-    py_version = f"py{sys.version_info.major}{sys.version_info.minor}"
-    # current directory
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    cache_dir = Path(current_dir) / ".cycache" / py_version
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
+def _cython_cache_root() -> Path:
+    configured = os.environ.get("TILELANG_CACHE_DIR", "~/.tilelang/cache")
+    root = Path(configured).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "cython-adapter" / f"v{_CYTHON_CACHE_SCHEMA}"
 
 
-def get_cached_lib(source_code: str) -> Tuple[Optional[ctypes.CDLL], Path]:
-    """Try to load cached library or return None if not found."""
-    code_hash = hashlib.sha256(source_code.encode()).hexdigest()
-    cache_path = get_cache_dir() / f"{code_hash}.so"
-    if cache_path.exists():
-        try:
-            return ctypes.CDLL(str(cache_path)), cache_path
-        except Exception as e:
-            logger.error(f"Failed to load cached library: {e}")
-            return None, cache_path
-    return None, cache_path
+def _cython_build_identity(source_path: Path, compiler: Path,
+                           cython_version: str) -> Dict[str, Any]:
+    python_include_path = sysconfig.get_path("include")
+    if not python_include_path:
+        raise RuntimeError("Python's C include directory is unavailable.")
+    return {
+        "cache_schema": _CYTHON_CACHE_SCHEMA,
+        "source_sha256": _sha256_file(source_path),
+        "build_flags": list(_CYTHON_BUILD_FLAGS),
+        "python": {
+            "cache_tag": getattr(sys.implementation, "cache_tag", None),
+            "executable": str(Path(sys.executable).resolve()),
+            "soabi": sysconfig.get_config_var("SOABI"),
+            "version": platform.python_version(),
+        },
+        "platform": {
+            "machine": platform.machine(),
+            "system": platform.system(),
+            "sysconfig_platform": sysconfig.get_platform(),
+        },
+        "cython_version": cython_version,
+        "compiler": {
+            "path": str(compiler),
+            "sha256": _sha256_file(compiler),
+        },
+        "python_include_path": str(Path(python_include_path).resolve()),
+    }
 
 
-# read the cython_wrapper.pyx file
-current_dir = os.path.dirname(os.path.abspath(__file__))
-cython_wrapper_path = os.path.join(current_dir, "cython_wrapper.pyx")
+def _load_cython_extension(library_path: Path):
+    if library_path.is_symlink() or not library_path.is_file():
+        raise RuntimeError(f"Cython adapter cache is not a regular file: {library_path}")
+    module_name = "cython_wrapper"
+    spec = importlib.util.spec_from_file_location(module_name, library_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot create an import spec for {library_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    origin = Path(module.__file__).resolve() if module.__file__ else None
+    if origin != library_path.resolve():
+        raise RuntimeError(
+            f"Loaded Cython adapter from {origin}, expected {library_path.resolve()}")
+    wrapper_type = getattr(module, "CythonKernelWrapper", None)
+    if wrapper_type is None:
+        raise RuntimeError("Cython adapter library has no CythonKernelWrapper")
+    return wrapper_type
 
-with open(cython_wrapper_path, "r") as f:
-    cython_wrapper_code = f.read()
-    cache_dir = get_cache_dir()
-    source_path = cache_dir / "cython_wrapper.cpp"
-    library_path = cache_dir / "cython_wrapper.so"
-    md5_path = cache_dir / "md5.txt"
-    code_hash = hashlib.sha256(cython_wrapper_code.encode()).hexdigest()
 
-    # Check if cached version exists and is valid
-    need_compile = True
-    if md5_path.exists() and library_path.exists():
-        with open(md5_path, "r") as f:
-            cached_hash = f.read().strip()
-            if cached_hash == code_hash:
-                logger.debug("Cython jit adapter is up to date, no need to compile...")
-                need_compile = False
-            else:
-                logger.info("Cython jit adapter is out of date, need to recompile...")
-    else:
-        logger.info("No cached version found for cython jit adapter, need to compile...")
+def _cached_cython_wrapper(entry: Path, identity: Mapping[str, Any]):
+    library_path = entry / "cython_wrapper.so"
+    manifest_path = entry / "manifest.json"
+    if any(path.is_symlink() for path in (entry, library_path, manifest_path)):
+        raise RuntimeError(f"Cython adapter cache must not contain symlinks: {entry}")
+    if not library_path.is_file() or not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if manifest.get("identity") != identity:
+        return None
+    if manifest.get("library_sha256") != _sha256_file(library_path):
+        return None
+    return _load_cython_extension(library_path)
 
-    if need_compile:
-        logger.info("Compiling cython jit adapter...")
-        with open(md5_path, "w") as f:
-            f.write(code_hash)
-        # compile the cython_wrapper.pyx file into .cpp
-        cython = get_cython_compiler()
-        if cython is None:
-            raise Exception("Cython is not installed, please install it first.")
-        os.system(f"{cython} {cython_wrapper_path} --cplus -o {source_path}")
-        # compile the .cpp file into .so
-        python_include_path = sysconfig.get_path("include")
-        cc = get_cplus_compiler()
-        command = f"{cc} -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing -I{python_include_path} {source_path} -o {library_path}"
-        try:
-            os.system(command)
-        except Exception as e:
-            raise Exception(f"Failed to compile cython jit adapter: {e}") from e
 
-    # add the .so file to the sys.path
-    cache_dir_str = str(cache_dir)
-    if cache_dir_str not in sys.path:
-        sys.path.append(cache_dir_str)
+def _load_cython_kernel_wrapper():
+    """Build and load the non-TPU Cython bridge on first actual use."""
 
-from cython_wrapper import CythonKernelWrapper
+    try:
+        import Cython
+    except ImportError as error:
+        raise RuntimeError(
+            "The Cython execution backend requires the Cython Python package.") from error
+    compiler_name = get_cplus_compiler()
+    if not compiler_name:
+        raise RuntimeError("No C++ compiler is available for the Cython execution backend.")
+    compiler_path = shutil.which(compiler_name)
+    if compiler_path is None:
+        raise RuntimeError(
+            f"Cannot resolve the Cython execution backend compiler: {compiler_name}")
+    compiler = Path(compiler_path).resolve(strict=True)
+    source_path = Path(__file__).resolve().with_name("cython_wrapper.pyx")
+    identity = _cython_build_identity(source_path, compiler, Cython.__version__)
+    fingerprint = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    cache_root = _cython_cache_root()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    entry = cache_root / fingerprint
+    if entry.is_symlink():
+        raise RuntimeError(f"Cython adapter cache entry must not be a symlink: {entry}")
+    entry.mkdir(parents=False, exist_ok=True)
+
+    with _CYTHON_WRAPPER_LOCK:
+        lock_path = entry / ".lock"
+        with lock_path.open("a+b") as lock_file:
+            try:
+                import fcntl
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            except ImportError:
+                fcntl = None
+            cached = _cached_cython_wrapper(entry, identity)
+            if cached is not None:
+                return cached
+
+            library_path = entry / "cython_wrapper.so"
+            manifest_path = entry / "manifest.json"
+            with tempfile.TemporaryDirectory(
+                    prefix=f".{fingerprint}.", dir=cache_root) as build_dir_name:
+                build_dir = Path(build_dir_name)
+                generated_cpp = build_dir / "cython_wrapper.cpp"
+                generated_library = build_dir / "cython_wrapper.so"
+                subprocess.run(
+                    [sys.executable, "-m", "cython", str(source_path), "--cplus", "-o",
+                     str(generated_cpp)],
+                    check=True,
+                )
+                subprocess.run(
+                    [compiler, *_CYTHON_BUILD_FLAGS,
+                     f"-I{identity['python_include_path']}", str(generated_cpp), "-o",
+                     str(generated_library)],
+                    check=True,
+                )
+                if generated_library.is_symlink() or not generated_library.is_file():
+                    raise RuntimeError("Cython compilation produced no regular shared library")
+                os.replace(generated_library, library_path)
+                try:
+                    wrapper_type = _load_cython_extension(library_path)
+                except Exception:
+                    library_path.unlink(missing_ok=True)
+                    raise
+                manifest = {
+                    "identity": identity,
+                    "library_sha256": _sha256_file(library_path),
+                }
+                temporary_manifest = entry / f".manifest.{os.getpid()}.tmp"
+                try:
+                    temporary_manifest.write_text(
+                        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    os.replace(temporary_manifest, manifest_path)
+                finally:
+                    temporary_manifest.unlink(missing_ok=True)
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            return wrapper_type
 
 
 class CythonKernelAdapter(BaseKernelAdapter):
@@ -237,7 +325,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 error_msg = self.lib.get_last_error().decode('utf-8')
                 raise RuntimeError(f"Initialization failed: {error_msg}")
 
-            self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib)
+            wrapper_type = _load_cython_kernel_wrapper()
+            self.cython_wrapper = wrapper_type(self.result_idx, self.params, self.lib)
             self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
             self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
             self.cython_wrapper.set_static_shape_map(self.static_shape_map)
@@ -307,8 +396,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
             error_msg = adapter.lib.get_last_error().decode('utf-8')
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
-        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params,
-                                                     adapter.lib)
+        wrapper_type = _load_cython_kernel_wrapper()
+        adapter.cython_wrapper = wrapper_type(adapter.result_idx, adapter.params, adapter.lib)
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
         adapter.cython_wrapper.set_static_shape_map(adapter.static_shape_map)
