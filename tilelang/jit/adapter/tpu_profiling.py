@@ -33,6 +33,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -924,11 +925,25 @@ def run_tpu_supervised_command(
         raise
 
 
+def _remove_worker_transient_caches(output_dir: Path) -> None:
+    """Remove import-time caches from the profiler-owned result directory."""
+
+    cache_path = output_dir / f".pkl_memoize_py{sys.version_info.major}"
+    if cache_path.is_symlink() or cache_path.is_file():
+        cache_path.unlink()
+    elif cache_path.is_dir():
+        shutil.rmtree(cache_path)
+
+
 def _write_worker_logs(output_dir: Path, stdout: str, stderr: str) -> Tuple[Path, Path]:
     stdout_path = output_dir / "worker.stdout.log"
     stderr_path = output_dir / "worker.stderr.log"
     stdout_path.write_text(stdout, encoding="utf-8")
     stderr_path.write_text(stderr, encoding="utf-8")
+    # TVM's test-only pickle_memoize decorator creates this cache in cwd at
+    # import time.  Profile directories are durable evidence, not cache roots;
+    # the matrix-owned TILELANG_CACHE_DIR/TMPDIR carry all disposable state.
+    _remove_worker_transient_caches(output_dir)
     return stdout_path, stderr_path
 
 

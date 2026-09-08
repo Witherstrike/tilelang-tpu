@@ -53,6 +53,7 @@ def _fake_trace_worker(label: str, programming_model: str = "tpukernel", sleep_s
               "assert 'TILELANG_TPU_ALLOW_PCIE_LOAD' not in os.environ\n"
               "assert 'TILELANG_TPU_ALLOW_PCIE_PROFILE' not in os.environ\n"
               "assert 'TILELANG_TPU_DEVICE_ID' not in os.environ\n"
+              "Path('.pkl_memoize_py3').mkdir()\n"
               "Path(label + '-0-0.BD.0').write_bytes(b'raw-bd')\n"
               "Path(label + '-0-0.GDMA.0').write_bytes(b'raw-gdma')\n"
               "Path(label + '-0-0.BD.0.txt').write_text(\n"
@@ -91,6 +92,7 @@ def _fake_pcie_trace_worker(programming_model: str = "tpukernel",
               "assert os.environ['PROFILE_RECORD_SIZE'] == '4096'\n"
               "assert os.environ['PROFILE_BOOK_KEEPING'] == '1'\n"
               f"{pythonpath_check}"
+              "Path('.pkl_memoize_py3').mkdir()\n"
               "profile = Path('cdm_profile_data_dev0-0')\n"
               "profile.mkdir()\n"
               f"{profile_write}")
@@ -189,6 +191,7 @@ def test_cmodel_profile_worker_uses_a_private_cwd_and_keeps_raw_trace(tmp_path):
     ]
     assert report.stdout_path.is_file()
     assert report.stderr_path.is_file()
+    assert not (report.output_dir / ".pkl_memoize_py3").exists()
     assert [(item.engine, item.core_id, item.command_id, item.opcode)
             for item in report.raw_instructions] == [
                 ("bd", 0, 7, "15"),
@@ -986,6 +989,7 @@ def test_pcie_profile_worker_isolated_and_keeps_raw_trace(tmp_path):
     assert report.parser_status == "not-requested"
     assert [path.name for path in report.raw_trace_files] == ["cdm_profile_data_dev0-0"]
     assert report.raw_instructions == ()
+    assert not (report.output_dir / ".pkl_memoize_py3").exists()
 
 
 @pytest.mark.parametrize(
