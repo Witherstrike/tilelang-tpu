@@ -325,15 +325,9 @@ std::string CodeGenTileLangTPU::GetBufferRef(DataType t,
   if (alloc_storage_scope_.count(buffer_var)) {
     scope = alloc_storage_scope_.at(buffer_var);
   }
-  // Volatile local tensors are not part of the TPU descriptor ABI.
-  bool is_vol = false;
-
-  auto ptr_cast = [this, is_vol, scope](DataType pointed_to) {
+  auto ptr_cast = [this, scope](DataType pointed_to) {
     std::ostringstream ptr_os;
     ptr_os << "(";
-    if (is_vol) {
-      ptr_os << "volatile ";
-    }
     if (!scope.empty() && IsScopePartOfType()) {
       PrintStorageScope(scope, ptr_os);
     }
@@ -345,7 +339,7 @@ std::string CodeGenTileLangTPU::GetBufferRef(DataType t,
   DataType buffer_element_dtype = buffer->dtype;
 
   std::string buffer_str = vid;
-  if (!HandleTypeMatch(buffer_var, buffer_element_dtype) || is_vol) {
+  if (!HandleTypeMatch(buffer_var, buffer_element_dtype)) {
     std::stringstream temp;
     temp << "(" << ptr_cast(buffer_element_dtype) << vid << ")";
     buffer_str = temp.str();

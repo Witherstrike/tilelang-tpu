@@ -576,6 +576,18 @@ def validate_board_snapshot(payload: Any, device_id: int, *,
     }
 
 
+def _safe_json_evidence(payload: Any) -> Any:
+    """Detach a JSON-safe probe payload without invoking arbitrary repr hooks."""
+
+    try:
+        return json.loads(json.dumps(payload, ensure_ascii=False, allow_nan=False))
+    except Exception:
+        return {
+            "evidence_unavailable": "payload-is-not-json-serializable",
+            "payload_type": type(payload).__name__,
+        }
+
+
 def _wait_for_idle_board_snapshot(
         probe: Callable[[float], Any], device_id: int, *,
         timeout_s: float = _BOARD_IDLE_SETTLE_TIMEOUT_S,
@@ -611,6 +623,45 @@ def _wait_for_idle_board_snapshot(
     }
     zero_streak = 0
 
+    def record_sample(*, probe_started: float, probe_finished: float,
+                      payload_available: bool, raw_payload: Any = None,
+                      snapshot: Optional[Mapping[str, Any]] = None,
+                      probe_error: Optional[BaseException] = None,
+                      validation_error: Optional[BaseException] = None,
+                      utilization: Optional[list[str]] = None) -> dict[str, Any]:
+        payload_evidence = (
+            _safe_json_evidence(raw_payload) if payload_available else None
+        )
+        observed_at = time.monotonic()
+        sample = {
+            "sample_index": len(evidence["samples"]),
+            "observed_at": utc_now(),
+            "elapsed_s": round(observed_at - started, 6),
+            "probe_duration_s": round(probe_finished - probe_started, 6),
+            "payload_available": payload_available,
+            "payload": payload_evidence,
+            "probe_error_type": (
+                type(probe_error).__name__ if probe_error is not None else None
+            ),
+            "probe_error_message": (
+                str(probe_error) if probe_error is not None else None
+            ),
+            "validation_error_type": (
+                type(validation_error).__name__
+                if validation_error is not None else None
+            ),
+            "validation_error_message": (
+                str(validation_error) if validation_error is not None else None
+            ),
+            "status": None if snapshot is None else snapshot.get("status"),
+            "tpu_util": utilization,
+            "consecutive_zero_samples": zero_streak,
+            "within_deadline": observed_at <= deadline,
+        }
+        evidence["samples"].append(sample)
+        evidence["sample_count"] = len(evidence["samples"])
+        return sample
+
     def fail(reason: str, message: str, *, cause: Optional[BaseException] = None):
         evidence.update({
             "status": "failed",
@@ -635,8 +686,14 @@ def _wait_for_idle_board_snapshot(
         probe_started = time.monotonic()
         try:
             payload = probe(remaining)
-            snapshot = validate_board_snapshot(payload, device_id, require_idle=False)
         except KeyboardInterrupt as error:
+            probe_finished = time.monotonic()
+            record_sample(
+                probe_started=probe_started,
+                probe_finished=probe_finished,
+                payload_available=False,
+                probe_error=error,
+            )
             evidence.update({
                 "status": "cancelled",
                 "failure_reason": "observation-cancelled",
@@ -646,6 +703,30 @@ def _wait_for_idle_board_snapshot(
             raise BoardHealthCancelled(
                 f"device {device_id} board observation was interrupted", evidence) from error
         except Exception as error:
+            probe_finished = time.monotonic()
+            record_sample(
+                probe_started=probe_started,
+                probe_finished=probe_finished,
+                payload_available=False,
+                probe_error=error,
+            )
+            fail(
+                "probe-or-snapshot-invalid",
+                f"device {device_id} board observation failed: "
+                f"{type(error).__name__}: {error}",
+                cause=error,
+            )
+        probe_finished = time.monotonic()
+        try:
+            snapshot = validate_board_snapshot(payload, device_id, require_idle=False)
+        except Exception as error:
+            record_sample(
+                probe_started=probe_started,
+                probe_finished=probe_finished,
+                payload_available=True,
+                raw_payload=payload,
+                validation_error=error,
+            )
             fail(
                 "probe-or-snapshot-invalid",
                 f"device {device_id} board observation failed: "
@@ -654,20 +735,15 @@ def _wait_for_idle_board_snapshot(
             )
         utilization = [chip["tpu_util"] for chip in snapshot["chips"]]
         utilization_percent = [int(value[:-1]) for value in utilization]
-        observed_at = time.monotonic()
         zero_streak = zero_streak + 1 if all(value == 0 for value in utilization_percent) else 0
-        sample = {
-            "sample_index": len(evidence["samples"]),
-            "observed_at": utc_now(),
-            "elapsed_s": round(observed_at - started, 6),
-            "probe_duration_s": round(observed_at - probe_started, 6),
-            "status": snapshot["status"],
-            "tpu_util": utilization,
-            "consecutive_zero_samples": zero_streak,
-            "within_deadline": observed_at <= deadline,
-        }
-        evidence["samples"].append(sample)
-        evidence["sample_count"] = len(evidence["samples"])
+        sample = record_sample(
+            probe_started=probe_started,
+            probe_finished=probe_finished,
+            payload_available=True,
+            raw_payload=payload,
+            snapshot=snapshot,
+            utilization=utilization,
+        )
         evidence["consecutive_zero_samples"] = zero_streak
         evidence["last_tpu_util"] = utilization
         if evidence["initial_tpu_util"] is None:
@@ -676,7 +752,7 @@ def _wait_for_idle_board_snapshot(
         previous_maximum = evidence["max_observed_util_percent"]
         evidence["max_observed_util_percent"] = (
             maximum if previous_maximum is None else max(previous_maximum, maximum))
-        if observed_at > deadline:
+        if not sample["within_deadline"]:
             fail(
                 "idle-timeout",
                 f"device {device_id} board observation returned after the "
@@ -686,7 +762,7 @@ def _wait_for_idle_board_snapshot(
             evidence.update({
                 "status": "passed",
                 "finished_at": utc_now(),
-                "settle_seconds": round(observed_at - started, 6),
+                "settle_seconds": sample["elapsed_s"],
             })
             return {
                 **snapshot,

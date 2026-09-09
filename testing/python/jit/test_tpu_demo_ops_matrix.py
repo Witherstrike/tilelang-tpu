@@ -178,6 +178,13 @@ def test_wait_for_idle_board_snapshot_accepts_one_transient_sample(monkeypatch):
     assert snapshot["idle_settle"]["max_observed_util_percent"] == 9
     assert [sample["consecutive_zero_samples"]
             for sample in snapshot["idle_settle"]["samples"]] == [0, 1, 2]
+    assert [sample["payload"] for sample in snapshot["idle_settle"]["samples"]] == [
+        busy, _board_payload(), _board_payload()
+    ]
+    assert all(sample["probe_error_type"] is None
+               for sample in snapshot["idle_settle"]["samples"])
+    assert all(sample["validation_error_type"] is None
+               for sample in snapshot["idle_settle"]["samples"])
 
 
 def test_wait_for_idle_board_snapshot_resets_zero_streak(monkeypatch):
@@ -266,13 +273,57 @@ def test_wait_for_idle_board_snapshot_rejects_a_late_idle_probe(monkeypatch):
 def test_wait_for_idle_board_snapshot_rejects_invalid_active_snapshot_immediately():
     fault = _board_payload()
     fault["card0"]["chip0"]["status"] = "Fault"
+    probe_count = 0
+
+    def probe(_remaining):
+        nonlocal probe_count
+        probe_count += 1
+        return fault
 
     with pytest.raises(matrix.BoardHealthError, match="exact Active") as raised:
         matrix._wait_for_idle_board_snapshot(
-            lambda _remaining: fault, 0, timeout_s=1.0, poll_interval_s=0.01)
+            probe, 0, timeout_s=1.0, poll_interval_s=0.01)
 
-    assert raised.value.evidence["failure_reason"] == "probe-or-snapshot-invalid"
-    assert raised.value.evidence["samples"] == []
+    evidence = raised.value.evidence
+    assert probe_count == 1
+    assert evidence["failure_reason"] == "probe-or-snapshot-invalid"
+    assert evidence["sample_count"] == 1
+    sample = evidence["samples"][0]
+    assert sample["payload_available"] is True
+    assert sample["payload"] == fault
+    assert sample["probe_error_type"] is None
+    assert sample["probe_error_message"] is None
+    assert sample["validation_error_type"] == "RuntimeError"
+    assert sample["validation_error_message"] == (
+        "tpu-smi requires exact Active status for card0/chip0; got 'Fault'")
+    assert sample["probe_duration_s"] >= 0
+    assert sample["observed_at"]
+
+
+def test_wait_for_idle_board_snapshot_records_probe_failure_immediately():
+    probe_count = 0
+
+    def probe(_remaining):
+        nonlocal probe_count
+        probe_count += 1
+        raise OSError("supervised probe failed")
+
+    with pytest.raises(matrix.BoardHealthError, match="supervised probe failed") as raised:
+        matrix._wait_for_idle_board_snapshot(
+            probe, 0, timeout_s=1.0, poll_interval_s=0.01)
+
+    evidence = raised.value.evidence
+    assert probe_count == 1
+    assert evidence["sample_count"] == 1
+    sample = evidence["samples"][0]
+    assert sample["payload_available"] is False
+    assert sample["payload"] is None
+    assert sample["probe_error_type"] == "OSError"
+    assert sample["probe_error_message"] == "supervised probe failed"
+    assert sample["validation_error_type"] is None
+    assert sample["validation_error_message"] is None
+    assert sample["probe_duration_s"] >= 0
+    assert sample["observed_at"]
 
 
 def test_postflight_board_health_quarantines_persistent_busy_device(
