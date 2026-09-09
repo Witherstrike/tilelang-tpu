@@ -1,195 +1,207 @@
-# TileLang TPU 算子验证报告
+# TileLang-TPU Test Report
 
-## 1. 证据口径
+## 1. Evidence set
 
-本报告以 `e5774525e3a6e11d0d6010e979203c55181a8872` 为实现基线，本地证据根目录为
-`research/artifacts/2026-09-09/final-e5774525/`。选定的 39 份 summary 均记录同一
-Git 提交、`implementation_worktree_dirty=false`、`complete=true`、`status=passed`，且
-失败数为 0。它们包括 8 份 CModel、2 份完整 PCIe 矩阵、14 份 TPU-Kernel PCIe 分片和
-15 份 demo PCIe 分片。
+The runtime evidence in this report is tied to implementation commit
+`e5774525e3a6e11d0d6010e979203c55181a8872`. The artifact root is
+`research/artifacts/2026-09-09/final-e5774525/`, which is ignored by Git.
 
-BM1690 CModel 使用四份原始矩阵，SG2260E CModel 只使用四份 `*-cmodel-retry1` 矩阵。
-PCIe 使用完整 core/FP8 矩阵和第 2 节列明的通过分片。原始并发 CModel 运行、失败矩阵及
-分片的通过前缀、所有 recovery canary 均仅作诊断，不计入正式结果。
+The accepted set contains 39 `summary.json` records:
 
-每个数值 case 在独立子进程中编译、加载、执行，并与精确结果或 PyTorch 参考结果比较。
-PCIe summary 绑定同一实现的两芯片 CModel 前置证据和实际工具链/runtime 身份。矩阵首错
-停止；恢复后的重跑保留独立目录，不覆盖失败记录。
+- Eight CModel matrices
+- Two complete PCIe matrices
+- Fourteen TPU-Kernel PCIe shards
+- Fifteen demo PCIe shards
 
-`research/artifacts/**` 被 Git 忽略，本文记录的路径仅供本机复核；原始工件不随仓库发布。下表中的证据路径均相对于上述根目录。
+Each accepted summary records the same commit, a clean implementation tree,
+`complete=true`, `status=passed`, and no failed or cancelled cases. BM1690 uses
+the original four CModel summaries. SG2260E uses the four sequential
+`*-cmodel-retry1` summaries. Failed runs, partial prefixes, concurrent CModel
+runs, and recovery canaries remain diagnostic records and are not part of the
+accepted set.
 
-远程提交前又执行了 TPU-only 测试：`testing/python/jit` 跳过 4 个需要 CUDA/HIP 的文件，
-再加 AddressAssign 测试，共 693 passed、12 skipped；全新构建和原生目标增量构建均通过。
-当前工作树上的 BM1690 TPU-Kernel、SG2260E TPU-Kernel 和 SG2260E RV Tensor 三个最小
-CModel 用例也全部通过。机器可读契约的普通校验与本地工件严格校验均通过，覆盖 4 个 target
-条目、16 类 op、74 项 capability 和 81 条 evidence。这些收尾检查用于发现代码整理造成的回归，
-不会扩大下文绑定 `e5774525` 的完整矩阵结论。
+Each numerical case compiles, loads, and runs in a fresh process, then compares
+its output with an exact result or a PyTorch reference. A PCIe summary also
+records matching BM1690 and SG2260E CModel inputs and the resolved SDK and
+runtime identity.
 
-## 2. 正式验收结果
+After the implementation cleanup, the native build, TPU unit tests, target
+contract checks, and a CModel smoke test for each valid target combination were
+run again. These checks confirm the cleanup but do not change the runtime
+evidence tied to `e5774525`.
 
-| 矩阵 | BM1690 CModel | SG2260E CModel | SG2260E PCIe |
+## 2. Results
+
+| Matrix | BM1690 CModel | SG2260E CModel | SG2260E PCIe |
 | --- | ---: | ---: | ---: |
-| 双后端核心映射 | 28/28（`core-bm1690-cmodel/summary.json`） | 56/56（`core-sg2260e-cmodel-retry1/summary.json`） | 56/56（`core-sg2260e-pcie/summary.json`） |
-| FP8 TPU-Kernel | 42/42（`fp8-bm1690-cmodel/summary.json`） | 42/42（`fp8-sg2260e-cmodel-retry1/summary.json`） | 42/42（`fp8-sg2260e-pcie/summary.json`） |
-| 完整 TPU-Kernel op | 152/152（`tpukernel-bm1690-cmodel/summary.json`） | 146/146（`tpukernel-sg2260e-cmodel-retry1/summary.json`） | 146/146（`tpukernel-sg2260e-pcie-shards/`） |
-| 高层 demo | 36/36（`demo-bm1690-cmodel/summary.json`） | 51/51（`demo-sg2260e-cmodel-retry1/summary.json`） | 51/51（`demo-sg2260e-pcie-shards/`） |
-| **分阶段合计** | **258/258** | **295/295** | **295/295** |
+| Core backend mapping | 28/28 | 56/56 | 56/56 |
+| TPU-Kernel FP8 | 42/42 | 42/42 | 42/42 |
+| Full TPU-Kernel operations | 152/152 | 146/146 | 146/146 |
+| High-level demos | 36/36 | 51/51 | 51/51 |
+| **Stage total** | **258/258** | **295/295** | **295/295** |
 
-正式集合的 `scheduled_case_count` 与 `passed_case_count` 求和均为 848，其中 CModel
-553/553、PCIe 295/295。这是选定验收集合的执行次数，不是独立能力数，也不是整个实验过程
-的总发射次数。各矩阵有意重复验证部分指令；失败尝试和恢复实验另行保留。
+The accepted summaries contain 848 executions: 553 CModel and 295 PCIe. This
+number counts matrix executions, not distinct capabilities. Several matrices
+intentionally exercise the same instruction mapping at different levels.
 
-PCIe 分片按完整 case 标识核对覆盖范围，同一矩阵内无重复、无遗漏：
+The complete PCIe shard sets have no duplicate or missing case IDs:
 
-| 分片集合 | 选定目录 | 分片数 | case 数 |
+| Shard group | Contents | Shards | Cases |
 | --- | --- | ---: | ---: |
-| TPU-Kernel 基础 | `copy`、`fill-gemm`、`pointwise` | 3 | 59 |
-| TPU-Kernel 扩展 | `extended-exp`、`extended-gather`、`extended-rope`、`extended-rsqrt`、`extended-sigmoid` | 5 | 15 |
-| TPU-Kernel reduction | sum/max × FP16/BF16/FP32；BF16 max 只取 `reduce-max-bfloat16-retry1` | 6 | 72 |
-| TPU-Kernel demo | 四则、matmul、rmsnorm、rmsnorm-splitk、rope、swiglu、flashattn | 10 | 36 |
-| RV demo | 四则、matmul | 5 | 15 |
+| TPU-Kernel core | Copy, fill/GEMM, and pointwise | 3 | 59 |
+| TPU-Kernel extended | Exp, gather, RoPE, rsqrt, and sigmoid | 5 | 15 |
+| TPU-Kernel reduction | Sum and max for FP16, BF16, and FP32 | 6 | 72 |
+| TPU-Kernel demos | Elementwise, matmul, RMSNorm, split-K RMSNorm, RoPE, SwiGLU, and FlashAttention | 10 | 36 |
+| RV demos | Elementwise and matmul | 5 | 15 |
 
-TPU-Kernel 的 `extended` 与 `reduce-max-bfloat16` 失败分片不参与合并。demo 的每个分片
-覆盖三种 dtype，FlashAttention 另覆盖三种输入分布，因此该分片为 9 项。
+The accepted BF16 reduce-max shard is
+`reduce-max-bfloat16-retry1`; earlier failing extended and reduction shards
+are excluded.
 
-## 3. 低层覆盖
+## 3. Core backend mapping
 
-### 3.1 双后端核心矩阵
+Each programming model has 28 core cases:
 
-每个编程模型包含 28 项：4 项 FP16/FP32 copy、4 项基础四则、12 项三种基础浮点的 W
-broadcast 四则、7 项 dense/broadcast/负无穷 max，以及 1 项 matmul。BM1690 只调度
-TPU-Kernel 28 项；SG2260E 对 TPU-Kernel 与 RV Tensor 各调度同一组 28 项，因此为 56 项。
+- Four FP16/FP32 copy paths
+- Four basic elementwise arithmetic cases
+- Twelve FP16/BF16/FP32 W-broadcast arithmetic cases
+- Seven dense, broadcast, and negative-infinity max cases
+- One matmul case
 
-三阶段分别为 BM CModel 28/28、SG CModel 56/56、SG PCIe 56/56。这证明相同前端语义在
-SG2260E 上能由两个后端独立生成和执行，不表示运行时自动回退。
+BM1690 schedules the TPU-Kernel set. SG2260E schedules the same set once for
+TPU-Kernel and once for RV Tensor. The three stages completed as follows:
 
-### 3.2 完整 TPU-Kernel 矩阵
+- BM1690 CModel: 28/28
+- SG2260E CModel: 56/56
+- SG2260E PCIe: 56/56
 
-SG2260E 的 146 项与 BM1690 的共同部分如下：
+These results show that the shared frontend semantics select two independent
+instruction paths on SG2260E. They do not use runtime fallback.
 
-| 能力族 | case 数 | 已验证范围 |
+## 4. TPU-Kernel operation coverage
+
+The 146 cases common to BM1690 and SG2260E are:
+
+| Operation family | Cases | Scope |
 | --- | ---: | --- |
-| copy/cast | 23 | 三种基础浮点、六种整数、S2S、FP32 rank-3 与本地 cast |
-| fill | 3 | FP16/BF16/FP32 非零填充 |
-| GEMM | 6 | FP16/BF16，NN overwrite/accumulate 与 NT overwrite |
-| tensor add/sub/mul/div | 16 | 三种基础浮点 dense，并含 FP32 W broadcast |
-| tensor max | 5 | 三种 dense、FP32 broadcast、FP32 negative-infinity |
-| scalar add/mul | 6 | 两个 op × 三种基础浮点 |
-| exp/sigmoid | 6 | 两个 op × 三种基础浮点 |
-| reduce-sum/reduce-max | 72 | 两个 op × 三种基础浮点 × 12 个 width |
-| rsqrt | 3 | 三种基础浮点 |
-| rope/gather | 6 | 两个 op × 三种基础浮点 |
-| **共同部分** | **146** |  |
+| Copy and cast | 23 | Three base floating types, six integer types, S2S, FP32 rank-3, and local casts |
+| Fill | 3 | Nonzero FP16, BF16, and FP32 values |
+| GEMM | 6 | FP16/BF16 NN overwrite, NN accumulation, and NT overwrite |
+| Tensor add/subtract/multiply/divide | 16 | Dense base floating types and FP32 W broadcast |
+| Tensor max | 5 | Dense base floating types, FP32 broadcast, and negative infinity |
+| Scalar add/multiply | 6 | Two operations and three base floating types |
+| Exp and sigmoid | 6 | Two operations and three base floating types |
+| Reduce sum/max | 72 | Two operations, three base floating types, and twelve widths |
+| Rsqrt | 3 | FP16, BF16, and FP32 |
+| RoPE and gather | 6 | Two operations and three base floating types |
+| **Common total** | **146** | |
 
-BM1690 另有 FP32/INT32/UINT32 × 升序/降序的 6 项 topk，因此为 152。SG2260E 的头文件
-虽暴露对应 HAU 原语，但 CModel 实验已证明该芯片不适用；生产能力表明确不调度，而不是在
-运行时冒险调用。
+BM1690 adds six ascending and descending top-k cases for FP32, INT32, and
+UINT32, producing 152 cases. SG2260E rejects top-k during code generation
+because its runtime does not provide the required operation.
 
-BM1690 CModel 152/152、SG2260E CModel 146/146、SG2260E PCIe 146/146。三阶段正式结果的最大
-绝对误差都来自 `reduce-sum.bfloat16.w65`，为 0.0625，并在既定容差内。
+The three full TPU-Kernel results are BM1690 CModel 152/152,
+SG2260E CModel 146/146, and SG2260E PCIe 146/146. The largest absolute error was
+0.0625 in `reduce-sum.bfloat16.w65`, within the declared tolerance.
 
-远程提交前的 pass 审查另发现并修复了循环回边 liveness：旧逻辑会把“循环外初始化、每轮
-前段读取”的 `weight` 与每轮后段写入的 `scratch` 分到同一地址。最小复现旧地址为
-`weight/scratch/out=[0,0,128]`；修复后这三个 buffer 的地址互不重叠。31 个新增参数化用例
-覆盖三个合法 target、符号/嵌套 `For`、`While`、首次只在
-循环内使用、静态 0/1 次循环与 loop-local scratch；AddressAssign 全部 42 项通过。该变更会
-保守增加循环外 buffer 的占用时间；本报告的 e5774525 正式矩阵已在包含该修复的实现上重跑。
+The final pass review also fixed loop-back-edge liveness in `AddressAssign`.
+A buffer initialized outside a repeated loop can no longer share an address
+with scratch storage written later in the loop. Parameterized tests cover all
+three valid targets, symbolic and nested loops, `While`, zero- and one-trip
+loops, and loop-local scratch.
 
-### 3.3 FP8 矩阵
+## 5. FP8 coverage
 
-E4M3 与 E5M2 每种格式各 21 项：copy、S2S、zero fill、双向 cast、add/sub/mul、三种
-broadcast、max 与 max-broadcast、add/mul scalar、gather、RoPE，以及 NN/NT 的 overwrite
-与 accumulate GEMM。两格式合计 42 项。
+Each E4M3 and E5M2 set contains 21 cases:
 
-BM1690 CModel、SG2260E CModel 和 SG2260E PCIe 均为 42/42。该结论只覆盖 summary 中的
-固定 shape、受控输入域和已列支持条件；不外推到非零 FP8 fill、FP16/BF16 与 FP8 间的所有组合、
-FP8 C、NaN/Inf 或更大 shape。
+- Local and S2S copy
+- Zero fill
+- Conversion to and from FP32
+- Dense and W-broadcast add, subtract, multiply, and max
+- Scalar add and multiply
+- Gather and RoPE
+- NN and NT overwrite and accumulation GEMM
 
-## 4. 高层算子覆盖
+The combined 42-case set completed on BM1690 CModel, SG2260E CModel, and
+SG2260E PCIe. The result applies only to the exact shapes, input ranges, types,
+and attributes in the summaries. It does not cover nonzero FP8 fill, every
+FP16/BF16-to-FP8 conversion, FP8 output GEMM, exceptional values, larger
+shapes, BM1690 PCIe, or RV FP8.
 
-TPU-Kernel 的 36 项构成为：elementwise 12、matmul 3、RMSNorm 3、RMSNorm split-k 3、
-RoPE 3、SwiGLU 3、FlashAttention 9。RV Tensor 的 15 项构成为 elementwise 12 与
-matmul 3。每组都完整覆盖 FP16、BF16、FP32。
+## 6. High-level demos
 
-| 阶段 | TPU-Kernel | RV Tensor | 合计 |
+The TPU-Kernel set contains 36 cases: elementwise arithmetic, matmul, RMSNorm,
+split-K RMSNorm, RoPE, SwiGLU, and three FlashAttention input variants. The RV
+set contains 15 elementwise and matmul cases. Both sets cover FP16, BF16, and
+FP32 where applicable.
+
+| Stage | TPU-Kernel | RV Tensor | Total |
 | --- | ---: | ---: | ---: |
-| BM1690 CModel | 36 | 不适用 | 36/36 |
+| BM1690 CModel | 36 | N/A | 36/36 |
 | SG2260E CModel | 36 | 15 | 51/51 |
 | SG2260E PCIe | 36 | 15 | 51/51 |
 
-三个阶段的最大绝对误差均为 0.015625，最大平均绝对误差均约为 0.00260836，后者来自
-BF16 elementwise-div。上述数值由本轮正式 summary 重新汇总，不沿用旧基线的误差统计。
-FP32 matmul 和 FlashAttention 表示 FP32 逻辑 I/O；矩阵计算显式使用 BF16 输入和 FP32
-累加，不能据此声称原生 FP32 GEMM 已验证。完整算法、参考结果与容差见
-[高层算子报告](../tpu-demo-ops/README.md)。
+The largest absolute error was 0.015625. The largest mean absolute error was
+approximately 0.00260836 in BF16 elementwise division. FP32 matmul and
+FlashAttention use BF16 matrix operands with FP32 accumulation internally;
+they do not establish native FP32 matrix multiplication.
 
-## 5. Profiling 证据
+## 7. Profiling
 
-CModel 的 core、FP8、demo 每项都有非空 raw 命令记录，但本环境没有提供可接受的 CModel
-duration decoder，故 timed 均为 0。raw 命令数如下；它们证明 trace 被实际收集，不表示零耗时。
+Every core, FP8, and demo CModel case produced raw command records. A compatible
+CModel timing decoder was not available, so these records contain no decoded
+duration.
 
-| CModel profile 矩阵 | BM1690 raw 命令 | SG2260E raw 命令 |
-| --- | ---: | ---: |
-| core | 2604 | 3176 |
-| FP8 | 3434 | 1914 |
-| demo | 5330 | 4736 |
+SG2260E PCIe profiling used `bigTpuProfile 0.3.5` through
+`bigTpuProfile.bmprofile_perfAI.ProfileParser.parse`:
 
-SG2260E PCIe 的 profiling case 每项各有一个非空 raw trace 目录，并由
-`bigTpuProfile 0.3.5` 的 `bigTpuProfile.bmprofile_perfAI.ProfileParser.parse` 解码：
+| Matrix | Profiled cases | Decoded intervals | BDC | GDMA |
+| --- | ---: | ---: | ---: | ---: |
+| Core | 56 | 824 | 218 | 606 |
+| FP8 | 42 | 150 | 42 | 108 |
+| Demo | 51 | 2,594 | 2,168 | 426 |
+| **Total** | **149** | **3,568** | **2,428** | **1,140** |
 
-| PCIe profile 矩阵 | case | decoded ns 事件 | BDC / GDMA |
-| --- | ---: | ---: | ---: |
-| core | 56 | 824 | 218 / 606 |
-| FP8 | 42 | 150 | 42 / 108 |
-| demo | 51 | 2594 | 2168 / 426 |
-| **合计** | **149** | **3568** | **2428 / 1140** |
+The full 146-case TPU-Kernel PCIe matrix is a numerical test and has no decoded
+timing claim. Each profiling case records one launch, without warm-up,
+repetition, confidence intervals, or recorder-overhead correction. The timing
+is suitable for instruction inspection and fault diagnosis, not performance
+ranking.
 
-完整 TPU-Kernel 146 项是数值矩阵，不宣称逐指令 timing。上述 3568 个事件来自 149 次相互
-独立的单次诊断发射。它们适合核对 op→instruction 映射和定位异常，不具备 warm-up、repeat、
-置信区间或 recorder 开销校正，不能当作稳态 benchmark，也不能把事件时长简单相加后比较
-不同后端性能。
+## 8. PCIe device handling
 
-## 6. PCIe 空闲判定与故障复盘
+The PCIe runner holds the device session lock during preflight, execution, and
+postflight checks. After each command, two samples at least 0.25 seconds apart
+must report `Active` and 0% utilization within a 10-second monotonic deadline.
+A `Fault` state, topology mismatch, invalid health record, probe error, or idle
+timeout stops the remaining cases and preserves the quarantine state.
 
-板端矩阵在完整 device session lock 内执行空闲检查。命令返回后，`tpu-smi` 仍可能短暂
-报告非零利用率。runner 在 10 秒单调时钟 deadline 内轮询，要求两个间隔至少 0.25 秒的
-连续 `Active/0%` 样本；再次出现非零利用率会重置计数。单次 `Fault`、拓扑错误、无效
-JSON 或 probe 错误立即失败。运行后检查无法证明空闲时，runner 保留 session/quarantine
-状态并停止剩余 case，不自动清除隔离或继续运行。
+Several earlier complete or partially sharded runs reached a device-health
+failure after their numerical check. The retained samples showed `F` for the
+main temperature, clock, utilization, and voltage fields. This record does not
+identify whether the source was the driver, firmware, runtime, or telemetry.
+Those runs and their recovery canaries remain diagnostic evidence only.
 
-当前实现保留失败采样的原始 payload、时刻和错误信息。正式集合的 295 次 PCIe 执行均通过
-运行后检查；这是各次受控执行的通过记录，不是连续 295 次无中断运行的证明。
+After controlled processes exited and the board returned to two consecutive
+`Active/0%` samples, the accepted cases were rerun in smaller serial shards.
+The accepted shard union covers every listed case once. It establishes the
+reported operation results under controlled execution, not long-duration board
+stability.
 
-本轮完整 TPU-Kernel、完整 demo 和部分 TPU-Kernel 分片曾在数值检查之后出现健康检查
-失败。已保留的 `Fault` 样本中，温度、时钟、利用率、电压均为 `F`。这些字段不可用于推断
-过热、降频或电压异常，也不足以确定故障来自指令、固件、运行时还是遥测链路。根因尚未证实。
-失败完整矩阵、失败分片及 recovery canary 都只用于诊断；即使其中某次数值和解码已通过，
-也不提升为正式通过 case。
+## 9. Remaining work
 
-恢复后的完整通过分片按第 2 节重新组成验收集合。它们证明已列支持条件能在受控条件下
-执行，不证明故障已消失或可以放宽单次 Fault 停止策略。后续复测仍须先确认设备健康、按既有
-恢复流程处理隔离，并保留首次异常证据；长期稳定性需要独立的重复运行实验。
+1. Run the PCIe matrix on BM1690 hardware.
+2. Add RV reductions and math operations before enabling RV RMSNorm, RoPE,
+   SwiGLU, or FlashAttention.
+3. Add tails, dynamic shapes, exceptional values, division by zero, general
+   broadcasting, alias cases, and larger GEMM and reduction shapes.
+4. Extend FP8 to nonzero fill, additional conversions, FP8 outputs, exceptional
+   values, and wider shape coverage.
+5. Add explicit SG2260E four-core partitioning, synchronization, and ownership
+   tests.
+6. Build a separate unrecorded benchmark with warm-up, repetition, and
+   statistical thresholds.
 
-## 7. 结论边界与后续工作
-
-当前证据支持：
-
-- BM1690 TPU-Kernel 的 CModel 低层 op、FP8 与高层 demo；
-- SG2260E TPU-Kernel 的 CModel/PCIe 低层 op、FP8 与高层 demo；
-- SG2260E RV Tensor 的 CModel/PCIe 核心映射，以及 elementwise/matmul 高层表达。
-
-仍需按优先级补齐：
-
-1. **BM1690 PCIe**：本机没有 BM1690 板卡，SG2260E 结果不得外推。
-2. **RV 复合算子**：补齐 reduction 与 math 语义后，依次验证 RMSNorm、split-k、RoPE、
-   SwiGLU、FlashAttention；在此之前保持禁用。
-3. **边界输入和 shape**：覆盖 tail、动态 shape、NaN/Inf、除零、更多 broadcast/alias 和更大
-   GEMM/reduction；现有固定 case 不能代表整个 dtype 空间。
-4. **FP8 扩围**：验证非零 fill、更多跨 dtype cast、FP8 C、异常值和 shape 边界。
-5. **四核执行**：增加 SG2260E 四核分片、同步与依赖安全测试。当前矩阵证明数值正确性，
-   不证明多核扩展效率。
-6. **性能测试**：另建无 profiling recorder 的 warm-up/repeat 基准和统计阈值，避免把本报告的
-   单次诊断时间误作性能结论。
-
-新增证据应先进入 case registry 和机器可读 op contract，再按 BM1690 CModel、SG2260E
-CModel、SG2260E PCIe 的顺序晋级；不得从相邻 dtype、另一芯片或复合 workload 反推支持。
+New support must first appear in the case registry and the machine-readable
+operation contract. Promotion then follows BM1690 CModel, SG2260E CModel, and
+SG2260E PCIe in that order.

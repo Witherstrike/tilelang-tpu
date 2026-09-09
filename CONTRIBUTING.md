@@ -1,40 +1,44 @@
 # Contributing
 
-Contributions to TileLang-TPU are welcome. Please keep each change focused and include tests and
-documentation for any behavior that it adds or changes.
+Contributions to TileLang-TPU are welcome. Keep each change focused and add
+tests and documentation for new or changed behavior.
 
-## Reporting bugs
+## Report a bug
 
-Search the existing issues before opening a new one. A useful bug report includes:
+Search the issue tracker before opening a new report. Include:
 
-- a minimal reproducer;
-- the target chip, programming model, and runtime mode;
-- the expected and actual results;
-- the relevant compiler or runtime log.
+- A minimal reproducer
+- The target chip, programming model, and runtime mode
+- Expected and actual behavior
+- Relevant compiler or runtime logs
 
-Do not attach proprietary SDK files or raw data that may contain sensitive information.
+## Set up the repository
 
-## Asking questions
+Follow the [installation guide](docs/get_started/Installation.md) for the TPU
+development environment. It uses the bundled TVM submodule, a Python virtual
+environment, and `./build_tpu.sh`.
 
-Use the project issue tracker for development and usage questions. Include enough target and
-environment information for another contributor to reproduce the problem.
+## Run tests and formatting
 
-## Repository setup
+Start with the tests closest to the modified code, then run the TPU test suite
+described in the project [README](README.md#development).
 
-For TPU development, follow the
-[TileLang-TPU installation guide](docs/get_started/Installation.md). It uses the vendored TVM
-submodule, a Python virtual environment, and `./build_tpu.sh`. The generic `setup.py` path still
-targets the upstream GPU package and is not the TPU-only development workflow.
+```bash
+./format.sh
+```
 
-## Tests and formatting
+Run hardware cases through the staged CModel and PCIe process in the
+[TPU demo guide](tpu_demo/README.md). The PCIe runner serializes device access
+and stops at the first error.
 
-Run `./format.sh` before submitting a change. Start with the tests closest to the modified code,
-then run the TPU-only suite documented in the project [README](README.md#开发检查). Hardware tests
-must follow the staged CModel-to-PCIe process in [`tpu_demo/README.md`](tpu_demo/README.md); do not
-bypass its device lock or safety checks.
+## Submit a pull request
 
-## Pull requests
+The pull request description should explain:
 
-A pull request should explain what changed, why the change is needed, which target combinations it
-affects, and how it was verified. Keep unsupported and unverified combinations explicit instead of
-silently falling back to another backend.
+- What changed and why
+- Which chip, programming model, and runtime combinations are affected
+- Which tests were run
+- Any remaining limits
+
+Use an explicit compile-time error for unsupported target combinations. A
+backend must not silently fall back to another programming model.
