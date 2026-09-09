@@ -1,40 +1,34 @@
-# 安装 TileLang-TPU
+# Installing TileLang-TPU
 
-本文说明如何从源码配置 TileLang-TPU。当前 TPU 后端没有单独发布 PyPI wheel，因此推荐
-使用项目自带的 TVM 子模块和 CMake 构建原生库，再直接从源码目录导入 Python 包。
+This guide installs TileLang-TPU from source on an x86_64 Linux host. CModel
+execution does not require a TPU card. SG2260E PCIe execution requires the
+TPUv7 driver and runtime supplied with the card.
 
-## 1. 适用范围
+## Requirements
 
-当前安装流程面向 Linux x86_64，已在以下环境验证：
+| Component | Requirement |
+| --- | --- |
+| Operating system | x86_64 Linux; the commands below use Ubuntu or Debian |
+| Python | Python 3.8 or later; Python 3.10 is recommended |
+| Build tools | CMake 3.26 or later and a C++17 compiler |
+| TPU SDK | SOPHGO PPL 1.7.122 development package |
+| PCIe runtime | TPUv7 driver and runtime for SG2260E |
 
-- Ubuntu 22.04；
-- Python 3.10；
-- CMake 3.26 或更高版本；
-- PPL 1.7.122 发布包；
-- BM1690 CModel，以及 SG2260E CModel 和 PCIe。
+## 1. Install system packages
 
-项目元数据允许 Python 3.8 及以上版本，但提交前的完整验证环境是 Python 3.10。使用其他
-Python 或 PPL 1.7 小版本时，应重新执行本文的工具链检查和 CModel 测试。
-
-仅运行 CModel 不需要物理板卡。SG2260E PCIe 还需要已安装的 TPUv7 驱动运行库，并且
-必须先完成 BM1690 和 SG2260E 的 CModel 测试。
-
-## 2. 安装系统依赖
-
-Ubuntu/Debian 可使用：
+On Ubuntu or Debian, run:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  git build-essential python3 python3-dev python3-venv \
-  libtinfo-dev zlib1g-dev libedit-dev libxml2-dev
+  build-essential ca-certificates curl git \
+  python3 python3-dev python3-venv \
+  libedit-dev libtinfo-dev libxml2-dev zlib1g-dev
 ```
 
-CMake 由后面的 Python 虚拟环境安装，这样可以稳定满足项目要求的最低版本。
+CMake is installed in the Python environment in step 3.
 
-## 3. 获取源码
-
-新建工作目录时：
+## 2. Clone TileLang-TPU
 
 ```bash
 git clone https://github.com/xwhzz/tilelang-tpu.git
@@ -42,11 +36,10 @@ cd tilelang-tpu
 git submodule update --init --recursive 3rdparty/tvm
 ```
 
-已经有仓库时，只需在仓库根目录执行最后一条命令。TPU 构建依赖项目固定的 TVM 版本；
-不要用系统中的其他 TVM 替换它。顶层 CUTLASS 和 Composable Kernel 子模块属于 GPU
-后端，TPU-only 构建不需要初始化。
+The TPU build uses the TVM revision included as a submodule. The remaining
+commands assume that the current directory is the TileLang-TPU repository root.
 
-## 4. 创建 Python 环境
+## 3. Create a Python environment
 
 ```bash
 python3 -m venv .venv
@@ -55,67 +48,97 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt "cmake>=3.26"
 ```
 
-需要运行测试和格式检查时，再安装开发依赖：
+This installation uses the Python package directly from the source tree. An
+editable pip installation is not required.
+
+Install the test dependencies only when developing TileLang-TPU:
 
 ```bash
 python -m pip install -r requirements-test.txt
 ```
 
-不要在 TPU-only 环境中执行 `pip install -e .`。当前 `setup.py` 仍沿用上游 GPU 打包
-流程，会在配置阶段检查 CUDA；这与本文的 TPU 源码构建方式不是同一条安装路径。
+## 4. Install the PPL 1.7 SDK
 
-## 5. 准备 PPL 1.7 SDK
+Download the full development package from the official
+[SOPHGO PPL v1.7.122 release](https://github.com/sophgo/PPL/releases/tag/v1.7.122).
+The required release asset is
+[`ppl_v1.7.122-g05ebfb36-20260528.tar.gz`](https://github.com/sophgo/PPL/releases/download/v1.7.122/ppl_v1.7.122-g05ebfb36-20260528.tar.gz).
+GitHub's automatically generated source archives do not contain the complete
+SDK.
 
-从 SOPHGO 提供的 PPL 1.7 发布包中取得完整开发 SDK，并解压到仓库外。`PPL_PROJECT_ROOT`
-必须指向包含 `deps/` 的顶层目录，例如：
+The following commands install the SDK under `$HOME/toolchains`:
 
 ```bash
-export PPL_PROJECT_ROOT=/absolute/path/to/ppl-1.7-sdk
-test -f "${PPL_PROJECT_ROOT}/deps/chip/chip_map.json"
+mkdir -p "${HOME}/toolchains"
+curl -fL \
+  https://github.com/sophgo/PPL/releases/download/v1.7.122/ppl_v1.7.122-g05ebfb36-20260528.tar.gz \
+  -o "${HOME}/toolchains/ppl_v1.7.122-g05ebfb36-20260528.tar.gz"
+tar -xzf "${HOME}/toolchains/ppl_v1.7.122-g05ebfb36-20260528.tar.gz" \
+  -C "${HOME}/toolchains"
+
+export PPL_PROJECT_ROOT="${HOME}/toolchains/ppl_v1.7.122-g05ebfb36-20260528"
 ```
 
-项目只支持 PPL 1.7 的 `deps/` 发布布局。它会根据 `chip_map.json` 分别选择：
+`PPL_PROJECT_ROOT` must point to the extracted directory that contains
+`deps/`. Check the chip map before continuing:
 
-- BM1690：`tpub_7_1`；
-- SG2260E：`tpub_7_1_e`。
+```bash
+python - <<'PY'
+import json
+import os
+from pathlib import Path
 
-不要加载 PPL 自带的全局环境脚本，也不要设置 `PPL_KERNEL_PATH` 或 `TPU_KERNEL_PATH`。
-TileLang-TPU 会为每次 JIT 编译创建独立目录，并使用与目标芯片匹配的头文件和库。
+chip_map_path = Path(os.environ["PPL_PROJECT_ROOT"]) / "deps/chip/chip_map.json"
+chip_map = json.loads(chip_map_path.read_text(encoding="utf-8"))
+print(f"BM1690:  {chip_map['bm1690']}")
+print(f"SG2260E: {chip_map['sg2260e']}")
+PY
+```
 
-## 6. 构建原生库
+The output should be:
 
-在仓库根目录运行：
+```text
+BM1690:  tpub_7_1
+SG2260E: tpub_7_1_e
+```
+
+TileLang-TPU reads headers, libraries, CModel files, firmware, and the PCIe
+cross-compiler from this SDK. It does not require the PPL environment script.
+
+## 5. Build TileLang-TPU
+
+Run the build script from the repository root:
 
 ```bash
 ./build_tpu.sh
 ```
 
-脚本会在独立的 `build-tpu/` 中配置并构建 TileLang 与 TVM，不会修改 TVM 子模块，
-也不会安装 Python 包。独立目录可避免复用 GPU 构建留下的 CMake 配置。TileLang 会
-自动查找 `build-tpu/libtilelang_module.so` 和 `build-tpu/tvm/libtvm.so`。
+The script configures and builds TileLang and TVM in `build-tpu/`. It creates
+the following native libraries:
 
-随后配置当前 shell：
-
-```bash
-export TILELANG_TPU_SOURCE="$(pwd)"
-export PYTHONPATH="${TILELANG_TPU_SOURCE}${PYTHONPATH:+:${PYTHONPATH}}"
-export PPL_PROJECT_ROOT=/absolute/path/to/ppl-1.7-sdk
+```text
+build-tpu/libtilelang_module.so
+build-tpu/tvm/libtvm.so
 ```
 
-标准 `build-tpu/` 布局不需要手工设置 `LD_LIBRARY_PATH`、`TVM_LIBRARY_PATH` 或
-`TILELANG_LIBRARY_PATH`。如果自行使用非标准构建目录，需要分别设置后两个变量指向
-TileLang 构建目录和其中的 `tvm/` 目录。显式设置的 `TILELANG_LIBRARY_PATH` 会作为唯一的
-TileLang 原生库搜索路径；路径错误时会直接报错，不会退回仓库中的其他构建。
+Add the source tree to the current Python environment:
 
-## 7. 检查安装
+```bash
+export TILELANG_TPU_ROOT="$(pwd)"
+export PYTHONPATH="${TILELANG_TPU_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+```
 
-先确认 Python 能加载刚构建的原生库：
+TileLang finds the native libraries in `build-tpu/` automatically.
+
+## 6. Check the installation
+
+First, import the Python package and its native library:
 
 ```bash
 python -c 'import tilelang; print(tilelang.__version__)'
 ```
 
-再检查 PPL 目录中是否包含两种芯片的 CModel 文件和 SG2260E RV Tensor 头文件：
+Next, check the PPL SDK components used by both chips:
 
 ```bash
 python - <<'PY'
@@ -129,15 +152,20 @@ for chip in ("bm1690", "sg2260e"):
     layout.require_runtime("cmodel")
     if chip == "sg2260e":
         layout.require_rvt_api()
-    print(f"{chip}: {layout.arch}, CModel ready")
+    print(f"{chip}: {layout.arch}, {layout.physical_core_count} cores")
 PY
 ```
 
-最后查看算子列表并运行两个 SG2260E CModel 用例：
+Expected output:
+
+```text
+bm1690: tpub_7_1, 8 cores
+sg2260e: tpub_7_1_e, 4 cores
+```
+
+Run one TPU-Kernel example and one RV Tensor example with CModel:
 
 ```bash
-python testing/python/jit/tpu_demo_ops_matrix.py --list-cases
-
 python -m tpu_demo.run \
   --case elementwise-add.float16 \
   --chip sg2260e \
@@ -151,27 +179,45 @@ python -m tpu_demo.run \
   --runtime-mode cmodel
 ```
 
-两条命令都输出 `"status": "passed"`，才说明 Python、原生库、PPL SDK 和 CModel
-运行链路已经接通。
+Each command returns a JSON result with `"status": "passed"` when the Python
+environment, native libraries, PPL SDK, and CModel runtime are configured
+correctly.
 
-## 8. 配置 SG2260E PCIe
+## 7. Configure SG2260E PCIe execution
 
-PCIe 除了上述内容，还需要：
-
-1. PPL SDK 中能够唯一找到一个 `riscv64-unknown-linux-gnu-gcc` 交叉编译器；
-2. SDK 包含 SG2260E 对应的 firmware；
-3. 需要采集 profiling 时，SDK 还应包含 TPUDNN 头文件和库；
-4. 主机已经安装 TPUv7 板卡驱动和运行库；
-5. `tpu-smi` 能看到唯一的目标板卡。
-
-默认板端运行库目录是 `/opt/tpuv7/tpuv7-current/lib`。只有驱动安装在其他位置时才设置：
+Install the TPUv7 driver and runtime package supplied with the SG2260E card,
+then check the device and runtime library:
 
 ```bash
-export TILELANG_TPU_PCIE_RUNTIME_PATH=/absolute/path/to/board-runtime/lib
+tpu-smi
+test -f /opt/tpuv7/tpuv7-current/lib/libtpuv7_rt.so
 ```
 
-SDK 中的 `deps/runtime/tpuv7-runtime/lib` 是 CModel 运行库，不能用于 PCIe。下面的检查
-只核对文件和工具链，不会访问板卡：
+`/opt/tpuv7/tpuv7-current/lib` is the default PCIe runtime directory. Set the
+following variable only when the runtime is installed elsewhere:
+
+```bash
+export TILELANG_TPU_PCIE_RUNTIME_PATH=/absolute/path/to/tpuv7-runtime/lib
+```
+
+Check the PCIe compiler, firmware, and host runtime without launching a kernel:
+
+```bash
+python - <<'PY'
+import os
+
+from tilelang.jit.adapter.ppl_layout import resolve_ppl_layout
+
+layout = resolve_ppl_layout(os.environ["PPL_PROJECT_ROOT"], "sg2260e")
+layout.require_runtime("pcie")
+print(f"Cross-compiler: {layout.pcie_cross_gcc()}")
+print(f"Firmware:       {layout.firmware_archive}")
+print(f"Runtime:        {layout.pcie_runtime_lib()}")
+PY
+```
+
+PCIe profiling also needs the TPUDNN headers and library included in the PPL
+SDK. Check them with:
 
 ```bash
 python - <<'PY'
@@ -181,18 +227,27 @@ from tilelang.jit.adapter.ppl_layout import resolve_ppl_layout
 
 layout = resolve_ppl_layout(os.environ["PPL_PROJECT_ROOT"], "sg2260e")
 layout.require_profiling("pcie")
-print("SG2260E PCIe and profiling toolchain ready")
+print("PCIe profiling is ready")
 PY
 ```
 
-实际板卡测试请严格按照
-[`tpu_demo/README.md`](../../tpu_demo/README.md) 的三阶段命令执行。不要手工设置
-`TILELANG_TPU_ALLOW_PCIE_LOAD`、设备编号或 profiling 内部变量；测试工具会在持有设备锁时
-统一设置，并保证同一时刻只运行一个任务。
+Run PCIe examples through the serial runner described in the
+[TPU demo guide](../../tpu_demo/README.md). The runner manages device access
+and keeps CModel and PCIe results separate.
 
-## 9. 更新和重新构建
+## 8. Start a new shell
 
-拉取代码后先同步固定的 TVM 子模块，再重新构建：
+Restore the environment before using TileLang-TPU in a new shell:
+
+```bash
+cd /absolute/path/to/tilelang-tpu
+source .venv/bin/activate
+export PPL_PROJECT_ROOT="${HOME}/toolchains/ppl_v1.7.122-g05ebfb36-20260528"
+export TILELANG_TPU_ROOT="$(pwd)"
+export PYTHONPATH="${TILELANG_TPU_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+```
+
+## 9. Update the installation
 
 ```bash
 git pull --ff-only
@@ -200,36 +255,34 @@ git submodule update --init --recursive 3rdparty/tvm
 ./build_tpu.sh
 ```
 
-只修改了 C++ 源码时，也可以直接执行：
+After C++-only changes, an incremental build is sufficient:
 
 ```bash
 cmake --build build-tpu --parallel 10
 ```
 
-## 10. 常见问题
+## Troubleshooting
 
-### 找不到 CMake
+### `PPL 1.7 SDK layout is required`
 
-确认虚拟环境已经激活，并运行 `cmake --version`。若版本低于 3.26，重新执行第 4 节的
-安装命令。
+Set `PPL_PROJECT_ROOT` to the extracted SDK directory. The file
+`$PPL_PROJECT_ROOT/deps/chip/chip_map.json` must exist.
 
-### 找不到 `libtilelang_module.so` 或 `libtvm.so`
+### `libtilelang_module.so` or `libtvm.so` is missing
 
-确认 `./build_tpu.sh` 已成功结束，并从仓库根目录运行命令。若从其他目录运行，检查
-`PYTHONPATH` 是否包含仓库绝对路径。
+Run `./build_tpu.sh` from the repository root and keep the source tree on
+`PYTHONPATH`.
 
-### 提示 PPL 1.7 布局不完整
+### CMake is older than 3.26
 
-确认 `PPL_PROJECT_ROOT` 指向 SDK 顶层，而不是 `deps/` 本身。不要把不同 PPL 版本的头文件
-和库拼在同一个目录中。
+Activate `.venv` and run:
 
-### TPU-only 环境提示缺少 CUDA
+```bash
+python -m pip install --upgrade "cmake>=3.26"
+```
 
-这通常说明执行了 `pip install .` 或 `pip install -e .`。退出该流程，按本文第 4 至第 7 节
-使用源码目录和 `build-tpu/` 中的原生库。
+### PCIe loads the CModel runtime
 
-### PCIe 误用了 CModel 运行库
-
-不要把 `${PPL_PROJECT_ROOT}/deps/runtime/tpuv7-runtime/lib` 加到 PCIe 进程的
-`LD_LIBRARY_PATH`。使用系统安装的板端运行库，或通过
-`TILELANG_TPU_PCIE_RUNTIME_PATH` 指向它。
+Set `TILELANG_TPU_PCIE_RUNTIME_PATH` to the installed TPUv7 board runtime. The
+SDK path `deps/runtime/tpuv7-runtime/lib` contains the CModel runtime and is not
+the PCIe runtime.
