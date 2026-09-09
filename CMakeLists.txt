@@ -114,7 +114,7 @@ tilelang_file_glob(GLOB TILE_LANG_SRCS
   src/target/codegen_webgpu.cc
   # sophgo tpu
   src/target/tpu_target_kind.cc
-  src/target/codegen_tpu_common.cc
+  src/target/codegen_tpu.cc
   src/target/codegen_tpukernel.cc
   src/target/codegen_rv.cc
   src/target/rt_mod_tpu.cc

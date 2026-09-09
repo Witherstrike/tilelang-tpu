@@ -18,11 +18,11 @@
  */
 
 /*!
- * \file target/codegen_tpu_common.cc
- * \brief Shared TileLang TPU source generation and programming-model dispatch.
+ * \file target/codegen_tpu.cc
+ * \brief TileLang TPU source generation and programming-model dispatch.
  */
 
-#include "codegen_tpu_common.h"
+#include "codegen_tpu.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/runtime/registry.h>
 #include <tvm/tir/index_map.h>

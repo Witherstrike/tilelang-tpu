@@ -18,11 +18,11 @@
  */
 
 /*!
- * \file target/codegen_tpu_common.h
- * \brief Shared TileLang TPU source generation and backend dispatch.
+ * \file target/codegen_tpu.h
+ * \brief TileLang TPU source code generator.
  */
-#ifndef TVM_TL_TARGET_CODEGEN_TPU_COMMON_H_
-#define TVM_TL_TARGET_CODEGEN_TPU_COMMON_H_
+#ifndef TVM_TL_TARGET_CODEGEN_TPU_H_
+#define TVM_TL_TARGET_CODEGEN_TPU_H_
 
 #include <tvm/target/codegen.h>
 #include <tvm/tir/buffer.h>
@@ -198,4 +198,4 @@ private:
 } // namespace codegen
 } // namespace tvm
 
-#endif // TVM_TL_TARGET_CODEGEN_TPU_COMMON_H_
+#endif // TVM_TL_TARGET_CODEGEN_TPU_H_

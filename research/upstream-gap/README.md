@@ -71,10 +71,10 @@ BM1690 与 SG2260E 在当前 allocator 所需的 TPUv7 LMEM 几何上共用 prof
 ```text
 T.ppl_* frontend
   ├─ tl.tpu.{copy,fill,gemm,add,sub,mul,div,max}
-  │    ├─ TPU-Kernel emitter
-  │    └─ RV emitter
+  │    ├─ TPU-Kernel instruction selection
+  │    └─ RV instruction selection
   └─ tl.tpukernel.{scalar,exp,sigmoid,reduce,rsqrt,gather,topk,rope}
-       └─ TPU-Kernel emitter only
+       └─ TPU-Kernel instruction selection only
 ```
 
 TPU pipeline 当前采用保守语义：不运行 vectorization、software-pipeline injection 和 `StorageRewrite`。这不是性能目标，而是正确性边界；在 residual vector IR、DMA/compute 依赖和结构化 buffer 生命周期尚未建模时，这些 pass 可能生成语法成立但语义错误的程序。
@@ -101,7 +101,7 @@ AddressAssign 为封闭 semantic op 集建模 read/write/read-write effect。GEM
 
 FP8 的“手册/头文件声明、公开 frontend、TileLang codegen、CModel、PCIe”分别记录。canonical 矩阵为两芯片 CModel 各 42/42、SG PCIe 42/42；每种 E4M3/E5M2 格式各覆盖 21 个公开 case，包括 copy、zero fill、FP8↔FP32、dense/broadcast elementwise、scalar、RoPE、gather 与 NN/NT overwrite/accumulate GEMM。它只提升这些精确 selector。早先 scalar 两芯片 exit 139 已定位为 direct mixed-precision API 的非法 dtype tuple；合法 PPL/TileLang 路径均使用 cast 后的通用 add_C/mul_C，因此该崩溃不构成硬件负向证据。
 
-RV 的 cross-dtype copy 也必须按方向管理：当前 FP16→BF16 只有 `rvt_cvt_f2f` 生成源码证据，数值层仍为 `unverified`；BF16→FP16 尚无精确 codegen 证据。两者不能因共用一个 emitter 类型分支而合并提升。
+RV 的 cross-dtype copy 也必须按方向管理：当前 FP16→BF16 只有 `rvt_cvt_f2f` 生成源码证据，数值层仍为 `unverified`；BF16→FP16 尚无精确 codegen 证据。两者不能因共用同一条代码路径而合并提升。
 
 同一实现基线的 SG2260E/TPU-Kernel PCIe 已通过 14 个完整分片覆盖非 FP8 146/146，并通过独立 FP8 矩阵 42/42，包含基础浮点 scalar、exp/sigmoid/rsqrt、gather/rope、三种 dtype 的 W broadcast、十二个 reduction 边界 width，以及两种 FP8 格式各 21 个精确 case。另有 51/51 demo 和 56/56 双后端核心回归。这些结果只授权契约中已列出的 dtype、shape、属性和 oracle；BM 板端、FP8 非零 fill/异常值与更大 shape、一般 FP32 GEMM compute，以及更宽 RV selector 仍未验证。
 
@@ -120,19 +120,19 @@ RV 的 cross-dtype copy 也必须按方向管理：当前 FP16→BF16 只有 `rv
 
 ### 4.1 注册式 `TpuOpSpec`
 
-**现状**：operand role、dtype/shape、effect 和失败策略分布在 frontend、residual verifier、AddressAssign 与两个 emitter 中。
+**现状**：operand role、dtype/shape、effect 和失败策略分布在 frontend、residual verifier、AddressAssign 与两条指令选择实现中。
 
 **原因**：新增 op 时，任一层漏改都可能产生“前端接受、地址分析乐观、codegen 读取额外 buffer”的不一致；这是板端错误的系统性来源。
 
 **措施**：
 
-1. 定义 `TpuOpSpec`：semantic name、frontend alias、operand role/scope、effect、dtype/layout constraint、workspace、applicable programming model 与 emitter key；
+1. 定义 `TpuOpSpec`：semantic name、frontend alias、operand role/scope、effect、dtype/layout constraint、workspace、applicable programming model 与 instruction-selection key；
 2. 由该表生成/驱动 frontend guard、verifier allowlist、AddressAssign effect 和 codegen dispatch；
-3. chip-specific capability 作为 spec 的 predicate，不在 emitter 内散落字符串判断；
+3. chip-specific capability 作为 spec 的 predicate，不在指令选择实现内散落字符串判断；
 4. 合法性按完整 `chip × programming model × dtype × layout × attributes` selector 表达，保留 TPU-Kernel FP8 NT accumulation、TPU-Kernel 基础浮点 NT rejection 与 RV 基础浮点 NT source-only support 这样的精确分支；
 5. 为每个 spec 自动生成 positive/negative source test 与 contract selector 骨架。
 
-**验收**：删除任一 op 的 emitter 注册后，编译在统一诊断处失败；effect 与 emitter operand 数自动一致；机器契约可从 spec 检查引用闭包。
+**验收**：删除任一 op 的指令选择注册后，编译在统一诊断处失败；effect 与指令选择 operand 数自动一致；机器契约可从 spec 检查引用闭包。
 
 ### 4.2 Python/native/demo target 能力单源化
 
@@ -281,9 +281,10 @@ tilelang/tpu/
   toolchain.py    # PPL 1.7 resolver/build
 
 src/tpu/
-  codegen/common/
-  codegen/tpukernel/
-  codegen/rv/
+  codegen/
+    codegen_tpu.{h,cc}
+    codegen_tpukernel.cc
+    codegen_rv.cc
   memory/
 ```
 
@@ -342,7 +343,7 @@ TileLang-Ascend 的价值在于验证工程分层：计算单元选择、自动�
 
 | 阶段 | 任务 | 退出条件 |
 | --- | --- | --- |
-| P0-A | `TpuOpSpec` + target 表单源化 | verifier/effect/emitter 由同一 spec 驱动；所有负例诊断一致 |
+| P0-A | `TpuOpSpec` + target 表单源化 | verifier/effect/instruction selection 由同一 spec 驱动；所有负例诊断一致 |
 | P0-B | static tail + hazard verifier | 非整除核心 op CModel 通过；错误 pipeline 编译期拒绝 |
 | P1-A | cast/quant + broadcast + 中立 reduction | 三种有效 target 的精确 capability 矩阵建立 |
 | P1-B | 将已有 RMSNorm/Split-K/SwiGLU/RoPE reference 标准化；新增 softmax | 误差、workspace、axis、tail 契约在所有适用 target 的 CModel 通过 |

@@ -9,7 +9,7 @@
 `tpu_demo/cases.py`；逐元素四则与 matmul 的 FP16/BF16/FP32 共 15 个 case 可选择 RV，
 完整使用与晋级流程见 `tpu_demo/README.md`。
 
-这里的 “PPL” 仅指 PPL 1.7 SDK/ABI；它不是 TileLang 的编程模型名称。源码按职责拆为 `codegen_tpu_common.cc`、`codegen_tpukernel.cc` 和 `codegen_rv.cc`。
+这里的 “PPL” 仅指 PPL 1.7 SDK/ABI；它不是 TileLang 的编程模型名称。源码沿用 TVM/TileLang 的 `codegen_<target>` 命名：`codegen_tpu.{h,cc}` 定义唯一的 TPU 目标源码生成器，`codegen_tpukernel.cc` 和 `codegen_rv.cc` 分别实现两种编程模型的指令选择；三者不是三个并列后端。
 
 ## 2. 选择模型与硬件边界
 
@@ -55,7 +55,7 @@ TileLang TPU lowering + AddressAssign
 `target.build.tilelang_tpu` 是唯一 FFI 入口。TPU codegen 限制一个模块只含一个
 `PrimFunc`，并拒绝将保留的 host 入口名当作 device kernel，避免 ABI 歧义。
 
-共同层负责解析 TIR 参数、region、dtype、LMEM 地址和读写 effect；专属层只做指令选择。此分层使同一 `tl.tpu.*` 语义能有两种指令实现，并避免把 RV descriptor 细节泄漏到前端。历史 `ppl.*` 和 raw `tpu_*` TIR extern 已从支持 ABI 中移除，任何 TPU target 都会拒绝；原始 `rvt_*` extern 只作为专家级 ABI escape hatch。raw RVT 与 `tl.tpu.*`、`tl.tpukernel.*` 或 TPU-Kernel 生命周期的混用会在 lowering/codegen 边界失败，而不是生成含义不明的命令流。
+TPU 代码生成器负责解析 TIR 参数、region、dtype、LMEM 地址和读写 effect；编程模型专属实现只做指令选择。此分层使同一 `tl.tpu.*` 语义能有两种指令实现，并避免把 RV descriptor 细节泄漏到前端。历史 `ppl.*` 和 raw `tpu_*` TIR extern 已从支持 ABI 中移除，任何 TPU target 都会拒绝；原始 `rvt_*` extern 只作为专家级 ABI escape hatch。raw RVT 与 `tl.tpu.*`、`tl.tpukernel.*` 或 TPU-Kernel 生命周期的混用会在 lowering/codegen 边界失败，而不是生成含义不明的命令流。
 
 ### 3.1 已实现的算子契约
 
@@ -115,7 +115,7 @@ reap 和 pipe drain 均有硬时限；任一 worker 超时、失败，或成功�
 
 - `tilelang/engine/tpu_config.py`：`TPUChipSpec`、`TPUTargetSpec`、`TPURuntimeConfig` 与严格解析。
 - `tilelang/jit/adapter/ppl_layout.py`、`libgen.py`：PPL 1.7 解析、CModel/PCIe 构建与链接。
-- `src/target/codegen_tpu_common.{h,cc}`：中立 TIR 解析、ABI guard、公共元数据。
+- `src/target/codegen_tpu.{h,cc}`：TPU 目标源码生成器、中立 TIR 解析、ABI guard 与编程模型分派。
 - `src/target/codegen_tpukernel.cc`、`src/target/codegen_rv.cc`：两条指令选择路径。
 - `testing/python/jit/tpu_core_ops_matrix.py`、`tpu_profile_worker.py`：新进程数值/trace 矩阵。
 - `research/ppl-profiling/README.md`：profiling 协议与使用说明。

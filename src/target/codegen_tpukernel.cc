@@ -10,7 +10,7 @@
  *  semantic TPU ops.
  */
 
-#include "codegen_tpu_common.h"
+#include "codegen_tpu.h"
 #include "tpuv7_lmem.h"
 
 #include <tvm/runtime/logging.h>

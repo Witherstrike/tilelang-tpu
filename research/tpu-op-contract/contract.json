@@ -41,7 +41,7 @@
       "status": "enforced",
       "enforced_at": "compile",
       "description": "The former bare access_ptr ABI lost a T.view/T.reshape alias's logical shape. The region ABI preserves that metadata until native validation, rejects rank/shape-changing aliases rather than executing the owner descriptor silently, and has no compatibility path for bare access_ptr operands. A presentation alias with exactly the owned descriptor remains semantically equivalent.",
-      "evidence_ids": ["src.frontend", "src.lowering-contract", "src.codegen-common", "test.frontend-contract", "test.descriptor-contract", "test.residual-ir"]
+      "evidence_ids": ["src.frontend", "src.lowering-contract", "src.codegen-tpu", "test.frontend-contract", "test.descriptor-contract", "test.residual-ir"]
     }
   ],
   "vocabulary": {
@@ -141,17 +141,17 @@
       ],
       "effects": {"reads": ["src"], "writes": ["dst"], "read_writes": [], "conditional": [], "notes": ["AddressAssign models src as read and dst as write."]},
       "constraints": [
-        {"id": "copy.rank", "category": "shape", "expression": "1 <= rank(src_region) <= 4 and 1 <= rank(dst_region) <= 4; normalize r1->[1,1,1,W], r2->[1,C,1,W], r3->[N,C,1,W], and retain r4, then require normalized_extent(src) == normalized_extent(dst)", "status": "enforced", "enforced_at": "codegen", "description": "Source and destination may have different original ranks; each static region lowers independently to one N/C/H/W descriptor before normalized extents are compared. A full rank-3 transfer is emitted as one descriptor operation; local subregions must start at C=0 because a linear LMEM offset cannot encode an arbitrary channel-lane slice.", "evidence_ids": ["src.codegen-common", "src.tpuv7-descriptor", "test.descriptor-contract"]},
-        {"id": "copy.descriptor", "category": "memory", "expression": "each operand scope is global or one of {shared,shared.dyn,local,local.fragment}; every normalized descriptor and region extent is a compile-time integer in [1,65535]", "status": "enforced", "enforced_at": "codegen", "description": "Unsupported scopes, symbolic dimensions, zero dimensions, and dimensions above the inclusive TPUv7/PPL dim4 bound fail before source emission.", "evidence_ids": ["src.codegen-common", "src.tpuv7-descriptor", "test.descriptor-contract"]},
-        {"id": "copy.extents", "category": "shape", "expression": "normalized_extent(src) == normalized_extent(dst)", "status": "enforced", "enforced_at": "codegen", "description": "The copy has no implicit reshape or tail mask.", "evidence_ids": ["src.codegen-common"]},
-        {"id": "copy.bounds", "category": "memory", "expression": "0 <= region_min and region_min + extent <= buffer_shape", "status": "enforced", "enforced_at": "codegen", "description": "Statically unprovable or out-of-bounds regions fail closed.", "evidence_ids": ["src.codegen-common"]},
-        {"id": "copy.convert-local", "category": "dtype", "expression": "src_dtype != dst_dtype implies both operands are local and either (backend==tpukernel and the directed pair is FP32<->{FP16,BF16,FP8E4M3,FP8E5M2}) or (backend==rv and src_dtype,dst_dtype are distinct members of {FP16,BF16,FP32})", "status": "enforced", "enforced_at": "codegen", "description": "DMA paths do not convert. TPU-Kernel selects only the reviewed FP32-peer cast pairs; RV selects rvt_cvt_f2f only for its three mapped base floating formats. Integer and every other mixed pair fail closed.", "evidence_ids": ["src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv", "src.tpuv7-descriptor"]},
-        {"id": "copy.fp8-tpukernel", "category": "dtype", "expression": "an FP8 src or dst implies backend == tpukernel; differing dtypes additionally require the other dtype to be float32", "status": "enforced", "enforced_at": "codegen", "description": "Current TPU-Kernel supports same-format FP8 transport and local FP32<->FP8 cast only; RV and every other FP8 cast pair fail closed.", "evidence_ids": ["src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv"]}
+        {"id": "copy.rank", "category": "shape", "expression": "1 <= rank(src_region) <= 4 and 1 <= rank(dst_region) <= 4; normalize r1->[1,1,1,W], r2->[1,C,1,W], r3->[N,C,1,W], and retain r4, then require normalized_extent(src) == normalized_extent(dst)", "status": "enforced", "enforced_at": "codegen", "description": "Source and destination may have different original ranks; each static region lowers independently to one N/C/H/W descriptor before normalized extents are compared. A full rank-3 transfer is emitted as one descriptor operation; local subregions must start at C=0 because a linear LMEM offset cannot encode an arbitrary channel-lane slice.", "evidence_ids": ["src.codegen-tpu", "src.tpuv7-descriptor", "test.descriptor-contract"]},
+        {"id": "copy.descriptor", "category": "memory", "expression": "each operand scope is global or one of {shared,shared.dyn,local,local.fragment}; every normalized descriptor and region extent is a compile-time integer in [1,65535]", "status": "enforced", "enforced_at": "codegen", "description": "Unsupported scopes, symbolic dimensions, zero dimensions, and dimensions above the inclusive TPUv7/PPL dim4 bound fail before source emission.", "evidence_ids": ["src.codegen-tpu", "src.tpuv7-descriptor", "test.descriptor-contract"]},
+        {"id": "copy.extents", "category": "shape", "expression": "normalized_extent(src) == normalized_extent(dst)", "status": "enforced", "enforced_at": "codegen", "description": "The copy has no implicit reshape or tail mask.", "evidence_ids": ["src.codegen-tpu"]},
+        {"id": "copy.bounds", "category": "memory", "expression": "0 <= region_min and region_min + extent <= buffer_shape", "status": "enforced", "enforced_at": "codegen", "description": "Statically unprovable or out-of-bounds regions fail closed.", "evidence_ids": ["src.codegen-tpu"]},
+        {"id": "copy.convert-local", "category": "dtype", "expression": "src_dtype != dst_dtype implies both operands are local and either (backend==tpukernel and the directed pair is FP32<->{FP16,BF16,FP8E4M3,FP8E5M2}) or (backend==rv and src_dtype,dst_dtype are distinct members of {FP16,BF16,FP32})", "status": "enforced", "enforced_at": "codegen", "description": "DMA paths do not convert. TPU-Kernel selects only the reviewed FP32-peer cast pairs; RV selects rvt_cvt_f2f only for its three mapped base floating formats. Integer and every other mixed pair fail closed.", "evidence_ids": ["src.codegen-tpu", "src.codegen-tpukernel", "src.codegen-rv", "src.tpuv7-descriptor"]},
+        {"id": "copy.fp8-tpukernel", "category": "dtype", "expression": "an FP8 src or dst implies backend == tpukernel; differing dtypes additionally require the other dtype to be float32", "status": "enforced", "enforced_at": "codegen", "description": "Current TPU-Kernel supports same-format FP8 transport and local FP32<->FP8 cast only; RV and every other FP8 cast pair fail closed.", "evidence_ids": ["src.codegen-tpu", "src.codegen-tpukernel", "src.codegen-rv"]}
       ],
       "failure_policy": [
         {"condition": "Unsupported dtype pair, memory-scope pair, extent, or bounds", "phase": "codegen", "action": "abort_compile", "diagnostic": "Reject before emitting or compiling a partial transfer.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
     },
     {
       "id": "fill",
@@ -165,9 +165,9 @@
       ],
       "effects": {"reads": [], "writes": ["dst"], "read_writes": [], "conditional": [], "notes": []},
       "constraints": [
-        {"id": "fill.local", "category": "memory", "expression": "scope(dst) in {shared,shared.dyn,local,local.fragment}", "status": "enforced", "enforced_at": "compile", "description": "Global fill and every non-descriptor allocation scope are outside the portable contract and fail closed across frontend and codegen checks.", "evidence_ids": ["src.frontend", "src.codegen-common", "src.tpuv7-descriptor", "test.descriptor-contract"]},
-        {"id": "fill.dim4", "category": "shape", "expression": "every normalized N/C/H/W extent is a compile-time integer in [1,65535]", "status": "enforced", "enforced_at": "codegen", "description": "Zero, symbolic, or over-limit local allocation dimensions are rejected before emission.", "evidence_ids": ["src.codegen-common", "src.tpuv7-descriptor", "test.descriptor-contract"]},
-        {"id": "fill.literal", "category": "value", "expression": "value is FloatImm", "status": "enforced", "enforced_at": "codegen", "description": "Dynamic scalar materialization is not implemented.", "evidence_ids": ["src.codegen-common"]},
+        {"id": "fill.local", "category": "memory", "expression": "scope(dst) in {shared,shared.dyn,local,local.fragment}", "status": "enforced", "enforced_at": "compile", "description": "Global fill and every non-descriptor allocation scope are outside the portable contract and fail closed across frontend and codegen checks.", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.tpuv7-descriptor", "test.descriptor-contract"]},
+        {"id": "fill.dim4", "category": "shape", "expression": "every normalized N/C/H/W extent is a compile-time integer in [1,65535]", "status": "enforced", "enforced_at": "codegen", "description": "Zero, symbolic, or over-limit local allocation dimensions are rejected before emission.", "evidence_ids": ["src.codegen-tpu", "src.tpuv7-descriptor", "test.descriptor-contract"]},
+        {"id": "fill.literal", "category": "value", "expression": "value is FloatImm", "status": "enforced", "enforced_at": "codegen", "description": "Dynamic scalar materialization is not implemented.", "evidence_ids": ["src.codegen-tpu"]},
         {"id": "fill.rv-zero", "category": "value", "expression": "backend == rv implies value == 0.0", "status": "enforced", "enforced_at": "codegen", "description": "RV currently materializes only accumulator zero.", "evidence_ids": ["src.codegen-rv"]},
         {"id": "fill.fp8-tpukernel-zero", "category": "value", "expression": "dtype(dst) in {e4m3_float8,e5m2_float8} implies backend == tpukernel and value == 0.0", "status": "enforced", "enforced_at": "codegen", "description": "Only the all-zero FP8 bit pattern is selected; FP8 nonzero scalar materialization and every RV FP8 fill fail closed.", "evidence_ids": ["src.frontend", "src.codegen-tpukernel", "src.codegen-rv"]}
       ],
@@ -175,7 +175,7 @@
         {"condition": "Unsupported dtype or nonlocal dst", "phase": "frontend", "action": "reject", "diagnostic": "Reject before forming tl.tpu.fill.", "conformance": "implemented"},
         {"condition": "Dynamic literal, nonzero RV literal, nonzero FP8 literal, or invalid descriptor extent", "phase": "codegen", "action": "abort_compile", "diagnostic": "Reject target-specific unsupported forms before instruction emission.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
     },
     {
       "id": "gemm",
@@ -193,10 +193,10 @@
       ],
       "effects": {"reads": ["a", "b"], "writes": [], "read_writes": [], "conditional": [{"when": "accumulate == false", "reads": [], "writes": ["c"], "read_writes": []}, {"when": "accumulate == true", "reads": [], "writes": [], "read_writes": ["c"]}], "notes": ["The explicit accumulate bit prevents backend defaults from changing AddressAssign effects."]},
       "constraints": [
-        {"id": "gemm.local-rank2", "category": "layout", "expression": "A,B,C are local rank-2 tiles whose recovered N=1 and H=1", "status": "enforced", "enforced_at": "codegen", "description": "The portable mapping is a 2-D matrix contract, not arbitrary rank-4 GEMM.", "evidence_ids": ["src.frontend", "src.codegen-common"]},
-        {"id": "gemm.shape", "category": "shape", "expression": "A=(M,K), B logical layout=(K,N) or stored B shape=(N,K) when transpose_B==true, C=(M,N)", "status": "enforced", "enforced_at": "codegen", "description": "K agreement is checked in the frontend and full shapes in codegen; 'stored shape' does not imply support for T.view/T.reshape aliases.", "evidence_ids": ["src.frontend", "src.codegen-common"]},
-        {"id": "gemm.c-disjoint", "category": "aliasing", "expression": "storage(C) != storage(A) and storage(C) != storage(B)", "status": "enforced", "enforced_at": "compile", "description": "The output/accumulator must not alias either input. The public helper and native semantic boundary both reject identity aliases; A and B may share storage because both are read-only.", "evidence_ids": ["src.frontend", "src.codegen-common", "test.frontend-contract", "test.descriptor-contract"]},
-        {"id": "gemm.dim-limit", "category": "shape", "expression": "1 <= M,N,K <= 65535", "status": "enforced", "enforced_at": "codegen", "description": "Descriptor and TPU-Kernel dimensions are uint16 bounded.", "evidence_ids": ["src.codegen-common", "src.codegen-rv"]},
+        {"id": "gemm.local-rank2", "category": "layout", "expression": "A,B,C are local rank-2 tiles whose recovered N=1 and H=1", "status": "enforced", "enforced_at": "codegen", "description": "The portable mapping is a 2-D matrix contract, not arbitrary rank-4 GEMM.", "evidence_ids": ["src.frontend", "src.codegen-tpu"]},
+        {"id": "gemm.shape", "category": "shape", "expression": "A=(M,K), B logical layout=(K,N) or stored B shape=(N,K) when transpose_B==true, C=(M,N)", "status": "enforced", "enforced_at": "codegen", "description": "K agreement is checked in the frontend and full shapes in codegen; 'stored shape' does not imply support for T.view/T.reshape aliases.", "evidence_ids": ["src.frontend", "src.codegen-tpu"]},
+        {"id": "gemm.c-disjoint", "category": "aliasing", "expression": "storage(C) != storage(A) and storage(C) != storage(B)", "status": "enforced", "enforced_at": "compile", "description": "The output/accumulator must not alias either input. The public helper and native semantic boundary both reject identity aliases; A and B may share storage because both are read-only.", "evidence_ids": ["src.frontend", "src.codegen-tpu", "test.frontend-contract", "test.descriptor-contract"]},
+        {"id": "gemm.dim-limit", "category": "shape", "expression": "1 <= M,N,K <= 65535", "status": "enforced", "enforced_at": "codegen", "description": "Descriptor and TPU-Kernel dimensions are uint16 bounded.", "evidence_ids": ["src.codegen-tpu", "src.codegen-rv"]},
         {"id": "gemm.no-transpose-a", "category": "layout", "expression": "transpose_A == false", "status": "enforced", "enforced_at": "frontend", "description": "The public helper rejects left transpose before target-specific selection.", "evidence_ids": ["src.frontend", "src.codegen-tpukernel", "src.codegen-rv"]},
         {"id": "gemm.base-c-dtype", "category": "dtype", "expression": "for matching FP16/BF16 A and B, accumulate requires FP32 C while overwrite permits FP32 C or C matching A/B", "status": "enforced", "enforced_at": "compile", "description": "The frontend and both code generators preserve the distinction between the result dtype and the accumulation semantic bit; FP32 overwrite is legal but not yet numerically verified.", "evidence_ids": ["src.frontend", "src.codegen-tpukernel", "src.codegen-rv", "test.frontend-contract"]},
         {"id": "gemm.nt-policy", "category": "scheduling", "expression": "transpose_B == true and accumulate == true requires FP32 C and either an RV FP16/BF16 fmm2a_nt selector or a TPU-Kernel same-format FP8 _R_trans selector", "status": "enforced", "enforced_at": "codegen", "description": "The target-independent frontend preserves explicit accumulation. TPU-Kernel base-float right-transpose rejects it, RV base-float selects fmm2a_nt, and TPU-Kernel FP8 selects _R_trans with result_add=true.", "evidence_ids": ["src.frontend", "src.codegen-tpukernel", "src.codegen-rv", "test.frontend-contract", "artifact.cmodel-fp8-gemm-nt-accumulate", "manual.ppl-1.7", "manual.rv-isa"]},
@@ -206,7 +206,7 @@
         {"condition": "Nonlocal/non-rank-2 input, invalid input or C dtype, transpose_A, K mismatch, or non-boolean/omitted accumulate", "phase": "frontend", "action": "reject", "diagnostic": "Reject before forming an invalid target-independent GEMM semantic call.", "conformance": "implemented"},
         {"condition": "Target-specific dtype/layout/accumulation selector, full shape, or descriptor dimension is unsupported", "phase": "codegen", "action": "abort_compile", "diagnostic": "Fail closed before instruction emission; never silently change overwrite/accumulate semantics.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
     },
     {
       "id": "add",
@@ -221,15 +221,15 @@
       ],
       "effects": {"reads": ["lhs", "rhs"], "writes": ["out"], "read_writes": [], "conditional": [], "notes": []},
       "constraints": [
-        {"id": "add.matrix", "category": "layout", "expression": "out,lhs,rhs are local rank-2 tiles with recovered N=1,H=1", "status": "enforced", "enforced_at": "codegen", "description": "Only the 2-D mapping is supported.", "evidence_ids": ["src.frontend", "src.codegen-common"]},
-        {"id": "add.shape", "category": "shape", "expression": "shape(out)==shape(lhs) and (shape(rhs)==shape(out) or shape(rhs)==(M,1))", "status": "enforced", "enforced_at": "codegen", "description": "Only equal shape or rhs W broadcast is selected.", "evidence_ids": ["src.codegen-common", "src.codegen-rv"]},
-        {"id": "add.fp8-tpukernel", "category": "dtype", "expression": "dtype(out) in {e4m3_float8,e5m2_float8} implies backend == tpukernel and all operand dtypes match", "status": "enforced", "enforced_at": "codegen", "description": "TPU-Kernel exposes FP8 add; RV FP8 add remains intentionally unmapped.", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv"]}
+        {"id": "add.matrix", "category": "layout", "expression": "out,lhs,rhs are local rank-2 tiles with recovered N=1,H=1", "status": "enforced", "enforced_at": "codegen", "description": "Only the 2-D mapping is supported.", "evidence_ids": ["src.frontend", "src.codegen-tpu"]},
+        {"id": "add.shape", "category": "shape", "expression": "shape(out)==shape(lhs) and (shape(rhs)==shape(out) or shape(rhs)==(M,1))", "status": "enforced", "enforced_at": "codegen", "description": "Only equal shape or rhs W broadcast is selected.", "evidence_ids": ["src.codegen-tpu", "src.codegen-rv"]},
+        {"id": "add.fp8-tpukernel", "category": "dtype", "expression": "dtype(out) in {e4m3_float8,e5m2_float8} implies backend == tpukernel and all operand dtypes match", "status": "enforced", "enforced_at": "codegen", "description": "TPU-Kernel exposes FP8 add; RV FP8 add remains intentionally unmapped.", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "src.codegen-rv"]}
       ],
       "failure_policy": [
         {"condition": "Unsupported public dtype, locality, rank, dtype equality, or broadcast shape", "phase": "frontend", "action": "reject", "diagnostic": "Reject before forming tl.tpu.add.", "conformance": "implemented"},
         {"condition": "Selected programming model lacks the exact dtype/layout selector or descriptor representation", "phase": "codegen", "action": "abort_compile", "diagnostic": "Reject before emitting an add instruction.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
     },
     {
       "id": "sub",
@@ -244,15 +244,15 @@
       ],
       "effects": {"reads": ["lhs", "rhs"], "writes": ["out"], "read_writes": [], "conditional": [], "notes": []},
       "constraints": [
-        {"id": "sub.matrix", "category": "layout", "expression": "out,lhs,rhs are local rank-2 tiles with recovered N=1,H=1", "status": "enforced", "enforced_at": "codegen", "description": "Only the 2-D mapping is supported.", "evidence_ids": ["src.frontend", "src.codegen-common"]},
-        {"id": "sub.shape", "category": "shape", "expression": "shape(out)==shape(lhs) and (shape(rhs)==shape(out) or shape(rhs)==(M,1))", "status": "enforced", "enforced_at": "codegen", "description": "Only equal shape or rhs W broadcast is selected.", "evidence_ids": ["src.codegen-common", "src.codegen-rv"]},
-        {"id": "sub.fp8-tpukernel", "category": "dtype", "expression": "dtype(out) in {e4m3_float8,e5m2_float8} implies backend == tpukernel and all operand dtypes match", "status": "enforced", "enforced_at": "codegen", "description": "TPU-Kernel exposes FP8 subtract; RV FP8 subtract remains intentionally unmapped.", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv"]}
+        {"id": "sub.matrix", "category": "layout", "expression": "out,lhs,rhs are local rank-2 tiles with recovered N=1,H=1", "status": "enforced", "enforced_at": "codegen", "description": "Only the 2-D mapping is supported.", "evidence_ids": ["src.frontend", "src.codegen-tpu"]},
+        {"id": "sub.shape", "category": "shape", "expression": "shape(out)==shape(lhs) and (shape(rhs)==shape(out) or shape(rhs)==(M,1))", "status": "enforced", "enforced_at": "codegen", "description": "Only equal shape or rhs W broadcast is selected.", "evidence_ids": ["src.codegen-tpu", "src.codegen-rv"]},
+        {"id": "sub.fp8-tpukernel", "category": "dtype", "expression": "dtype(out) in {e4m3_float8,e5m2_float8} implies backend == tpukernel and all operand dtypes match", "status": "enforced", "enforced_at": "codegen", "description": "TPU-Kernel exposes FP8 subtract; RV FP8 subtract remains intentionally unmapped.", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "src.codegen-rv"]}
       ],
       "failure_policy": [
         {"condition": "Unsupported public dtype, locality, rank, dtype equality, or broadcast shape", "phase": "frontend", "action": "reject", "diagnostic": "Reject before forming tl.tpu.sub.", "conformance": "implemented"},
         {"condition": "Selected programming model lacks the exact dtype/layout selector or descriptor representation", "phase": "codegen", "action": "abort_compile", "diagnostic": "Reject before emitting a subtract instruction.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
     },
     {
       "id": "mul",
@@ -267,15 +267,15 @@
       ],
       "effects": {"reads": ["lhs", "rhs"], "writes": ["out"], "read_writes": [], "conditional": [], "notes": []},
       "constraints": [
-        {"id": "mul.matrix", "category": "layout", "expression": "out,lhs,rhs are local rank-2 tiles with recovered N=1,H=1", "status": "enforced", "enforced_at": "codegen", "description": "Only the 2-D mapping is supported.", "evidence_ids": ["src.frontend", "src.codegen-common"]},
-        {"id": "mul.shape", "category": "shape", "expression": "shape(out)==shape(lhs) and (shape(rhs)==shape(out) or shape(rhs)==(M,1))", "status": "enforced", "enforced_at": "codegen", "description": "Only equal shape or rhs W broadcast is selected.", "evidence_ids": ["src.codegen-common", "src.codegen-rv"]},
-        {"id": "mul.fp8-tpukernel", "category": "dtype", "expression": "dtype(out) in {e4m3_float8,e5m2_float8} implies backend == tpukernel and all operand dtypes match", "status": "enforced", "enforced_at": "codegen", "description": "TPU-Kernel exposes FP8 multiply; RV FP8 multiply remains intentionally unmapped.", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv"]}
+        {"id": "mul.matrix", "category": "layout", "expression": "out,lhs,rhs are local rank-2 tiles with recovered N=1,H=1", "status": "enforced", "enforced_at": "codegen", "description": "Only the 2-D mapping is supported.", "evidence_ids": ["src.frontend", "src.codegen-tpu"]},
+        {"id": "mul.shape", "category": "shape", "expression": "shape(out)==shape(lhs) and (shape(rhs)==shape(out) or shape(rhs)==(M,1))", "status": "enforced", "enforced_at": "codegen", "description": "Only equal shape or rhs W broadcast is selected.", "evidence_ids": ["src.codegen-tpu", "src.codegen-rv"]},
+        {"id": "mul.fp8-tpukernel", "category": "dtype", "expression": "dtype(out) in {e4m3_float8,e5m2_float8} implies backend == tpukernel and all operand dtypes match", "status": "enforced", "enforced_at": "codegen", "description": "TPU-Kernel exposes FP8 multiply; RV FP8 multiply remains intentionally unmapped.", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "src.codegen-rv"]}
       ],
       "failure_policy": [
         {"condition": "Unsupported public dtype, locality, rank, dtype equality, or broadcast shape", "phase": "frontend", "action": "reject", "diagnostic": "Reject before forming tl.tpu.mul.", "conformance": "implemented"},
         {"condition": "Selected programming model lacks the exact dtype/layout selector or descriptor representation", "phase": "codegen", "action": "abort_compile", "diagnostic": "Reject before emitting a multiply instruction.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
     },
     {
       "id": "div",
@@ -290,15 +290,15 @@
       ],
       "effects": {"reads": ["lhs", "rhs"], "writes": ["out"], "read_writes": [], "conditional": [], "notes": []},
       "constraints": [
-        {"id": "div.matrix", "category": "layout", "expression": "out,lhs,rhs are local rank-2 tiles with recovered N=1,H=1", "status": "enforced", "enforced_at": "codegen", "description": "Only the 2-D mapping is supported.", "evidence_ids": ["src.frontend", "src.codegen-common"]},
-        {"id": "div.shape", "category": "shape", "expression": "shape(out)==shape(lhs) and (shape(rhs)==shape(out) or shape(rhs)==(M,1))", "status": "enforced", "enforced_at": "codegen", "description": "Only equal shape or rhs W broadcast is selected.", "evidence_ids": ["src.codegen-common", "src.codegen-rv"]},
+        {"id": "div.matrix", "category": "layout", "expression": "out,lhs,rhs are local rank-2 tiles with recovered N=1,H=1", "status": "enforced", "enforced_at": "codegen", "description": "Only the 2-D mapping is supported.", "evidence_ids": ["src.frontend", "src.codegen-tpu"]},
+        {"id": "div.shape", "category": "shape", "expression": "shape(out)==shape(lhs) and (shape(rhs)==shape(out) or shape(rhs)==(M,1))", "status": "enforced", "enforced_at": "codegen", "description": "Only equal shape or rhs W broadcast is selected.", "evidence_ids": ["src.codegen-tpu", "src.codegen-rv"]},
         {"id": "div.rv-domain", "category": "value", "expression": "RV numerical validation keeps rhs finite and bounded away from zero", "status": "documented", "enforced_at": "not_enforced", "description": "The current RV instruction is approximate and is not a strict IEEE division contract.", "evidence_ids": ["manual.rv-isa", "test.numeric-worker"]}
       ],
       "failure_policy": [
         {"condition": "Unsupported public dtype, locality, rank, dtype equality, or broadcast shape", "phase": "frontend", "action": "reject", "diagnostic": "Reject before forming tl.tpu.div.", "conformance": "implemented"},
         {"condition": "Selected programming model lacks the exact base-float dtype/layout selector or descriptor representation", "phase": "codegen", "action": "abort_compile", "diagnostic": "Reject before emitting a division instruction.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "src.codegen-rv", "src.effects"]
     },
     {
       "id": "max",
@@ -313,15 +313,15 @@
       ],
       "effects": {"reads": ["lhs", "rhs"], "writes": ["out"], "read_writes": [], "conditional": [], "notes": []},
       "constraints": [
-        {"id": "max.matrix", "category": "layout", "expression": "out,lhs,rhs are local rank-2 tiles with recovered N=1,H=1", "status": "enforced", "enforced_at": "frontend", "description": "The public portable semantic accepts only local two-dimensional tiles.", "evidence_ids": ["src.frontend", "src.codegen-common"]},
-        {"id": "max.shape", "category": "shape", "expression": "shape(out)==shape(lhs) and (shape(rhs)==shape(out) or shape(rhs)==(M,1))", "status": "enforced", "enforced_at": "frontend", "description": "Only equal-shape elementwise maximum and rhs W broadcast are accepted.", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-rv", "test.max-source-selection"]},
-        {"id": "max.float", "category": "dtype", "expression": "dtype(out)==dtype(lhs)==dtype(rhs) and (dtype(out) in {float16,bfloat16,float32} or (backend==tpukernel and dtype(out) in {e4m3_float8,e5m2_float8}))", "status": "enforced", "enforced_at": "codegen", "description": "The public semantic accepts the two FP8 formats because target selection follows frontend construction. TPU-Kernel lowers them through generic tpu_bdc_max; RV Tensor rejects FP8 at codegen and remains fail-closed.", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "test.max-source-selection"]}
+        {"id": "max.matrix", "category": "layout", "expression": "out,lhs,rhs are local rank-2 tiles with recovered N=1,H=1", "status": "enforced", "enforced_at": "frontend", "description": "The public portable semantic accepts only local two-dimensional tiles.", "evidence_ids": ["src.frontend", "src.codegen-tpu"]},
+        {"id": "max.shape", "category": "shape", "expression": "shape(out)==shape(lhs) and (shape(rhs)==shape(out) or shape(rhs)==(M,1))", "status": "enforced", "enforced_at": "frontend", "description": "Only equal-shape elementwise maximum and rhs W broadcast are accepted.", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-rv", "test.max-source-selection"]},
+        {"id": "max.float", "category": "dtype", "expression": "dtype(out)==dtype(lhs)==dtype(rhs) and (dtype(out) in {float16,bfloat16,float32} or (backend==tpukernel and dtype(out) in {e4m3_float8,e5m2_float8}))", "status": "enforced", "enforced_at": "codegen", "description": "The public semantic accepts the two FP8 formats because target selection follows frontend construction. TPU-Kernel lowers them through generic tpu_bdc_max; RV Tensor rejects FP8 at codegen and remains fail-closed.", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "test.max-source-selection"]}
       ],
       "failure_policy": [
         {"condition": "Unsupported dtype, nonlocal or non-rank-2 operand, dtype mismatch, or invalid broadcast shape", "phase": "frontend", "action": "reject", "diagnostic": "Reject before forming tl.tpu.max.", "conformance": "implemented"},
         {"condition": "A direct semantic call requests an uncharacterized dtype or an invalid target-specific selector", "phase": "codegen", "action": "abort_compile", "diagnostic": "Fail closed before emitting tpu_bdc_max or rvt_fmax.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "src.codegen-rv", "src.effects", "test.max-source-selection"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "src.codegen-rv", "src.effects", "test.max-source-selection"]
     },
     {
       "id": "scalar",
@@ -338,14 +338,14 @@
       "effects": {"reads": ["inp"], "writes": ["out"], "read_writes": [], "conditional": [], "notes": []},
       "constraints": [
         {"id": "scalar.local-shape", "category": "shape", "expression": "out and inp are local, same-shape, same-dtype tiles", "status": "enforced", "enforced_at": "frontend", "description": "Only one-to-one scalar broadcast is exposed.", "evidence_ids": ["src.frontend"]},
-        {"id": "scalar.literal", "category": "value", "expression": "value is FloatImm", "status": "enforced", "enforced_at": "codegen", "description": "Dynamic scalar input is unsupported.", "evidence_ids": ["src.codegen-common"]}
+        {"id": "scalar.literal", "category": "value", "expression": "value is FloatImm", "status": "enforced", "enforced_at": "codegen", "description": "Dynamic scalar input is unsupported.", "evidence_ids": ["src.codegen-tpu"]}
       ],
       "failure_policy": [
         {"condition": "selected programming_model is not tpukernel", "phase": "lowering", "action": "abort_compile", "diagnostic": "Reject the explicit tl.tpukernel.* semantic operation before target-specific passes.", "conformance": "implemented"},
         {"condition": "unsupported dtype or nonlocal/mismatched tile", "phase": "frontend", "action": "reject", "diagnostic": "Use only the declared same-shape local TPU-Kernel add/mul scalar forms.", "conformance": "implemented"},
         {"condition": "scalar is not a compile-time FloatImm", "phase": "codegen", "action": "abort_compile", "diagnostic": "Reject dynamic scalar input before instruction emission.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.effects"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.effects"]
     },
     {
       "id": "exp",
@@ -361,8 +361,8 @@
       ],
       "effects": {"reads": [], "writes": [], "read_writes": ["out", "work0", "work1", "coeff"], "conditional": [], "notes": ["AddressAssign intentionally models all operands conservatively because the composite TPU-Kernel helper mutates scratch and coefficients."]},
       "constraints": [
-        {"id": "exp.local-dtype", "category": "dtype", "expression": "out,work0,work1,coeff are local and share one dtype", "status": "enforced", "enforced_at": "frontend", "description": "Current PPL 1.7 path accepts FP16, BF16, or FP32 only.", "evidence_ids": ["src.frontend", "src.codegen-common"]},
-        {"id": "exp.work-shape", "category": "shape", "expression": "shape4(out)==shape4(work0)==shape4(work1) and shape(coeff)==(64,32)", "status": "enforced", "enforced_at": "compile", "description": "Frontend and codegen compare complete normalized N/C/H/W shapes; the no-table PPL 1.7 composite uses a fixed dtype-matching 64x32 coefficient tile.", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"]},
+        {"id": "exp.local-dtype", "category": "dtype", "expression": "out,work0,work1,coeff are local and share one dtype", "status": "enforced", "enforced_at": "frontend", "description": "Current PPL 1.7 path accepts FP16, BF16, or FP32 only.", "evidence_ids": ["src.frontend", "src.codegen-tpu"]},
+        {"id": "exp.work-shape", "category": "shape", "expression": "shape4(out)==shape4(work0)==shape4(work1) and shape(coeff)==(64,32)", "status": "enforced", "enforced_at": "compile", "description": "Frontend and codegen compare complete normalized N/C/H/W shapes; the no-table PPL 1.7 composite uses a fixed dtype-matching 64x32 coefficient tile.", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"]},
         {"id": "exp.disjoint", "category": "aliasing", "expression": "storage(out),storage(work0),storage(work1),storage(coeff) are pairwise distinct", "status": "enforced", "enforced_at": "frontend", "description": "The composite mutates output, workspaces, and coefficient storage; aliasing would invalidate its opaque effect schedule.", "evidence_ids": ["src.frontend"]},
         {"id": "exp.dim4", "category": "shape", "expression": "every normalized N/C/H/W extent is a compile-time integer in [1,65535] and H*W <= 65535", "status": "enforced", "enforced_at": "codegen", "description": "The additional product bound is required by tpu_bdc_fp_exp and is checked after full-shape equality.", "evidence_ids": ["src.codegen-tpukernel", "src.tpuv7-descriptor", "test.descriptor-contract"]}
       ],
@@ -370,7 +370,7 @@
         {"condition": "selected programming_model is not tpukernel", "phase": "lowering", "action": "abort_compile", "diagnostic": "Reject the explicit tl.tpukernel.exp semantic operation before target-specific passes.", "conformance": "implemented"},
         {"condition": "FP8/other dtype, nonlocal operand, mismatched work shape, storage alias, or unsupported arity", "phase": "frontend", "action": "reject", "diagnostic": "Use the four-buffer PPL 1.7 exp ABI only.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.effects", "sdk.header-71", "sdk.header-71e"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.effects", "sdk.header-71", "sdk.header-71e"]
     },
     {
       "id": "sigmoid",
@@ -387,8 +387,8 @@
       ],
       "effects": {"reads": ["inp"], "writes": ["out"], "read_writes": ["work0", "work1", "coeff"], "conditional": [], "notes": ["These are the composite's semantic effects. AddressAssign additionally places all five operands, including inp and out, in one conservative bank-conflict clique because it cannot see through the opaque instruction sequence."]},
       "constraints": [
-        {"id": "sigmoid.no-table-abi", "category": "layout", "expression": "signature is (out,inp,work0,work1,coeff), with no lookup-table operand", "status": "enforced", "enforced_at": "frontend", "description": "The PPL 1.7 composition loads generic exp coefficients and exposes exactly five buffers.", "evidence_ids": ["src.frontend", "src.codegen-common"]},
-        {"id": "sigmoid.local-shape", "category": "shape", "expression": "out,inp,work0,work1 are local, same-dtype, complete-shape4-equal tiles in {float16,bfloat16,float32}; coeff has the same dtype and shape (64,32)", "status": "enforced", "enforced_at": "compile", "description": "Frontend and codegen both fail closed on dtype, locality, complete N/C/H/W payload shape, and coefficient extent.", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"]},
+        {"id": "sigmoid.no-table-abi", "category": "layout", "expression": "signature is (out,inp,work0,work1,coeff), with no lookup-table operand", "status": "enforced", "enforced_at": "frontend", "description": "The PPL 1.7 composition loads generic exp coefficients and exposes exactly five buffers.", "evidence_ids": ["src.frontend", "src.codegen-tpu"]},
+        {"id": "sigmoid.local-shape", "category": "shape", "expression": "out,inp,work0,work1 are local, same-dtype, complete-shape4-equal tiles in {float16,bfloat16,float32}; coeff has the same dtype and shape (64,32)", "status": "enforced", "enforced_at": "compile", "description": "Frontend and codegen both fail closed on dtype, locality, complete N/C/H/W payload shape, and coefficient extent.", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"]},
         {"id": "sigmoid.disjoint", "category": "aliasing", "expression": "storage(out),storage(inp),storage(work0),storage(work1),storage(coeff) are pairwise distinct", "status": "enforced", "enforced_at": "frontend", "description": "The public composite rejects every storage alias before forming its five-buffer semantic call.", "evidence_ids": ["src.frontend"]},
         {"id": "sigmoid.dim4", "category": "shape", "expression": "every normalized N/C/H/W extent is a compile-time integer in [1,65535] and H*W <= 65535", "status": "enforced", "enforced_at": "codegen", "description": "The composite invokes tpu_bdc_fp_exp and therefore inherits its H*W product bound.", "evidence_ids": ["src.codegen-tpukernel", "src.tpuv7-descriptor", "test.descriptor-contract"]}
       ],
@@ -396,7 +396,7 @@
         {"condition": "selected programming_model is not tpukernel", "phase": "lowering", "action": "abort_compile", "diagnostic": "Reject the explicit tl.tpukernel.sigmoid semantic operation before target-specific passes.", "conformance": "implemented"},
         {"condition": "FP8/other dtype, nonlocal operand, mismatched payload/work shape, wrong coefficient shape, storage alias, or unsupported arity", "phase": "frontend", "action": "reject", "diagnostic": "Use only the five-buffer PPL 1.7 no-table signature.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.effects", "sdk.header-71", "sdk.header-71e"],
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.effects", "sdk.header-71", "sdk.header-71e"],
       "notes": ["Source inspection proves the ABI and selector exist, but no independent compile or numerical result is inferred from source alone."]
     },
     {
@@ -418,7 +418,7 @@
         {"condition": "selected programming_model is not tpukernel", "phase": "lowering", "action": "abort_compile", "diagnostic": "Reject the explicit tl.tpukernel.rsqrt semantic operation before target-specific passes.", "conformance": "implemented"},
         {"condition": "dtype outside FP16/BF16/FP32, nonlocal operand, or shape mismatch", "phase": "frontend", "action": "reject", "diagnostic": "Reject before the generic TPU-Kernel rsqrt intrinsic is emitted.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.effects", "sdk.header-71", "sdk.header-71e"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.effects", "sdk.header-71", "sdk.header-71e"]
     },
     {
       "id": "reduce",
@@ -436,9 +436,9 @@
       "effects": {"reads": [], "writes": ["out"], "read_writes": ["inp", "tmp"], "conditional": [], "notes": ["Input read_write is intentional in AddressAssign because the current composite can write the physically padded tail."]},
       "constraints": [
         {"id": "reduce.rank-axis", "category": "shape", "expression": "rank(inp)==rank(out)==2 and dim==1 and shape(out)==(shape(inp)[0],1)", "status": "enforced", "enforced_at": "frontend", "description": "Only row reduction is exposed.", "evidence_ids": ["src.frontend"]},
-        {"id": "reduce.local-dtype", "category": "dtype", "expression": "inp/out are local, same dtype, and one of float16,bfloat16,float32", "status": "enforced", "enforced_at": "frontend", "description": "Integer branches remaining in the internal sum code are unreachable through the public helper and are not contractual.", "evidence_ids": ["src.frontend", "src.codegen-common"]},
+        {"id": "reduce.local-dtype", "category": "dtype", "expression": "inp/out are local, same dtype, and one of float16,bfloat16,float32", "status": "enforced", "enforced_at": "frontend", "description": "Integer branches remaining in the internal sum code are unreachable through the public helper and are not contractual.", "evidence_ids": ["src.frontend", "src.codegen-tpu"]},
         {"id": "reduce.disjoint", "category": "aliasing", "expression": "storage(inp), storage(out), and compiler-owned storage(tmp) are pairwise distinct", "status": "enforced", "enforced_at": "compile", "description": "The composite writes the padded input tail and scratch tile, so neither may alias the result or each other. Public inp/out identity and the complete native triple are checked independently.", "evidence_ids": ["src.frontend", "src.codegen-tpukernel", "test.frontend-contract", "test.descriptor-contract"]},
-        {"id": "reduce.padding", "category": "memory", "expression": "the lowering owns temporary storage and may initialize aligned tail elements", "status": "documented", "enforced_at": "lowering", "description": "Consumers must not assume input padding is preserved.", "evidence_ids": ["src.effects", "src.codegen-common"]},
+        {"id": "reduce.padding", "category": "memory", "expression": "the lowering owns temporary storage and may initialize aligned tail elements", "status": "documented", "enforced_at": "lowering", "description": "Consumers must not assume input padding is preserved.", "evidence_ids": ["src.effects", "src.codegen-tpu"]},
         {"id": "reduce.dim4", "category": "shape", "expression": "every normalized input/output extent is a compile-time integer in [1,65535], and the EU-aligned padded width is also <= 65535", "status": "enforced", "enforced_at": "codegen", "description": "A legal original width may align upward to 65536; that derived padded descriptor is rejected before emission.", "evidence_ids": ["src.codegen-tpukernel", "src.tpuv7-descriptor", "test.descriptor-contract"]}
       ],
       "failure_policy": [
@@ -446,7 +446,7 @@
         {"condition": "unsupported dtype/rank/axis/output shape", "phase": "frontend", "action": "reject", "diagnostic": "Reject statically invalid public reduce forms before emission.", "conformance": "implemented"},
         {"condition": "insufficient local storage after temporary allocation", "phase": "compile", "action": "abort_compile", "diagnostic": "Fail compilation instead of dispatching an invalid local-memory layout.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.effects"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.effects"]
     },
     {
       "id": "gather",
@@ -463,16 +463,16 @@
       "effects": {"reads": ["param", "index"], "writes": ["output"], "read_writes": [], "conditional": [], "notes": []},
       "constraints": [
         {"id": "gather.global", "category": "memory", "expression": "output,param,index are global", "status": "enforced", "enforced_at": "frontend", "description": "Current mapping selects S2S gather only.", "evidence_ids": ["src.frontend"]},
-        {"id": "gather.types", "category": "dtype", "expression": "dtype(output)==dtype(param) in {float16,bfloat16,float32,e4m3_float8,e5m2_float8} and dtype(index)==uint32", "status": "enforced", "enforced_at": "frontend", "description": "Frontend and TPU-Kernel codegen share this floating-payload whitelist; integer payloads fail closed.", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"]},
+        {"id": "gather.types", "category": "dtype", "expression": "dtype(output)==dtype(param) in {float16,bfloat16,float32,e4m3_float8,e5m2_float8} and dtype(index)==uint32", "status": "enforced", "enforced_at": "frontend", "description": "Frontend and TPU-Kernel codegen share this floating-payload whitelist; integer payloads fail closed.", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"]},
         {"id": "gather.disjoint", "category": "aliasing", "expression": "storage(output),storage(param),storage(index) are pairwise distinct", "status": "enforced", "enforced_at": "frontend", "description": "The S2S gather contract does not define in-place or index/payload aliasing.", "evidence_ids": ["src.frontend"]},
-        {"id": "gather.shape-contract", "category": "shape", "expression": "param=(param_h,width), output=(count,width), index=(count,1), and param_h>0 is a compile-time integer", "status": "enforced", "enforced_at": "frontend", "description": "Frontend and codegen structurally validate ranks and extents required by tpu_gdma_h_gather_S2S.", "evidence_ids": ["src.frontend", "src.codegen-common"]},
+        {"id": "gather.shape-contract", "category": "shape", "expression": "param=(param_h,width), output=(count,width), index=(count,1), and param_h>0 is a compile-time integer", "status": "enforced", "enforced_at": "frontend", "description": "Frontend and codegen structurally validate ranks and extents required by tpu_gdma_h_gather_S2S.", "evidence_ids": ["src.frontend", "src.codegen-tpu"]},
         {"id": "gather.index-bounds", "category": "value", "expression": "0 <= index[i,0] < param_h for every i", "status": "documented", "enforced_at": "not_enforced", "description": "Index values are runtime data; callers must satisfy the DMA primitive's range precondition.", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71", "sdk.header-71e"]}
       ],
       "failure_policy": [
         {"condition": "selected programming_model is not tpukernel", "phase": "lowering", "action": "abort_compile", "diagnostic": "Reject the explicit tl.tpukernel.gather semantic operation before target-specific passes.", "conformance": "implemented"},
         {"condition": "unsupported payload/index dtype, non-global operand, storage alias, malformed shape, or invalid param_h", "phase": "frontend", "action": "reject", "diagnostic": "Reject statically invalid S2S gather forms; runtime index bounds remain a caller precondition.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.effects", "sdk.header-71", "sdk.header-71e"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.effects", "sdk.header-71", "sdk.header-71e"]
     },
     {
       "id": "topk",
@@ -491,18 +491,18 @@
       "effects": {"reads": ["src"], "writes": ["dst_data", "dst_idx"], "read_writes": [], "conditional": [], "notes": ["Both outputs have extent K. Earlier length-sized sentinel tests showed the primitive writes only [0,K), which justifies the exact K-sized public contract."]},
       "constraints": [
         {"id": "topk.global", "category": "memory", "expression": "dst_data,dst_idx,src are global", "status": "enforced", "enforced_at": "frontend", "description": "Current HAU path operates on system memory addresses.", "evidence_ids": ["src.frontend"]},
-        {"id": "topk.types", "category": "dtype", "expression": "dtype(dst_data)==dtype(src) in {float32,int32,uint32} and dtype(dst_idx)==int32", "status": "enforced", "enforced_at": "frontend", "description": "FP8/FP16/BF16 payloads and non-int32 index outputs are rejected.", "evidence_ids": ["src.frontend", "src.codegen-common"]},
+        {"id": "topk.types", "category": "dtype", "expression": "dtype(dst_data)==dtype(src) in {float32,int32,uint32} and dtype(dst_idx)==int32", "status": "enforced", "enforced_at": "frontend", "description": "FP8/FP16/BF16 payloads and non-int32 index outputs are rejected.", "evidence_ids": ["src.frontend", "src.codegen-tpu"]},
         {"id": "topk.disjoint", "category": "aliasing", "expression": "storage(dst_data),storage(dst_idx),storage(src) are pairwise distinct", "status": "enforced", "enforced_at": "frontend", "description": "The HAU natural-index ABI does not define in-place or value/index aliasing.", "evidence_ids": ["src.frontend"]},
         {"id": "topk.bounds", "category": "shape", "expression": "0 < K <= length", "status": "enforced", "enforced_at": "frontend", "description": "K and length must be positive compile-time integers.", "evidence_ids": ["src.frontend"]},
-        {"id": "topk.extents", "category": "shape", "expression": "src is rank-1 with extent length; dst_data and dst_idx are rank-1 with extent K", "status": "enforced", "enforced_at": "frontend", "description": "Current frontend capacity matches the observed BM1690 write extent. Length-sized sentinel characterization proved that the HAU primitive does not write the output tail after K.", "evidence_ids": ["src.frontend", "src.codegen-common", "artifact.cmodel-bm-topk-tail"]},
-        {"id": "topk.bm1690-only", "category": "target", "expression": "target_chip == bm1690", "status": "enforced", "enforced_at": "codegen", "description": "PPL tpub_7_1_e exposes the symbol in its header but its SG2260E runtime implementation always rejects the HAU natural-index primitive.", "evidence_ids": ["src.codegen-common", "artifact.cmodel-sg-rope-topk"]}
+        {"id": "topk.extents", "category": "shape", "expression": "src is rank-1 with extent length; dst_data and dst_idx are rank-1 with extent K", "status": "enforced", "enforced_at": "frontend", "description": "Current frontend capacity matches the observed BM1690 write extent. Length-sized sentinel characterization proved that the HAU primitive does not write the output tail after K.", "evidence_ids": ["src.frontend", "src.codegen-tpu", "artifact.cmodel-bm-topk-tail"]},
+        {"id": "topk.bm1690-only", "category": "target", "expression": "target_chip == bm1690", "status": "enforced", "enforced_at": "codegen", "description": "PPL tpub_7_1_e exposes the symbol in its header but its SG2260E runtime implementation always rejects the HAU natural-index primitive.", "evidence_ids": ["src.codegen-tpu", "artifact.cmodel-sg-rope-topk"]}
       ],
       "failure_policy": [
         {"condition": "selected programming_model is not tpukernel", "phase": "lowering", "action": "abort_compile", "diagnostic": "Reject the explicit tl.tpukernel.topk semantic operation before target-specific passes.", "conformance": "implemented"},
         {"condition": "unsupported dtype, non-global or non-vector operand, storage alias, invalid K/length, or incompatible buffer extents", "phase": "frontend", "action": "reject", "diagnostic": "Reject every statically invalid HAU natural-index sort form before emission.", "conformance": "implemented"},
         {"condition": "target chip is SG2260E", "phase": "codegen", "action": "abort_compile", "diagnostic": "Report that tpu_hau_sort_natural_index is unavailable on SG2260E; never dispatch it to CModel or PCIe.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.effects", "artifact.cmodel-bm-topk-tail", "artifact.cmodel-bm-topk-stable-ties", "sdk.header-71", "sdk.header-71e"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.effects", "artifact.cmodel-bm-topk-tail", "artifact.cmodel-bm-topk-stable-ties", "sdk.header-71", "sdk.header-71e"]
     },
     {
       "id": "rope",
@@ -522,13 +522,13 @@
         {"id": "rope.local-shape", "category": "shape", "expression": "all five buffers are local, rank-2, same-shape, and same-dtype", "status": "enforced", "enforced_at": "frontend", "description": "The composite assumes aligned corresponding lanes.", "evidence_ids": ["src.frontend"]},
         {"id": "rope.types", "category": "dtype", "expression": "the common dtype is one of {float16,bfloat16,float32,e4m3_float8,e5m2_float8}", "status": "enforced", "enforced_at": "frontend", "description": "The public helper and TPU-Kernel codegen expose the same base-float and FP8 set.", "evidence_ids": ["src.frontend", "src.codegen-tpukernel"]},
         {"id": "rope.output-disjoint", "category": "aliasing", "expression": "storage(out) is distinct from each input storage; input storages may alias one another", "status": "enforced", "enforced_at": "frontend", "description": "The composite writes alternating lanes in out while reading all four inputs; only read/read aliasing is accepted.", "evidence_ids": ["src.frontend"]},
-        {"id": "rope.even-width", "category": "shape", "expression": "shape(out)[-1] % 2 == 0", "status": "enforced", "enforced_at": "compile", "description": "Frontend rejects odd W; codegen redundantly checks it before constructing alternating-lane views.", "evidence_ids": ["src.frontend", "src.codegen-common"]}
+        {"id": "rope.even-width", "category": "shape", "expression": "shape(out)[-1] % 2 == 0", "status": "enforced", "enforced_at": "compile", "description": "Frontend rejects odd W; codegen redundantly checks it before constructing alternating-lane views.", "evidence_ids": ["src.frontend", "src.codegen-tpu"]}
       ],
       "failure_policy": [
         {"condition": "selected programming_model is not tpukernel", "phase": "lowering", "action": "abort_compile", "diagnostic": "Reject the explicit tl.tpukernel.rope_add semantic operation before target-specific passes.", "conformance": "implemented"},
         {"condition": "unsupported dtype, nonlocal operand, output/input storage alias, shape mismatch, or odd last dimension", "phase": "frontend", "action": "reject", "diagnostic": "Reject invalid public RoPE forms; codegen retains a redundant odd-width fail-closed check.", "conformance": "implemented"}
       ],
-      "evidence_ids": ["src.frontend", "src.codegen-common", "src.effects"]
+      "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.effects"]
     }
   ],
   "evidence": [
@@ -563,14 +563,14 @@
       "summary": "Current public helper signatures, canonical tl.region tensor operands, dtype/locality/shape/alias checks, and backend-neutral versus TPU-Kernel-only extern names."
     },
     {
-      "id": "src.codegen-common",
+      "id": "src.codegen-tpu",
       "kind": "source",
       "source_root": "repo",
-      "path": "src/target/codegen_tpu_common.cc",
+      "path": "src/target/codegen_tpu.cc",
       "locator": "ParseWholeBufferRegion, parse_copy_region, process_copy, handle_elementwise, is_portable_tpu_op",
       "observed_at": "2026-09-07T00:00:00+08:00",
       "time_precision": "day",
-      "summary": "Portable semantic-op dispatch, strict whole-buffer and explicit-copy-region descriptor validation, compiler ownership checks, and target-specific emitter delegation."
+      "summary": "Portable semantic-op dispatch, strict whole-buffer and explicit-copy-region descriptor validation, compiler ownership checks, and programming-model-specific instruction-selection delegation."
     },
     {
       "id": "src.codegen-tpukernel",
@@ -3462,7 +3462,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "src.codegen-tpukernel"
               ],
               "scope": "same-dtype BF16 copy",
@@ -3512,7 +3512,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "src.codegen-tpukernel"
               ],
               "scope": "same-dtype BF16 copy",
@@ -3565,7 +3565,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "src.codegen-rv"
               ],
               "scope": "same-dtype BF16 copy",
@@ -3650,7 +3650,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "src.codegen-tpukernel"
               ],
               "scope": "same-dtype INT32/UINT32/INT16/UINT16/INT8/UINT8 copy",
@@ -3702,7 +3702,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "src.codegen-tpukernel"
               ],
               "scope": "same-dtype INT32/UINT32/INT16/UINT16/INT8/UINT8 copy",
@@ -3757,7 +3757,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "src.codegen-rv"
               ],
               "scope": "same-dtype INT32/UINT32/INT16/UINT16/INT8/UINT8 copy",
@@ -3803,7 +3803,7 @@
       "dtype_bindings": [{"src": "e4m3_float8", "dst": "e4m3_float8"}, {"src": "e5m2_float8", "dst": "e5m2_float8"}],
       "constraints": ["copy.rank", "copy.extents", "copy.bounds", "copy.fp8-tpukernel", "copy.descriptor"],
       "target_results": {
-        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings completed exact byte-preserving local round trip and direct global-to-global copy on CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"], "scope": "same-format E4M3/E5M2 S2L/L2S and S2S", "reason": "The common dtype mapping and TPU-Kernel DMA copy path accept both formats."}, "codegen_passed": {
+        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings completed exact byte-preserving local round trip and direct global-to-global copy on CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"], "scope": "same-format E4M3/E5M2 S2L/L2S and S2S", "reason": "The common dtype mapping and TPU-Kernel DMA copy path accept both formats."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -3826,7 +3826,7 @@
               "scope": "shape (1,64), linspace [-4,4], encoded-byte equality for local round trip and direct S2S",
               "reason": "Output bytes exactly matched source bytes for both formats and both path forms."
             }, "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "BM1690 PCIe", "reason": "No board experiment."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "generic same-format FP8 copy", "reason": "Underlying copy declarations carry FP8 dtype tokens."}}},
-        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings completed exact byte-preserving local round trip and direct global-to-global copy on CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"], "scope": "same-format E4M3/E5M2 S2L/L2S and S2S", "reason": "The common path maps both formats on tpub_7_1_e."}, "codegen_passed": {
+        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings completed exact byte-preserving local round trip and direct global-to-global copy on CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"], "scope": "same-format E4M3/E5M2 S2L/L2S and S2S", "reason": "The common path maps both formats on tpub_7_1_e."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -3847,7 +3847,7 @@
               "scope": "shape (1,64), linspace [-4,4], encoded-byte equality for local round trip and direct S2S",
               "reason": "Output bytes exactly matched source bytes for both formats and both path forms."
             }, "pcie_numeric_passed": {"status": "passed", "evidence_ids": ["test.fp8-worker", "artifact.pcie-sg-tpukernel-fp8-final"], "scope": "Current clean e5774525 SG2260E device 0; shape (1,64), E4M3/E5M2 local S2L→L2S round trip and direct S2S, encoded-byte equality", "reason": "The runner-recorded clean e5774525 SG2260E/TPU-Kernel PCIe matrix passed every required case for this exact selector in both FP8 formats, with a raw trace and valid decoded nanosecond timing for each case."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71e"], "scope": "generic same-format FP8 copy", "reason": "Underlying declarations match tpub_7_1."}}},
-        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "The common dispatch explicitly restricts every FP8 transport to the TPU-Kernel programming model.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic same-format E4M3/E5M2 copy ABI", "reason": "The public helper can form the call."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-common", "src.codegen-rv"], "scope": "SG2260E RV same-format FP8 copy", "reason": "Common dispatch rejects FP8 before RV DMA emission."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.rv-isa"], "scope": "ISA FP8 descriptor/DMA mechanism", "reason": "ISA availability is not a current TileLang selector."}}}
+        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "The common dispatch explicitly restricts every FP8 transport to the TPU-Kernel programming model.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic same-format E4M3/E5M2 copy ABI", "reason": "The public helper can form the call."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-tpu", "src.codegen-rv"], "scope": "SG2260E RV same-format FP8 copy", "reason": "Common dispatch rejects FP8 before RV DMA emission."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.rv-isa"], "scope": "ISA FP8 descriptor/DMA mechanism", "reason": "ISA availability is not a current TileLang selector."}}}
       }
     },
     {
@@ -4079,7 +4079,7 @@
         "bm1690.tpukernel": {
           "support_status": "supported", "implementation_conformance": "conforming", "reason": "Both directions for E4M3 and E5M2 passed isolated CModel numerical checks.",
           "verification": {
-            "declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"], "scope": "local FP32<->E4M3 and FP32<->E5M2", "reason": "The public helper declares the conversions and the selector explicitly permits only these FP8 pairs."},
+            "declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"], "scope": "local FP32<->E4M3 and FP32<->E5M2", "reason": "The public helper declares the conversions and the selector explicitly permits only these FP8 pairs."},
             "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
@@ -4109,7 +4109,7 @@
         "sg2260e.tpukernel": {
           "support_status": "supported", "implementation_conformance": "conforming", "reason": "Both directions for E4M3 and E5M2 passed isolated SG2260E CModel checks.",
           "verification": {
-            "declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"], "scope": "local FP32<->E4M3 and FP32<->E5M2", "reason": "The same public declaration and explicit selector apply."},
+            "declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"], "scope": "local FP32<->E4M3 and FP32<->E5M2", "reason": "The same public declaration and explicit selector apply."},
             "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
@@ -4138,7 +4138,7 @@
           "support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Current common dispatch and RV copy-and-convert path fail closed on FP8.",
           "verification": {
             "declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic local FP32<->FP8 copy ABI", "reason": "T.ppl_copy can express it independent of target."},
-            "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-common", "src.codegen-rv"], "scope": "SG2260E RV FP32<->FP8 cast", "reason": "FP8 is explicitly restricted to TPU-Kernel before RV conversion."},
+            "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-tpu", "src.codegen-rv"], "scope": "SG2260E RV FP32<->FP8 cast", "reason": "FP8 is explicitly restricted to TPU-Kernel before RV conversion."},
             "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV FP8 cast", "reason": "No codegen route."},
             "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV FP8 cast", "reason": "No codegen route."},
             "sdk_declared": {"status": "unverified", "evidence_ids": [], "scope": "RVT FP32<->FP8 conversion combinations", "reason": "The reviewed ISA material does not establish both subtype pairs."}
@@ -4159,7 +4159,7 @@
       "target_results": {
         "bm1690.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "TPU-Kernel selector explicitly permits only FP32<->FP8.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "public local copy-and-convert call for the listed FP16/BF16/cross-FP8 pairs", "reason": "T.ppl_copy forms the target-independent semantic call."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-tpukernel"], "scope": "BM1690 listed FP16/BF16/cross-FP8 pairs", "reason": "The TPU-Kernel conversion-pair predicate rejects them."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "Code generation rejects the selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "Code generation rejects the selector."}}},
         "sg2260e.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "The same explicit pair predicate applies.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "public local copy-and-convert call for the listed FP16/BF16/cross-FP8 pairs", "reason": "T.ppl_copy forms the target-independent semantic call."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-tpukernel"], "scope": "SG2260E listed FP16/BF16/cross-FP8 pairs", "reason": "The TPU-Kernel conversion-pair predicate rejects them."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "Code generation rejects the selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "Code generation rejects the selector."}}},
-        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "All FP8 copy conversions remain unavailable in the RV backend.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic copy ABI", "reason": "Frontend can form a copy-and-convert call."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-common", "src.codegen-rv"], "scope": "listed SG2260E RV FP8 pairs", "reason": "Common dispatch fails closed."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}}}
+        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "All FP8 copy conversions remain unavailable in the RV backend.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic copy ABI", "reason": "Frontend can form a copy-and-convert call."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-tpu", "src.codegen-rv"], "scope": "listed SG2260E RV FP8 pairs", "reason": "Common dispatch fails closed."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}}}
       }
     },
     {
@@ -6143,7 +6143,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP16/BF16 equal shape",
               "reason": "Accepted dtypes."
@@ -6183,7 +6183,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP16/BF16 equal shape",
               "reason": "Accepted dtypes."
@@ -6292,7 +6292,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP16/BF16 equal shape",
               "reason": "Accepted dtypes."
@@ -6332,7 +6332,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP16/BF16 equal shape",
               "reason": "Accepted dtypes."
@@ -6441,7 +6441,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP16/BF16 equal shape",
               "reason": "Accepted dtypes."
@@ -6481,7 +6481,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP16/BF16 equal shape",
               "reason": "Accepted dtypes."
@@ -6591,7 +6591,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP16/BF16 equal shape",
               "reason": "Accepted dtypes."
@@ -6631,7 +6631,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP16/BF16 equal shape",
               "reason": "Accepted dtypes."
@@ -6735,7 +6735,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -6775,7 +6775,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -6888,7 +6888,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -6928,7 +6928,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -7036,7 +7036,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -7076,7 +7076,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -7189,7 +7189,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -7229,7 +7229,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -7337,7 +7337,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -7377,7 +7377,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -7490,7 +7490,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -7530,7 +7530,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -7639,7 +7639,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -7679,7 +7679,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -7793,7 +7793,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -7833,7 +7833,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "listed rhs W broadcasts",
               "reason": "Shape predicate and stride construction exist."
@@ -7923,7 +7923,7 @@
       "dtype_bindings": [{"out": "e4m3_float8", "lhs": "e4m3_float8", "rhs": "e4m3_float8"}, {"out": "e5m2_float8", "lhs": "e5m2_float8", "rhs": "e5m2_float8"}],
       "constraints": ["add.matrix", "add.shape", "add.fp8-tpukernel"],
       "target_results": {
-        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "E4M3 and E5M2 equal-shape add passed CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"], "scope": "same-format FP8 add", "reason": "Frontend and TPU-Kernel selector accept both formats."}, "codegen_passed": {
+        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "E4M3 and E5M2 equal-shape add passed CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"], "scope": "same-format FP8 add", "reason": "Frontend and TPU-Kernel selector accept both formats."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -7944,7 +7944,7 @@
               "scope": "shape (1,64), fixed signed patterns, encoded equality or atol 0.25",
               "reason": "Both formats matched the quantized oracle."
             }, "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "BM1690 PCIe", "reason": "No board experiment."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "E4M3/E5M2 add", "reason": "Underlying SDK supports it."}}},
-        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "E4M3 and E5M2 equal-shape add passed SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"], "scope": "same-format FP8 add", "reason": "Frontend and selector accept both formats."}, "codegen_passed": {
+        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "E4M3 and E5M2 equal-shape add passed SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"], "scope": "same-format FP8 add", "reason": "Frontend and selector accept both formats."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -7963,7 +7963,7 @@
               "scope": "shape (1,64), fixed signed patterns, encoded equality or atol 0.25",
               "reason": "Both formats matched the quantized oracle."
             }, "pcie_numeric_passed": {"status": "passed", "evidence_ids": ["test.fp8-worker", "artifact.pcie-sg-tpukernel-fp8-final"], "scope": "Current clean e5774525 SG2260E device 0; E4M3/E5M2 equal-shape add on (1,64), encoded-byte oracle with atol 0.25 fallback", "reason": "The runner-recorded clean e5774525 SG2260E/TPU-Kernel PCIe matrix passed every required case for this exact selector in both FP8 formats, with a raw trace and valid decoded nanosecond timing for each case."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71e"], "scope": "E4M3/E5M2 add", "reason": "Underlying SDK supports it."}}},
-        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Frontend can form FP8 add, but common dispatch explicitly restricts it to TPU-Kernel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic same-format FP8 add", "reason": "Public ABI accepts both formats."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-common", "src.codegen-rv"], "scope": "SG2260E RV E4M3/E5M2 add", "reason": "Backend selection fails closed."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.rv-isa"], "scope": "RVT FP8 fadd", "reason": "ISA declares it, but TileLang does not map it."}}}
+        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Frontend can form FP8 add, but common dispatch explicitly restricts it to TPU-Kernel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic same-format FP8 add", "reason": "Public ABI accepts both formats."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-tpu", "src.codegen-rv"], "scope": "SG2260E RV E4M3/E5M2 add", "reason": "Backend selection fails closed."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.rv-isa"], "scope": "RVT FP8 fadd", "reason": "ISA declares it, but TileLang does not map it."}}}
       }
     },
     {
@@ -7973,7 +7973,7 @@
       "dtype_bindings": [{"out": "e4m3_float8", "lhs": "e4m3_float8", "rhs": "e4m3_float8"}, {"out": "e5m2_float8", "lhs": "e5m2_float8", "rhs": "e5m2_float8"}],
       "constraints": ["sub.matrix", "sub.shape", "sub.fp8-tpukernel"],
       "target_results": {
-        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "E4M3 and E5M2 equal-shape subtract passed CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"], "scope": "same-format FP8 subtract", "reason": "Frontend and TPU-Kernel selector accept both formats."}, "codegen_passed": {
+        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "E4M3 and E5M2 equal-shape subtract passed CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"], "scope": "same-format FP8 subtract", "reason": "Frontend and TPU-Kernel selector accept both formats."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -7994,7 +7994,7 @@
               "scope": "shape (1,64), fixed signed patterns, encoded equality or atol 0.25",
               "reason": "Both formats matched the quantized oracle."
             }, "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "BM1690 PCIe", "reason": "No board experiment."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "E4M3/E5M2 sub", "reason": "Underlying SDK supports it."}}},
-        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "E4M3 and E5M2 equal-shape subtract passed SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"], "scope": "same-format FP8 subtract", "reason": "Frontend and selector accept both formats."}, "codegen_passed": {
+        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "E4M3 and E5M2 equal-shape subtract passed SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"], "scope": "same-format FP8 subtract", "reason": "Frontend and selector accept both formats."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -8013,7 +8013,7 @@
               "scope": "shape (1,64), fixed signed patterns, encoded equality or atol 0.25",
               "reason": "Both formats matched the quantized oracle."
             }, "pcie_numeric_passed": {"status": "passed", "evidence_ids": ["test.fp8-worker", "artifact.pcie-sg-tpukernel-fp8-final"], "scope": "Current clean e5774525 SG2260E device 0; E4M3/E5M2 equal-shape subtract on (1,64), encoded-byte oracle with atol 0.25 fallback", "reason": "The runner-recorded clean e5774525 SG2260E/TPU-Kernel PCIe matrix passed every required case for this exact selector in both FP8 formats, with a raw trace and valid decoded nanosecond timing for each case."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71e"], "scope": "E4M3/E5M2 sub", "reason": "Underlying SDK supports it."}}},
-        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Frontend can form FP8 subtract, but common dispatch explicitly restricts it to TPU-Kernel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic same-format FP8 subtract", "reason": "Public ABI accepts both formats."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-common", "src.codegen-rv"], "scope": "SG2260E RV E4M3/E5M2 subtract", "reason": "Backend selection fails closed."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.rv-isa"], "scope": "RVT FP8 fsub", "reason": "ISA declares it, but TileLang does not map it."}}}
+        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Frontend can form FP8 subtract, but common dispatch explicitly restricts it to TPU-Kernel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic same-format FP8 subtract", "reason": "Public ABI accepts both formats."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-tpu", "src.codegen-rv"], "scope": "SG2260E RV E4M3/E5M2 subtract", "reason": "Backend selection fails closed."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.rv-isa"], "scope": "RVT FP8 fsub", "reason": "ISA declares it, but TileLang does not map it."}}}
       }
     },
     {
@@ -8023,7 +8023,7 @@
       "dtype_bindings": [{"out": "e4m3_float8", "lhs": "e4m3_float8", "rhs": "e4m3_float8"}, {"out": "e5m2_float8", "lhs": "e5m2_float8", "rhs": "e5m2_float8"}],
       "constraints": ["mul.matrix", "mul.shape", "mul.fp8-tpukernel"],
       "target_results": {
-        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "E4M3 and E5M2 equal-shape multiply passed CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"], "scope": "same-format FP8 multiply", "reason": "Frontend and TPU-Kernel selector accept both formats."}, "codegen_passed": {
+        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "E4M3 and E5M2 equal-shape multiply passed CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"], "scope": "same-format FP8 multiply", "reason": "Frontend and TPU-Kernel selector accept both formats."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -8044,7 +8044,7 @@
               "scope": "shape (1,64), fixed signed patterns, encoded equality or atol 0.25",
               "reason": "Both formats matched the quantized oracle."
             }, "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "BM1690 PCIe", "reason": "No board experiment."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "E4M3/E5M2 mul", "reason": "Underlying SDK supports it."}}},
-        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "E4M3 and E5M2 equal-shape multiply passed SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"], "scope": "same-format FP8 multiply", "reason": "Frontend and selector accept both formats."}, "codegen_passed": {
+        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "E4M3 and E5M2 equal-shape multiply passed SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"], "scope": "same-format FP8 multiply", "reason": "Frontend and selector accept both formats."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -8063,7 +8063,7 @@
               "scope": "shape (1,64), fixed signed patterns, encoded equality or atol 0.25",
               "reason": "Both formats matched the quantized oracle."
             }, "pcie_numeric_passed": {"status": "passed", "evidence_ids": ["test.fp8-worker", "artifact.pcie-sg-tpukernel-fp8-final"], "scope": "Current clean e5774525 SG2260E device 0; E4M3/E5M2 equal-shape multiply on (1,64), encoded-byte oracle with atol 0.25 fallback", "reason": "The runner-recorded clean e5774525 SG2260E/TPU-Kernel PCIe matrix passed every required case for this exact selector in both FP8 formats, with a raw trace and valid decoded nanosecond timing for each case."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71e"], "scope": "E4M3/E5M2 mul", "reason": "Underlying SDK supports it."}}},
-        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Frontend can form FP8 multiply, but common dispatch explicitly restricts it to TPU-Kernel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic same-format FP8 multiply", "reason": "Public ABI accepts both formats."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-common", "src.codegen-rv"], "scope": "SG2260E RV E4M3/E5M2 multiply", "reason": "Backend selection fails closed."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.rv-isa"], "scope": "RVT FP8 fmul", "reason": "ISA declares it, but TileLang does not map it."}}}
+        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Frontend can form FP8 multiply, but common dispatch explicitly restricts it to TPU-Kernel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic same-format FP8 multiply", "reason": "Public ABI accepts both formats."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-tpu", "src.codegen-rv"], "scope": "SG2260E RV E4M3/E5M2 multiply", "reason": "Backend selection fails closed."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.rv-isa"], "scope": "RVT FP8 fmul", "reason": "ISA declares it, but TileLang does not map it."}}}
       }
     },
     {
@@ -8073,7 +8073,7 @@
       "dtype_bindings": [{"out": "e4m3_float8", "lhs": "e4m3_float8", "rhs": "e4m3_float8"}, {"out": "e5m2_float8", "lhs": "e5m2_float8", "rhs": "e5m2_float8"}],
       "constraints": ["add.matrix", "add.shape", "add.fp8-tpukernel"],
       "target_results": {
-        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings passed rhs W-broadcast add on BM1690 CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "manual.ppl-1.7"], "scope": "E4M3/E5M2 rhs shape (M,1)", "reason": "TileLang shape/dtype predicates and PPL FP8 fadd contract admit it."}, "codegen_passed": {
+        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings passed rhs W-broadcast add on BM1690 CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "manual.ppl-1.7"], "scope": "E4M3/E5M2 rhs shape (M,1)", "reason": "TileLang shape/dtype predicates and PPL FP8 fadd contract admit it."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -8094,7 +8094,7 @@
               "scope": "quantized output compared by encoded equality or atol 0.25",
               "reason": "Both formats matched the quantized oracle."
             }, "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "BM1690 PCIe", "reason": "No board result."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "FP8 fadd with tensor operands and W-stride broadcast", "reason": "The PPL manual includes FP8 in fadd DataType and the tensor descriptor can express broadcast stride."}}},
-        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings passed rhs W-broadcast add on SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "manual.ppl-1.7"], "scope": "E4M3/E5M2 rhs shape (M,1)", "reason": "TileLang shape/dtype predicates and PPL FP8 fadd contract admit it."}, "codegen_passed": {
+        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings passed rhs W-broadcast add on SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "manual.ppl-1.7"], "scope": "E4M3/E5M2 rhs shape (M,1)", "reason": "TileLang shape/dtype predicates and PPL FP8 fadd contract admit it."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -8113,7 +8113,7 @@
               "scope": "quantized output compared by encoded equality or atol 0.25",
               "reason": "Both formats matched the quantized oracle."
             }, "pcie_numeric_passed": {"status": "passed", "evidence_ids": ["test.fp8-worker", "artifact.pcie-sg-tpukernel-fp8-final"], "scope": "Current clean e5774525 SG2260E device 0; E4M3/E5M2 W-broadcast add with lhs (1,64) and rhs (1,1), encoded-byte oracle with atol 0.25 fallback", "reason": "The runner-recorded clean e5774525 SG2260E/TPU-Kernel PCIe matrix passed every required case for this exact selector in both FP8 formats, with a raw trace and valid decoded nanosecond timing for each case."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71e"], "scope": "FP8 fadd with tensor operands and W-stride broadcast", "reason": "The PPL manual includes FP8 in fadd DataType and the tpub_7_1_e descriptor can express broadcast stride."}}},
-        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "RV FP8 add is intentionally unmapped for every shape form.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic FP8 add broadcast ABI", "reason": "Frontend can form it."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-common"], "scope": "SG2260E RV FP8 add broadcast", "reason": "Backend guard rejects it."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}}}
+        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "RV FP8 add is intentionally unmapped for every shape form.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic FP8 add broadcast ABI", "reason": "Frontend can form it."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-tpu"], "scope": "SG2260E RV FP8 add broadcast", "reason": "Backend guard rejects it."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}}}
       }
     },
     {
@@ -8123,7 +8123,7 @@
       "dtype_bindings": [{"out": "e4m3_float8", "lhs": "e4m3_float8", "rhs": "e4m3_float8"}, {"out": "e5m2_float8", "lhs": "e5m2_float8", "rhs": "e5m2_float8"}],
       "constraints": ["sub.matrix", "sub.shape", "sub.fp8-tpukernel"],
       "target_results": {
-        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings passed rhs W-broadcast subtract on BM1690 CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "manual.ppl-1.7"], "scope": "E4M3/E5M2 rhs shape (M,1)", "reason": "TileLang shape/dtype predicates and PPL FP8 fsub contract admit it."}, "codegen_passed": {
+        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings passed rhs W-broadcast subtract on BM1690 CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "manual.ppl-1.7"], "scope": "E4M3/E5M2 rhs shape (M,1)", "reason": "TileLang shape/dtype predicates and PPL FP8 fsub contract admit it."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -8144,7 +8144,7 @@
               "scope": "quantized output compared by encoded equality or atol 0.25",
               "reason": "Both formats matched the quantized oracle."
             }, "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "BM1690 PCIe", "reason": "No board result."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "FP8 fsub with tensor operands and W-stride broadcast", "reason": "The PPL manual includes FP8 in fsub DataType and the tensor descriptor can express broadcast stride."}}},
-        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings passed rhs W-broadcast subtract on SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "manual.ppl-1.7"], "scope": "E4M3/E5M2 rhs shape (M,1)", "reason": "TileLang shape/dtype predicates and PPL FP8 fsub contract admit it."}, "codegen_passed": {
+        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings passed rhs W-broadcast subtract on SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "manual.ppl-1.7"], "scope": "E4M3/E5M2 rhs shape (M,1)", "reason": "TileLang shape/dtype predicates and PPL FP8 fsub contract admit it."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -8163,7 +8163,7 @@
               "scope": "quantized output compared by encoded equality or atol 0.25",
               "reason": "Both formats matched the quantized oracle."
             }, "pcie_numeric_passed": {"status": "passed", "evidence_ids": ["test.fp8-worker", "artifact.pcie-sg-tpukernel-fp8-final"], "scope": "Current clean e5774525 SG2260E device 0; E4M3/E5M2 W-broadcast subtract with lhs (1,64) and rhs (1,1), encoded-byte oracle with atol 0.25 fallback", "reason": "The runner-recorded clean e5774525 SG2260E/TPU-Kernel PCIe matrix passed every required case for this exact selector in both FP8 formats, with a raw trace and valid decoded nanosecond timing for each case."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71e"], "scope": "FP8 fsub with tensor operands and W-stride broadcast", "reason": "The PPL manual includes FP8 in fsub DataType and the tpub_7_1_e descriptor can express broadcast stride."}}},
-        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "RV FP8 subtract is intentionally unmapped.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic FP8 subtract broadcast ABI", "reason": "Frontend can form it."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-common"], "scope": "SG2260E RV FP8 sub broadcast", "reason": "Backend guard rejects it."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}}}
+        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "RV FP8 subtract is intentionally unmapped.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic FP8 subtract broadcast ABI", "reason": "Frontend can form it."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-tpu"], "scope": "SG2260E RV FP8 sub broadcast", "reason": "Backend guard rejects it."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}}}
       }
     },
     {
@@ -8173,7 +8173,7 @@
       "dtype_bindings": [{"out": "e4m3_float8", "lhs": "e4m3_float8", "rhs": "e4m3_float8"}, {"out": "e5m2_float8", "lhs": "e5m2_float8", "rhs": "e5m2_float8"}],
       "constraints": ["mul.matrix", "mul.shape", "mul.fp8-tpukernel"],
       "target_results": {
-        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings passed rhs W-broadcast multiply on BM1690 CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "manual.ppl-1.7"], "scope": "E4M3/E5M2 rhs shape (M,1)", "reason": "TileLang shape/dtype predicates and PPL FP8 fmul contract admit it."}, "codegen_passed": {
+        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings passed rhs W-broadcast multiply on BM1690 CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "manual.ppl-1.7"], "scope": "E4M3/E5M2 rhs shape (M,1)", "reason": "TileLang shape/dtype predicates and PPL FP8 fmul contract admit it."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -8194,7 +8194,7 @@
               "scope": "quantized output compared by encoded equality or atol 0.25",
               "reason": "Both formats matched the quantized oracle."
             }, "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "BM1690 PCIe", "reason": "No board result."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "FP8 fmul with tensor operands and W-stride broadcast", "reason": "The PPL manual includes FP8 in fmul DataType and the tensor descriptor can express broadcast stride."}}},
-        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings passed rhs W-broadcast multiply on SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel", "manual.ppl-1.7"], "scope": "E4M3/E5M2 rhs shape (M,1)", "reason": "TileLang shape/dtype predicates and PPL FP8 fmul contract admit it."}, "codegen_passed": {
+        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 encodings passed rhs W-broadcast multiply on SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel", "manual.ppl-1.7"], "scope": "E4M3/E5M2 rhs shape (M,1)", "reason": "TileLang shape/dtype predicates and PPL FP8 fmul contract admit it."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -8213,7 +8213,7 @@
               "scope": "quantized output compared by encoded equality or atol 0.25",
               "reason": "Both formats matched the quantized oracle."
             }, "pcie_numeric_passed": {"status": "passed", "evidence_ids": ["test.fp8-worker", "artifact.pcie-sg-tpukernel-fp8-final"], "scope": "Current clean e5774525 SG2260E device 0; E4M3/E5M2 W-broadcast multiply with lhs (1,64) and rhs (1,1), encoded-byte oracle with atol 0.25 fallback", "reason": "The runner-recorded clean e5774525 SG2260E/TPU-Kernel PCIe matrix passed every required case for this exact selector in both FP8 formats, with a raw trace and valid decoded nanosecond timing for each case."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71e"], "scope": "FP8 fmul with tensor operands and W-stride broadcast", "reason": "The PPL manual includes FP8 in fmul DataType and the tpub_7_1_e descriptor can express broadcast stride."}}},
-        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "RV FP8 multiply is intentionally unmapped.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic FP8 multiply broadcast ABI", "reason": "Frontend can form it."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-common"], "scope": "SG2260E RV FP8 mul broadcast", "reason": "Backend guard rejects it."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}}}
+        "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "RV FP8 multiply is intentionally unmapped.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "generic FP8 multiply broadcast ABI", "reason": "Frontend can form it."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-tpu"], "scope": "SG2260E RV FP8 mul broadcast", "reason": "Backend guard rejects it."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}}}
       }
     },
     {
@@ -8223,8 +8223,8 @@
       "dtype_bindings": [{"out": "e4m3_float8", "lhs": "e4m3_float8", "rhs": "e4m3_float8"}, {"out": "e5m2_float8", "lhs": "e5m2_float8", "rhs": "e5m2_float8"}],
       "constraints": ["div.matrix", "div.shape"],
       "target_results": {
-        "bm1690.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Neither current TileLang nor PPL 1.7 division declares FP8.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-common"], "scope": "both FP8 formats", "reason": "Frontend rejects them."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "Rejected."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}, "sdk_declared": {"status": "failed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "FP8 division", "reason": "Documented division dtype set excludes FP8."}}},
-        "sg2260e.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Neither current TileLang nor PPL 1.7 division declares FP8.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-common"], "scope": "both FP8 formats", "reason": "Frontend rejects them."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E TPU-Kernel", "reason": "Rejected."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E TPU-Kernel", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E TPU-Kernel", "reason": "No selector."}, "sdk_declared": {"status": "failed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71e"], "scope": "FP8 division", "reason": "Documented division dtype set excludes FP8."}}},
+        "bm1690.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Neither current TileLang nor PPL 1.7 division declares FP8.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-tpu"], "scope": "both FP8 formats", "reason": "Frontend rejects them."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "Rejected."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}, "sdk_declared": {"status": "failed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "FP8 division", "reason": "Documented division dtype set excludes FP8."}}},
+        "sg2260e.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Neither current TileLang nor PPL 1.7 division declares FP8.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-tpu"], "scope": "both FP8 formats", "reason": "Frontend rejects them."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E TPU-Kernel", "reason": "Rejected."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E TPU-Kernel", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E TPU-Kernel", "reason": "No selector."}, "sdk_declared": {"status": "failed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71e"], "scope": "FP8 division", "reason": "Documented division dtype set excludes FP8."}}},
         "sg2260e.rv": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "The RV ISA fdiv operand table is BF16/FP16/FP32 only.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-rv"], "scope": "both FP8 formats", "reason": "No current selector."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "Rejected."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E RV", "reason": "No selector."}, "sdk_declared": {"status": "failed", "evidence_ids": ["manual.rv-isa"], "scope": "RVT FP8 fdiv", "reason": "Detailed ISA operand table excludes FP8 despite a broader section introduction."}}}
       }
     },
@@ -8263,7 +8263,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "add_scalar and mul_scalar for FP16/BF16/FP32",
               "reason": "Both helpers and all three dtype guards exist."
@@ -8303,7 +8303,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "add_scalar and mul_scalar for FP16/BF16/FP32",
               "reason": "Both helpers and dtype guards exist."
@@ -8464,7 +8464,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP16/BF16/FP32 four-buffer exp ABI",
               "reason": "The exact current ABI and dtype checks exist."
@@ -8513,7 +8513,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP16/BF16/FP32 four-buffer exp ABI",
               "reason": "The exact current ABI and dtype checks exist."
@@ -8571,7 +8571,7 @@
         "bm1690.tpukernel": {
           "support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Current TileLang and the documented PPL exp dtype set exclude FP8.",
           "verification": {
-            "declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-common"], "scope": "E4M3/E5M2", "reason": "Explicit dtype guards reject FP8."},
+            "declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-tpu"], "scope": "E4M3/E5M2", "reason": "Explicit dtype guards reject FP8."},
             "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690 TPU-Kernel", "reason": "Rejected."},
             "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690 CModel", "reason": "No selector."},
             "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690 PCIe", "reason": "No selector."},
@@ -8581,7 +8581,7 @@
         "sg2260e.tpukernel": {
           "support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Same TileLang and PPL boundary.",
           "verification": {
-            "declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-common"], "scope": "E4M3/E5M2", "reason": "Explicit dtype guards reject FP8."},
+            "declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-tpu"], "scope": "E4M3/E5M2", "reason": "Explicit dtype guards reject FP8."},
             "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E TPU-Kernel", "reason": "Rejected."},
             "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E TPU-Kernel CModel", "reason": "No selector."},
             "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E TPU-Kernel PCIe", "reason": "No selector."},
@@ -8633,7 +8633,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "src.effects"
               ],
               "scope": "five-buffer FP16/BF16/FP32 signature, coeff=(64,32)",
@@ -8682,7 +8682,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "src.effects"
               ],
               "scope": "five-buffer FP16/BF16/FP32 signature, coeff=(64,32)",
@@ -8768,7 +8768,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP32 rsqrt",
               "reason": "Both layers enforce it."
@@ -8818,7 +8818,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP32 rsqrt",
               "reason": "Both layers enforce it."
@@ -8968,7 +8968,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "sum/max FP16/BF16/FP32 dim=1",
               "reason": "Public helpers and dtype paths exist."
@@ -9010,7 +9010,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "sum/max FP16/BF16/FP32 dim=1",
               "reason": "Public helpers and dtype paths exist."
@@ -9063,8 +9063,8 @@
       "dtype_bindings": [{"inp": "e4m3_float8", "out": "e4m3_float8", "tmp": "e4m3_float8"}, {"inp": "e5m2_float8", "out": "e5m2_float8", "tmp": "e5m2_float8"}],
       "constraints": ["reduce.rank-axis", "reduce.disjoint", "reduce.local-dtype", "reduce.padding", "reduce.dim4"],
       "target_results": {
-        "bm1690.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Frontend excludes FP8; a low-level fp8_avg_pool2d symbol is not sufficient evidence for sum/max semantics.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-common"], "scope": "E4M3/E5M2 sum/max", "reason": "No current TileLang dtype route."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "Rejected."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}, "sdk_declared": {"status": "unverified", "evidence_ids": ["sdk.header-71"], "scope": "FP8 row sum/max semantic composite", "reason": "The header has FP8 pooling primitives but no reviewed declaration proving this exact reduction contract."}}},
-        "sg2260e.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Same TileLang exclusion and ambiguous low-level primitive evidence.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-common"], "scope": "E4M3/E5M2 sum/max", "reason": "No current TileLang dtype route."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "Rejected."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "No selector."}, "sdk_declared": {"status": "unverified", "evidence_ids": ["sdk.header-71e"], "scope": "FP8 row sum/max semantic composite", "reason": "The header has FP8 pooling primitives but no reviewed declaration proving this exact reduction contract."}}}
+        "bm1690.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Frontend excludes FP8; a low-level fp8_avg_pool2d symbol is not sufficient evidence for sum/max semantics.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-tpu"], "scope": "E4M3/E5M2 sum/max", "reason": "No current TileLang dtype route."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "Rejected."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}, "sdk_declared": {"status": "unverified", "evidence_ids": ["sdk.header-71"], "scope": "FP8 row sum/max semantic composite", "reason": "The header has FP8 pooling primitives but no reviewed declaration proving this exact reduction contract."}}},
+        "sg2260e.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Same TileLang exclusion and ambiguous low-level primitive evidence.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-tpu"], "scope": "E4M3/E5M2 sum/max", "reason": "No current TileLang dtype route."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "Rejected."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "No selector."}, "sdk_declared": {"status": "unverified", "evidence_ids": ["sdk.header-71e"], "scope": "FP8 row sum/max semantic composite", "reason": "The header has FP8 pooling primitives but no reviewed declaration proving this exact reduction contract."}}}
       }
     },
     {
@@ -9105,7 +9105,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP16/BF16/FP32 payload, uint32 index, param=(H,W), output=(count,W), index=(count,1)",
               "reason": "Current source forms guarded tpu_gdma_h_gather_S2S."
@@ -9154,7 +9154,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP16/BF16/FP32 payload, uint32 index, param=(H,W), output=(count,W), index=(count,1)",
               "reason": "Current source forms guarded tpu_gdma_h_gather_S2S."
@@ -9206,7 +9206,7 @@
       "dtype_bindings": [{"output": "e4m3_float8", "param": "e4m3_float8", "index": "uint32"}, {"output": "e5m2_float8", "param": "e5m2_float8", "index": "uint32"}],
       "constraints": ["gather.global", "gather.types", "gather.disjoint", "gather.shape-contract", "gather.index-bounds"],
       "target_results": {
-        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 payload formats passed exact encoded-byte gather on BM1690 CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"], "scope": "public E4M3/E5M2 global gather with uint32 index", "reason": "The public payload whitelist and TPU-Kernel lowering admit both formats."}, "codegen_passed": {
+        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 payload formats passed exact encoded-byte gather on BM1690 CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"], "scope": "public E4M3/E5M2 global gather with uint32 index", "reason": "The public payload whitelist and TPU-Kernel lowering admit both formats."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -9225,7 +9225,7 @@
               "scope": "param=(17,32), index=(7,1), output=(7,32); selected payload bytes compared exactly",
               "reason": "Both formats preserved the selected encoded bytes exactly."
             }, "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "BM1690 PCIe FP8 gather", "reason": "No board result."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "generic gather payload including FP8", "reason": "Underlying dtype-carrying gather declaration exists."}}},
-        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 payload formats passed exact encoded-byte gather on SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"], "scope": "public E4M3/E5M2 global gather with uint32 index", "reason": "The public payload whitelist and TPU-Kernel lowering admit both formats."}, "codegen_passed": {
+        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "Both FP8 payload formats passed exact encoded-byte gather on SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"], "scope": "public E4M3/E5M2 global gather with uint32 index", "reason": "The public payload whitelist and TPU-Kernel lowering admit both formats."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -9253,8 +9253,8 @@
       "dtype_bindings": [{"output": "int32", "param": "int32", "index": "uint32"}, {"output": "uint32", "param": "uint32", "index": "uint32"}, {"output": "int16", "param": "int16", "index": "uint32"}, {"output": "uint16", "param": "uint16", "index": "uint32"}, {"output": "int8", "param": "int8", "index": "uint32"}, {"output": "uint8", "param": "uint8", "index": "uint32"}],
       "constraints": ["gather.global", "gather.types", "gather.disjoint", "gather.shape-contract", "gather.index-bounds"],
       "target_results": {
-        "bm1690.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Frontend explicitly restricts gather payloads to floating FP16/BF16/FP32.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-common"], "scope": "listed integer payloads", "reason": "Explicit whitelist rejects them."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690 integer gather", "reason": "Rejected before lowering."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}}},
-        "sg2260e.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "The same explicit frontend restriction applies.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-common"], "scope": "listed integer payloads", "reason": "Explicit whitelist rejects them."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E integer gather", "reason": "Rejected before lowering."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "No selector."}}}
+        "bm1690.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Frontend explicitly restricts gather payloads to floating FP16/BF16/FP32.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-tpu"], "scope": "listed integer payloads", "reason": "Explicit whitelist rejects them."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690 integer gather", "reason": "Rejected before lowering."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}}},
+        "sg2260e.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "The same explicit frontend restriction applies.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-tpu"], "scope": "listed integer payloads", "reason": "Explicit whitelist rejects them."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E integer gather", "reason": "Rejected before lowering."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "No selector."}}}
       }
     },
     {
@@ -9286,7 +9286,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP32 payload, INT32 index, src extent=length, output extents=K, descended in {true,false}",
               "reason": "Frontend and codegen contracts agree with the measured K-element write extent."
@@ -9423,7 +9423,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "INT32/UINT32 payload, INT32 index, src extent=length, output extents=K, descended=true",
               "reason": "Frontend and codegen explicitly accept both bindings with exact K-sized outputs."
@@ -9484,7 +9484,7 @@
             "codegen_passed": {
               "status": "failed",
               "evidence_ids": [
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "artifact.cmodel-sg-rope-topk"
               ],
               "scope": "SG2260E TPU-Kernel INT32/UINT32 descending top-K",
@@ -9523,8 +9523,8 @@
       "dtype_bindings": [{"dst_data": "int32", "src": "int32", "dst_idx": "int32"}, {"dst_data": "uint32", "src": "uint32", "dst_idx": "int32"}],
       "constraints": ["topk.global", "topk.types", "topk.disjoint", "topk.bounds", "topk.extents", "topk.bm1690-only"],
       "target_results": {
-        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "INT32 and UINT32 ascending topk passed exact K-sized output checks on BM1690 CModel; sentinel and repeated-key characterization established K-element writes and stable natural-index ties.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common"], "scope": "INT32/UINT32 payload, INT32 index, src extent=length, output extents=K, descended=false", "reason": "Frontend and codegen accept both ascending integer forms."}, "codegen_passed": {"status": "passed", "evidence_ids": ["test.tpukernel-ops-worker", "artifact.cmodel-tpukernel-bm-final", "artifact.cmodel-tpukernel-bm-post-audit", "artifact.cmodel-bm-topk-tail"], "scope": "BM1690 topk.int32.ascending and topk.uint32.ascending", "reason": "Both isolated cases compiled and executed."}, "cmodel_numeric_passed": {"status": "passed", "evidence_ids": ["test.tpukernel-ops-worker", "artifact.cmodel-tpukernel-bm-final", "artifact.cmodel-tpukernel-bm-post-audit", "artifact.cmodel-bm-topk-tail", "artifact.cmodel-bm-topk-stable-ties"], "scope": "length=257, K=11; exact K-sized INT32/UINT32 value and INT32 index outputs, preserved tails, and increasing natural indices for repeated equal keys", "reason": "Both payload bindings passed prefix correctness, K-element write extent, and stable-tie ordering."}, "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "BM1690 PCIe integer ascending topk", "reason": "No board result."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "tpu_hau_sort_natural_index INT32/UINT32 with direction flag", "reason": "The SDK declaration and exact CModel cases agree."}}},
-        "sg2260e.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "The target-wide SG2260E HAU guard rejects topk regardless of direction.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "target-independent INT32/UINT32 ascending topk source forms", "reason": "The public/internal ABI can express both forms before target selection."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-common", "artifact.cmodel-sg-rope-topk"], "scope": "SG2260E TPU-Kernel INT32/UINT32 ascending top-K", "reason": "The chip guard rejects the target before emission."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E integer ascending topk", "reason": "Current fail-closed codegen prevents CModel dispatch."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E PCIe integer ascending topk", "reason": "Current fail-closed codegen prevents board dispatch."}, "sdk_declared": {"status": "passed", "evidence_ids": ["sdk.header-71e"], "scope": "header declaration only", "reason": "The symbol is declared even though the SG2260E runtime implementation rejects it."}}}
+        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "INT32 and UINT32 ascending topk passed exact K-sized output checks on BM1690 CModel; sentinel and repeated-key characterization established K-element writes and stable natural-index ties.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu"], "scope": "INT32/UINT32 payload, INT32 index, src extent=length, output extents=K, descended=false", "reason": "Frontend and codegen accept both ascending integer forms."}, "codegen_passed": {"status": "passed", "evidence_ids": ["test.tpukernel-ops-worker", "artifact.cmodel-tpukernel-bm-final", "artifact.cmodel-tpukernel-bm-post-audit", "artifact.cmodel-bm-topk-tail"], "scope": "BM1690 topk.int32.ascending and topk.uint32.ascending", "reason": "Both isolated cases compiled and executed."}, "cmodel_numeric_passed": {"status": "passed", "evidence_ids": ["test.tpukernel-ops-worker", "artifact.cmodel-tpukernel-bm-final", "artifact.cmodel-tpukernel-bm-post-audit", "artifact.cmodel-bm-topk-tail", "artifact.cmodel-bm-topk-stable-ties"], "scope": "length=257, K=11; exact K-sized INT32/UINT32 value and INT32 index outputs, preserved tails, and increasing natural indices for repeated equal keys", "reason": "Both payload bindings passed prefix correctness, K-element write extent, and stable-tie ordering."}, "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "BM1690 PCIe integer ascending topk", "reason": "No board result."}, "sdk_declared": {"status": "passed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "tpu_hau_sort_natural_index INT32/UINT32 with direction flag", "reason": "The SDK declaration and exact CModel cases agree."}}},
+        "sg2260e.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "The target-wide SG2260E HAU guard rejects topk regardless of direction.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend"], "scope": "target-independent INT32/UINT32 ascending topk source forms", "reason": "The public/internal ABI can express both forms before target selection."}, "codegen_passed": {"status": "failed", "evidence_ids": ["src.codegen-tpu", "artifact.cmodel-sg-rope-topk"], "scope": "SG2260E TPU-Kernel INT32/UINT32 ascending top-K", "reason": "The chip guard rejects the target before emission."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E integer ascending topk", "reason": "Current fail-closed codegen prevents CModel dispatch."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E PCIe integer ascending topk", "reason": "Current fail-closed codegen prevents board dispatch."}, "sdk_declared": {"status": "passed", "evidence_ids": ["sdk.header-71e"], "scope": "header declaration only", "reason": "The symbol is declared even though the SG2260E runtime implementation rejects it."}}}
       },
       "evidence_ids": ["artifact.cmodel-tpukernel-bm-final", "artifact.cmodel-tpukernel-bm-post-audit", "artifact.cmodel-bm-topk-tail", "artifact.cmodel-bm-topk-stable-ties"],
       "notes": ["Repeated INT32/UINT32 keys preserve increasing natural-index order; this is part of the verified BM1690 ordering semantics."]
@@ -9536,8 +9536,8 @@
       "dtype_bindings": [{"dst_data": "float16", "src": "float16", "dst_idx": "int32"}, {"dst_data": "bfloat16", "src": "bfloat16", "dst_idx": "int32"}, {"dst_data": "e4m3_float8", "src": "e4m3_float8", "dst_idx": "int32"}, {"dst_data": "e5m2_float8", "src": "e5m2_float8", "dst_idx": "int32"}],
       "constraints": ["topk.global", "topk.types", "topk.disjoint", "topk.bounds"],
       "target_results": {
-        "bm1690.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Frontend and HAU selector both restrict payloads to FP32/INT32/UINT32.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-common"], "scope": "FP16/BF16/E4M3/E5M2", "reason": "Explicit whitelist rejects them."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "Rejected."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}, "sdk_declared": {"status": "failed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "listed unsupported float payloads", "reason": "HAU natural-index sort dtype contract excludes them."}}},
-        "sg2260e.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Same explicit frontend/HAU restriction.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-common"], "scope": "FP16/BF16/E4M3/E5M2", "reason": "Explicit whitelist rejects them."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "Rejected."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "No selector."}, "sdk_declared": {"status": "failed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71e"], "scope": "listed unsupported float payloads", "reason": "HAU natural-index sort dtype contract excludes them."}}}
+        "bm1690.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Frontend and HAU selector both restrict payloads to FP32/INT32/UINT32.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-tpu"], "scope": "FP16/BF16/E4M3/E5M2", "reason": "Explicit whitelist rejects them."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "Rejected."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "BM1690", "reason": "No selector."}, "sdk_declared": {"status": "failed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71"], "scope": "listed unsupported float payloads", "reason": "HAU natural-index sort dtype contract excludes them."}}},
+        "sg2260e.tpukernel": {"support_status": "unsupported", "implementation_conformance": "conforming", "reason": "Same explicit frontend/HAU restriction.", "verification": {"declared": {"status": "failed", "evidence_ids": ["src.frontend", "src.codegen-tpu"], "scope": "FP16/BF16/E4M3/E5M2", "reason": "Explicit whitelist rejects them."}, "codegen_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "Rejected."}, "cmodel_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "No selector."}, "pcie_numeric_passed": {"status": "not_applicable", "evidence_ids": [], "scope": "SG2260E", "reason": "No selector."}, "sdk_declared": {"status": "failed", "evidence_ids": ["manual.ppl-1.7", "sdk.header-71e"], "scope": "listed unsupported float payloads", "reason": "HAU natural-index sort dtype contract excludes them."}}}
       }
     },
     {
@@ -9583,7 +9583,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP16/BF16/FP32 equal-shape inputs with even W",
               "reason": "Frontend and guarded composite mapping exist."
@@ -9623,7 +9623,7 @@
               "status": "passed",
               "evidence_ids": [
                 "src.frontend",
-                "src.codegen-common"
+                "src.codegen-tpu"
               ],
               "scope": "FP16/BF16/FP32 equal-shape inputs with even W",
               "reason": "Frontend and guarded composite mapping exist."
@@ -9669,7 +9669,7 @@
       ],
       "constraints": ["rope.local-shape", "rope.types", "rope.output-disjoint", "rope.even-width"],
       "target_results": {
-        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "The public interleaved FP8 add composite passed both formats on BM1690 CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"], "scope": "public same-format E4M3/E5M2 rank-2 RoPE add with even W", "reason": "Frontend and guarded composite mapping accept both formats."}, "codegen_passed": {
+        "bm1690.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "The public interleaved FP8 add composite passed both formats on BM1690 CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"], "scope": "public same-format E4M3/E5M2 rank-2 RoPE add with even W", "reason": "Frontend and guarded composite mapping accept both formats."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -9688,7 +9688,7 @@
               "scope": "shape (4,32), 128 interleaved outputs; encoded equality or atol 0.5",
               "reason": "Both formats matched the quantized even/odd add oracle."
             }, "pcie_numeric_passed": {"status": "unverified", "evidence_ids": [], "scope": "BM1690 PCIe FP8 RoPE", "reason": "No board result."}, "sdk_declared": {"status": "not_applicable", "evidence_ids": [], "scope": "standalone FP8 rope_add", "reason": "RoPE add is a TileLang composition of declared FP8 add, not a standalone SDK operation."}}},
-        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "The public interleaved FP8 add composite passed both formats on SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-common", "src.codegen-tpukernel"], "scope": "public same-format E4M3/E5M2 rank-2 RoPE add with even W", "reason": "Frontend and guarded composite mapping accept both formats."}, "codegen_passed": {
+        "sg2260e.tpukernel": {"support_status": "supported", "implementation_conformance": "conforming", "reason": "The public interleaved FP8 add composite passed both formats on SG2260E CModel.", "verification": {"declared": {"status": "passed", "evidence_ids": ["src.frontend", "src.codegen-tpu", "src.codegen-tpukernel"], "scope": "public same-format E4M3/E5M2 rank-2 RoPE add with even W", "reason": "Frontend and guarded composite mapping accept both formats."}, "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
                 "test.fp8-worker",
@@ -9747,7 +9747,7 @@
             "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "src.codegen-tpukernel",
                 "test.max-source-selection"
               ],
@@ -9797,7 +9797,7 @@
             "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "src.codegen-tpukernel",
                 "test.max-source-selection"
               ],
@@ -9850,7 +9850,7 @@
             "codegen_passed": {
               "status": "failed",
               "evidence_ids": [
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "src.codegen-rv",
                 "test.max-source-selection"
               ],
@@ -9934,7 +9934,7 @@
             "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "src.codegen-tpukernel",
                 "test.max-source-selection"
               ],
@@ -9975,7 +9975,7 @@
             "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "src.codegen-tpukernel",
                 "test.max-source-selection"
               ],
@@ -10019,7 +10019,7 @@
             "codegen_passed": {
               "status": "passed",
               "evidence_ids": [
-                "src.codegen-common",
+                "src.codegen-tpu",
                 "src.codegen-rv",
                 "test.max-source-selection"
               ],

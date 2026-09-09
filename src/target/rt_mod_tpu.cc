@@ -17,7 +17,7 @@
  * under the License.
  */
 
-#include "codegen_tpu_common.h"
+#include "codegen_tpu.h"
 #include "tpu_target_info.h"
 
 namespace tvm {

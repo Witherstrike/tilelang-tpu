@@ -56,7 +56,8 @@ TileLang frontend
           AddressAssign (TPUv7 LMEM)
                     │
         target.build.tilelang_tpu
-          ├─ common descriptor/ABI layer
+                    │
+          codegen_tpu.{h,cc}
           ├─ codegen_tpukernel.cc ─► tpu_kernel.h
           └─ codegen_rv.cc        ─► rvt_api.h
                     │
@@ -65,9 +66,11 @@ TileLang frontend
           └─ installed PCIe runtime
 ```
 
+源码命名遵循 [TVM 的 target source codegen](https://github.com/apache/tvm/blob/main/docs/arch/codegen.rst) 与 [TileLang CUDA codegen](https://github.com/tile-ai/tilelang/blob/main/src/cuda/codegen/codegen_cuda.h) 惯例：`codegen_tpu.{h,cc}` 是唯一的 TPU 目标源码生成器，`codegen_tpukernel.cc`、`codegen_rv.cc` 是同一生成器按编程模型拆分的指令选择实现。当前没有独立的 emitter 类，也不处在 IR-to-IR lowering 阶段，因此不以 `emitter`、`lowering` 或 `common` 命名这些文件。
+
 TPU pass pipeline 只启用已有明确语义的变换：绑定、前端合法化、简化、if binding、buffer allocation location 规划、if 合并、opaque block lowering、窄化、unroll 与最终简化。以下通用 GPU 优化不进入 TPU pipeline：
 
-- vector legalization/vectorization：TPU source emitter 尚未定义残余 vector lane、Ramp 和 vector load/store 的完整语义；
+- vector legalization/vectorization：TPU 源码生成器尚未定义残余 vector lane、Ramp 和 vector load/store 的完整语义；
 - software-pipeline planning/injection：DMA/compute token、buffer version 和 hazard 尚未建模；
 - `StorageRewrite`：会破坏 TPU codegen 依赖的结构化 `DeclBuffer/Allocate` 配对。
 
@@ -77,7 +80,7 @@ contract verifier 在 target pass 前后各运行一次。它拒绝 vector resid
 
 这套顺序的核心不变量是：任何可能改变指令、地址 effect 或同步语义的选择，都必须在地址分配和 codegen 前确定；不能用 codegen fallback 修补一个含义不完整的 IR。`AddressAssign` 还逐个 `PrimFunc` 核对其已绑定 target 与调用方 target 完全一致，LMEM 地址元数据绑定 data Var 身份而非可碰撞的显示名。
 
-descriptor 合法性也在共同层单源化。TPU 本地 scope 只有 `shared/shared.dyn/local/local.fragment`；所有 `dim4` extent 必须是编译期整数且位于 `[1,65535]`。copy 两侧原始 rank 可分别为 1..4，按统一 N/C/H/W 规则左补 1 后比较，不要求原始 rank 相等。TPU-Kernel 特殊约束继续在编程模型层验证：exp/sigmoid 要求完整 shape4 一致且 `H*W<=65535`，reduction 的 EU 对齐后 padded width 也必须可由 `dim4` 表示。
+descriptor 合法性也在 TPU 代码生成器中单源化。TPU 本地 scope 只有 `shared/shared.dyn/local/local.fragment`；所有 `dim4` extent 必须是编译期整数且位于 `[1,65535]`。copy 两侧原始 rank 可分别为 1..4，按统一 N/C/H/W 规则左补 1 后比较，不要求原始 rank 相等。TPU-Kernel 特殊约束继续在编程模型层验证：exp/sigmoid 要求完整 shape4 一致且 `H*W<=65535`，reduction 的 EU 对齐后 padded width 也必须可由 `dim4` 表示。
 
 所有 typed TPU semantic op 的 buffer 参数统一以 `tl.region(BufferLoad, access_mask, extents)` 穿过 TIR/native 边界。非 copy 算子只接受从零开始、覆盖完整逻辑 Buffer 的 region；copy 保留显式子区间，并独立证明连续性与边界。native 层再以 data Var 身份核对 compiler-owned descriptor 的 dtype、原始 rank、归一化 shape、scope 与 ownership。裸 `tir.tvm_access_ptr` 不再是兼容入口，因为它会丢失 `T.view/T.reshape` 的逻辑形状。只改变展示名称且 descriptor 完全等价的 alias 可以作为唯一表示；改变 rank、shape、dtype、scope，或同时制造第二个 allocation owner 的 alias 会 fail-closed。
 
@@ -238,7 +241,7 @@ PCIe timing 来自每 case 一次带 recorder 的设备指令事件，只用于�
 1. 在能力注册中声明合法 target 组合，不在 codegen 中猜测；
 2. 先定义 semantic ABI、operand effect、shape/dtype/layout 与 failure policy；
 3. 让 pass/verifier/AddressAssign 消费同一契约；
-4. 编程模型各自实现 emitter，未实现项 fail-closed；
+4. 编程模型各自实现指令选择，未实现项 fail-closed；
 5. 先 source-only，再 CModel 数值，最后受控 PCIe；
 6. 只按精确 selector 更新机器契约，不能从 SDK 声明、另一芯片或另一运行时复制状态。
 

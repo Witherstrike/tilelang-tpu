@@ -841,7 +841,7 @@ def _validate_implementation_sets(operations: dict[str, dict[str, Any]]) -> None
     _check_exact_set("contract vs AddressAssign effect set", contract_set, effects_set)
 
     codegen_set = (
-        _semantic_externs(REPO_ROOT / "src/target/codegen_tpu_common.cc")
+        _semantic_externs(REPO_ROOT / "src/target/codegen_tpu.cc")
         | _semantic_externs(REPO_ROOT / "src/target/codegen_tpukernel.cc"))
     _check_exact_set("contract vs TPU codegen dispatch set", contract_set, codegen_set)
 

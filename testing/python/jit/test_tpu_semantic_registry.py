@@ -102,7 +102,7 @@ def test_semantic_extern_registry_is_isomorphic_across_compiler_layers():
     assert _semantic_externs("tilelang/language/customize.py") == expected
     assert _semantic_externs("tilelang/engine/lower.py") == expected
     assert _semantic_externs("src/transform/address_assign.cc") == expected
-    assert _semantic_externs("src/target/codegen_tpu_common.cc") == _PORTABLE_EXTERNS
+    assert _semantic_externs("src/target/codegen_tpu.cc") == _PORTABLE_EXTERNS
     assert _semantic_externs("src/target/codegen_tpukernel.cc") == _TPUKERNEL_EXTERNS
 
     contract_externs = {

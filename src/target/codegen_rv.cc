@@ -9,7 +9,7 @@
  *  \brief SG2260E RV Tensor instruction selection for portable TPU ops.
  */
 
-#include "codegen_tpu_common.h"
+#include "codegen_tpu.h"
 
 #include <tvm/runtime/logging.h>
 
