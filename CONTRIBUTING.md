@@ -1,52 +1,40 @@
 # Contributing
 
-That would be awesome if you want to contribute something to TileLang!
+Contributions to TileLang-TPU are welcome. Please keep each change focused and include tests and
+documentation for any behavior that it adds or changes.
 
-- [Contributing](CONTRIBUTING.md#contributing)
-  - [Reporting Bugs](CONTRIBUTING.md#reporting-bugs)
-  - [Asking Questions](CONTRIBUTING.md#asking-questions)
-  - [Submitting Pull Requests](CONTRIBUTING.md#submitting-pull-requests)
-  - [Repository Setup](CONTRIBUTING.md#repository-setup)
-  - [Running Tests](CONTRIBUTING.md#running-tests)
+## Reporting bugs
 
-## Reporting Bugs
+Search the existing issues before opening a new one. A useful bug report includes:
 
-If you run into any weird behavior while using TileLang, feel free to open a new issue in this repository! Please run a **search before opening** a new issue, to make sure that someone else hasn't already reported or solved the bug you've found.
+- a minimal reproducer;
+- the target chip, programming model, and runtime mode;
+- the expected and actual results;
+- the relevant compiler or runtime log.
 
-Any issue you open must include:
+Do not attach proprietary SDK files or raw data that may contain sensitive information.
 
-- Code snippet that reproduces the bug with a minimal setup.
-- A clear explanation of what the issue is.
+## Asking questions
 
+Use the project issue tracker for development and usage questions. Include enough target and
+environment information for another contributor to reproduce the problem.
 
-## Asking Questions
+## Repository setup
 
-Please ask questions in issues.
+For TPU development, follow the
+[TileLang-TPU installation guide](docs/get_started/Installation.md). It uses the vendored TVM
+submodule, a Python virtual environment, and `./build_tpu.sh`. The generic `setup.py` path still
+targets the upstream GPU package and is not the TPU-only development workflow.
 
-## Submitting Pull Requests
+## Tests and formatting
 
-All pull requests are super welcomed and greatly appreciated! Issues in need of a solution are marked with a [`♥ help`](https://github.com/ianstormtaylor/TileLang/issues?q=is%3Aissue+is%3Aopen+label%3A%22%E2%99%A5+help%22) label if you're looking for somewhere to start.
+Run `./format.sh` before submitting a change. Start with the tests closest to the modified code,
+then run the TPU-only suite documented in the project [README](README.md#开发检查). Hardware tests
+must follow the staged CModel-to-PCIe process in [`tpu_demo/README.md`](tpu_demo/README.md); do not
+bypass its device lock or safety checks.
 
-Please run `./format.sh` before submitting a pull request to make sure that your code is formatted correctly.
+## Pull requests
 
-Please include tests and docs with every pull request!
-
-## Repository Setup
-
-To run the build, you need to have the TileLang repository cloned to your computer. After that, you need to `cd` into the directory where you cloned it, and install the dependencies with `python`:
-
-```bash
-python setup.py install
-```
-
-
-## Running Tests
-
-To run the tests, start by building the project as described in the [Repository Setup](CONTRIBUTING.md#repository-setup) section.
-
-Then you can rerun the tests with:
-
-```text
-python -m pytest testing
-```
-
+A pull request should explain what changed, why the change is needed, which target combinations it
+affects, and how it was verified. Keep unsupported and unverified combinations explicit instead of
+silently falling back to another backend.

@@ -54,18 +54,43 @@ def _toolchain_identity(runtime_mode):
         "hash_algorithm": "sha256",
         "runtime_mode": runtime_mode,
         "ppl_project_root": "/sdk/ppl-1.7",
-        "compiler_runtime": {"tilelang_library": {"sha256": "tilelang"}},
-        "ppl_common": {"chip_map": {"sha256": "chip-map"}},
-        "cmodel": {"runtime_tree": {"sha256": "cmodel-runtime"}},
+        "compiler_runtime": {
+            "tilelang_library": {
+                "sha256": "tilelang"
+            }
+        },
+        "ppl_common": {
+            "chip_map": {
+                "sha256": "chip-map"
+            }
+        },
+        "cmodel": {
+            "runtime_tree": {
+                "sha256": "cmodel-runtime"
+            }
+        },
         "chips": {
-            "bm1690": {"kernel_include_tree": {"sha256": "bm1690"}},
-            "sg2260e": {"kernel_include_tree": {"sha256": "sg2260e"}},
+            "bm1690": {
+                "kernel_include_tree": {
+                    "sha256": "bm1690"
+                }
+            },
+            "sg2260e": {
+                "kernel_include_tree": {
+                    "sha256": "sg2260e"
+                }
+            },
         },
     }
     if runtime_mode == "pcie":
         identity["pcie"] = {
-            "installed_runtime_library": {"sha256": "board-runtime"},
-            "tpu_smi": {"path": "/sbin/tpu-smi", "sha256": "tpu-smi"},
+            "installed_runtime_library": {
+                "sha256": "board-runtime"
+            },
+            "tpu_smi": {
+                "path": "/sbin/tpu-smi",
+                "sha256": "tpu-smi"
+            },
         }
     return identity
 
@@ -95,15 +120,13 @@ def _matrix_args(runtime_mode="cmodel", **overrides):
 def _patch_identity(monkeypatch, runtime_mode):
     source = _source_identity()
     toolchain = _toolchain_identity(runtime_mode)
-    monkeypatch.setattr(
-        matrix_module, "git_source_identity", lambda _repo_root: dict(source))
+    monkeypatch.setattr(matrix_module, "git_source_identity", lambda _repo_root: dict(source))
     monkeypatch.setattr(
         matrix_module,
         "toolchain_identity",
-        lambda _environment, requested_mode: (
-            dict(toolchain) if requested_mode == runtime_mode else
-            _toolchain_identity(requested_mode)
-        ),
+        lambda _environment, requested_mode:
+        (dict(toolchain)
+         if requested_mode == runtime_mode else _toolchain_identity(requested_mode)),
     )
     monkeypatch.setattr(
         matrix_module,
@@ -123,8 +146,11 @@ def _patch_identity(monkeypatch, runtime_mode):
     return source, toolchain
 
 
-def _core_worker_payload(*, chip="sg2260e", programming_model="rv",
-                         runtime_mode="cmodel", case="elementwise-add"):
+def _core_worker_payload(*,
+                         chip="sg2260e",
+                         programming_model="rv",
+                         runtime_mode="cmodel",
+                         case="elementwise-add"):
     return {
         "schema_version": 1,
         "status": "passed",
@@ -132,7 +158,9 @@ def _core_worker_payload(*, chip="sg2260e", programming_model="rv",
         "programming_model": programming_model,
         "runtime_mode": runtime_mode,
         "case": case,
-        "metrics": {"passed": True},
+        "metrics": {
+            "passed": True
+        },
     }
 
 
@@ -145,8 +173,11 @@ def test_core_worker_payload_requires_one_exact_structured_result(tmp_path):
     )
     parsed = matrix_module._worker_payload(stdout)
     matrix_module._validate_worker_payload(
-        parsed, chip="sg2260e", programming_model="rv",
-        runtime_mode="cmodel", case="elementwise-add")
+        parsed,
+        chip="sg2260e",
+        programming_model="rv",
+        runtime_mode="cmodel",
+        case="elementwise-add")
 
     stdout.write_text(
         "\n".join((matrix_module._WORKER_RESULT_PREFIX + json.dumps(payload),) * 2),
@@ -165,7 +196,9 @@ def test_core_worker_payload_requires_one_exact_structured_result(tmp_path):
         ("programming_model", "tpukernel"),
         ("runtime_mode", "pcie"),
         ("case", "elementwise-sub"),
-        ("metrics", {"passed": False}),
+        ("metrics", {
+            "passed": False
+        }),
     ),
 )
 def test_core_worker_payload_rejects_misattributed_result(field, value):
@@ -173,18 +206,20 @@ def test_core_worker_payload_rejects_misattributed_result(field, value):
     payload[field] = value
     with pytest.raises(RuntimeError, match="schema_version|scheduled case|metrics"):
         matrix_module._validate_worker_payload(
-            payload, chip="sg2260e", programming_model="rv",
-            runtime_mode="cmodel", case="elementwise-add")
+            payload,
+            chip="sg2260e",
+            programming_model="rv",
+            runtime_mode="cmodel",
+            case="elementwise-add")
 
 
 def test_core_worker_failure_emits_one_structured_result(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["tpu_profile_worker.py", "--case", "elementwise-add"])
+    monkeypatch.setattr(tpu_profile_worker, "_profile_selection", lambda:
+                        ("sg2260e", "rv", "cmodel"))
     monkeypatch.setattr(
-        tpu_profile_worker, "_profile_selection",
-        lambda: ("sg2260e", "rv", "cmodel"))
-    monkeypatch.setattr(
-        tpu_profile_worker, "_elementwise",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("numeric failure")))
+        tpu_profile_worker, "_elementwise", lambda *_args, **_kwargs:
+        (_ for _ in ()).throw(RuntimeError("numeric failure")))
 
     with pytest.raises(RuntimeError, match="numeric failure"):
         tpu_profile_worker.main()
@@ -289,9 +324,8 @@ def test_tir_script_workers_keep_evaluated_annotations(source_name):
 
 
 def test_fp8_elementwise_case_names_preserve_unsuffixed_operations():
-    cases = (
-        "add", "sub", "mul", "max", "add-broadcast", "sub-broadcast",
-        "mul-broadcast", "max-broadcast")
+    cases = ("add", "sub", "mul", "max", "add-broadcast", "sub-broadcast", "mul-broadcast",
+             "max-broadcast")
 
     assert [tpu_fp8_ops_worker._elementwise_operation(case) for case in cases
            ] == ["add", "sub", "mul", "max", "add", "sub", "mul", "max"]
@@ -348,8 +382,8 @@ def test_portable_max_cases_cover_dtypes_broadcast_and_negative_infinity():
         "elementwise-max-fp32-broadcast": ("float32", "broadcast"),
         "elementwise-max-fp32-negative-infinity": ("float32", "negative-infinity"),
     }
-    assert tpu_profile_worker._MAX_CASES == expected_profile_cases
-    assert matrix_module._MAX_CASES == tuple(expected_profile_cases)
+    assert expected_profile_cases == tpu_profile_worker._MAX_CASES
+    assert tuple(expected_profile_cases) == matrix_module._MAX_CASES
     assert all(case in matrix_module._CASES for case in expected_profile_cases)
 
     tpukernel_cases = {
@@ -361,19 +395,22 @@ def test_portable_max_cases_cover_dtypes_broadcast_and_negative_infinity():
         "max.float16.dense": {},
         "max.bfloat16.dense": {},
         "max.float32.dense": {},
-        "max.float32.broadcast": {"broadcast_rhs": True},
-        "max.float32.negative-infinity": {"negative_infinity_sentinel": True},
+        "max.float32.broadcast": {
+            "broadcast_rhs": True
+        },
+        "max.float32.negative-infinity": {
+            "negative_infinity_sentinel": True
+        },
     }
 
 
 def test_portable_base_elementwise_matrix_includes_all_base_float_w_broadcasts():
     expected = {
         f"elementwise-{operation}-{dtype}-broadcast": (operation, dtype)
-        for operation in ("add", "sub", "mul", "div")
-        for dtype in ("fp16", "bf16", "fp32")
+        for operation in ("add", "sub", "mul", "div") for dtype in ("fp16", "bf16", "fp32")
     }
-    assert tpu_profile_worker._BROADCAST_CASES == expected
-    assert matrix_module._BROADCAST_CASES == tuple(expected)
+    assert expected == tpu_profile_worker._BROADCAST_CASES
+    assert tuple(expected) == matrix_module._BROADCAST_CASES
     assert all(case in matrix_module._CASES for case in expected)
 
 
@@ -450,7 +487,10 @@ def test_required_decoding_preflights_before_any_pcie_dispatch(monkeypatch, tmp_
         output_dir,
         (("sg2260e", "rv"),),
         ("elementwise-add",),
-        {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(tmp_path / "scratch")},
+        {
+            "PPL_PROJECT_ROOT": "/sdk",
+            "TMPDIR": str(tmp_path / "scratch")
+        },
     )
 
     assert status == 0
@@ -504,7 +544,10 @@ def test_failed_decoder_preflight_stops_matrix_without_dispatch(monkeypatch, tmp
         output_dir,
         (("sg2260e", "rv"),),
         ("elementwise-add",),
-        {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(tmp_path / "scratch")},
+        {
+            "PPL_PROJECT_ROOT": "/sdk",
+            "TMPDIR": str(tmp_path / "scratch")
+        },
     )
 
     assert status == 1
@@ -518,21 +561,36 @@ def test_failed_decoder_preflight_stops_matrix_without_dispatch(monkeypatch, tmp
 
 def test_validate_args_accepts_only_explicit_promoted_pcie_scope():
     matrix_module._validate_args(_matrix_args("pcie"))
-    matrix_module._validate_args(
-        _matrix_args("pcie", cases=None, all_pcie_cases=True))
+    matrix_module._validate_args(_matrix_args("pcie", cases=None, all_pcie_cases=True))
 
 
 @pytest.mark.parametrize(
     ("overrides", "diagnostic"),
     (
-        ({"allow_pcie": False}, "--allow-pcie and --allow-pcie-profile"),
-        ({"allow_pcie_profile": False}, "--allow-pcie and --allow-pcie-profile"),
-        ({"device_id": 1}, "only --device-id 0"),
-        ({"device_id": False}, "non-negative 32-bit"),
-        ({"chip": "bm1690"}, "explicit --chip sg2260e"),
-        ({"cases": None}, "explicit --case"),
-        ({"bm_cmodel_summary": None}, "--bm-cmodel-summary"),
-        ({"sg_cmodel_summary": None}, "--bm-cmodel-summary"),
+        ({
+            "allow_pcie": False
+        }, "--allow-pcie and --allow-pcie-profile"),
+        ({
+            "allow_pcie_profile": False
+        }, "--allow-pcie and --allow-pcie-profile"),
+        ({
+            "device_id": 1
+        }, "only --device-id 0"),
+        ({
+            "device_id": False
+        }, "non-negative 32-bit"),
+        ({
+            "chip": "bm1690"
+        }, "explicit --chip sg2260e"),
+        ({
+            "cases": None
+        }, "explicit --case"),
+        ({
+            "bm_cmodel_summary": None
+        }, "--bm-cmodel-summary"),
+        ({
+            "sg_cmodel_summary": None
+        }, "--bm-cmodel-summary"),
     ),
 )
 def test_validate_args_rejects_unsafe_or_unpromoted_pcie(overrides, diagnostic):
@@ -542,8 +600,7 @@ def test_validate_args_rejects_unsafe_or_unpromoted_pcie(overrides, diagnostic):
 
 def test_validate_args_rejects_pcie_controls_in_cmodel():
     with pytest.raises(RuntimeError, match="must not be supplied to CModel"):
-        matrix_module._validate_args(
-            _matrix_args("cmodel", allow_pcie=True, device_id=0))
+        matrix_module._validate_args(_matrix_args("cmodel", allow_pcie=True, device_id=0))
 
 
 def test_validate_args_requires_explicit_single_chip_for_cmodel_and_pcie():
@@ -554,11 +611,9 @@ def test_validate_args_requires_explicit_single_chip_for_cmodel_and_pcie():
 
 def _core_promotion_summary(*, chip, programming_model, case="elementwise-add"):
     if chip == "bm1690":
-        started_at, finished_at = (
-            "2026-09-08T00:00:00+00:00", "2026-09-08T00:01:00+00:00")
+        started_at, finished_at = ("2026-09-08T00:00:00+00:00", "2026-09-08T00:01:00+00:00")
     else:
-        started_at, finished_at = (
-            "2026-09-08T00:02:00+00:00", "2026-09-08T00:03:00+00:00")
+        started_at, finished_at = ("2026-09-08T00:02:00+00:00", "2026-09-08T00:03:00+00:00")
     return {
         "schema_version": matrix_module._SCHEMA_VERSION,
         "matrix_kind": matrix_module._MATRIX_KIND,
@@ -586,10 +641,12 @@ def _core_promotion_summary(*, chip, programming_model, case="elementwise-add"):
         }],
         "cases": {
             f"{chip}/{programming_model}/{case}": {
-                "status": "passed",
-                "raw_instruction_count": 1,
-                "numeric": _core_worker_payload(
-                    chip=chip, programming_model=programming_model, case=case),
+                "status":
+                    "passed",
+                "raw_instruction_count":
+                    1,
+                "numeric":
+                    _core_worker_payload(chip=chip, programming_model=programming_model, case=case),
             },
         },
     }
@@ -597,16 +654,14 @@ def _core_promotion_summary(*, chip, programming_model, case="elementwise-add"):
 
 def _promotion_fixture(monkeypatch, tmp_path):
     source = _source_identity()
-    monkeypatch.setattr(
-        matrix_module, "git_source_identity", lambda _repo_root: dict(source))
+    monkeypatch.setattr(matrix_module, "git_source_identity", lambda _repo_root: dict(source))
     bm_path = tmp_path / "bm.json"
     sg_path = tmp_path / "sg.json"
     bm = _core_promotion_summary(chip="bm1690", programming_model="tpukernel")
     sg = _core_promotion_summary(chip="sg2260e", programming_model="rv")
     bm_path.write_text(json.dumps(bm), encoding="utf-8")
     sg_path.write_text(json.dumps(sg), encoding="utf-8")
-    args = _matrix_args(
-        "pcie", bm_cmodel_summary=bm_path, sg_cmodel_summary=sg_path)
+    args = _matrix_args("pcie", bm_cmodel_summary=bm_path, sg_cmodel_summary=sg_path)
     return SimpleNamespace(
         source=source,
         bm=bm,
@@ -628,8 +683,7 @@ def _validate_promotion(fixture, tmp_path):
     )
 
 
-def test_pcie_promotion_accepts_bm_and_sg_content_matched_evidence(
-        monkeypatch, tmp_path):
+def test_pcie_promotion_accepts_bm_and_sg_content_matched_evidence(monkeypatch, tmp_path):
     fixture = _promotion_fixture(monkeypatch, tmp_path)
 
     evidence = _validate_promotion(fixture, tmp_path)
@@ -644,8 +698,8 @@ def test_pcie_promotion_accepts_bm_and_sg_content_matched_evidence(
     "failure",
     ("missing-bm-case", "toolchain-mismatch", "source-mismatch", "numeric-mismatch"),
 )
-def test_pcie_promotion_rejects_incomplete_or_identity_mixed_evidence(
-        monkeypatch, tmp_path, failure):
+def test_pcie_promotion_rejects_incomplete_or_identity_mixed_evidence(monkeypatch, tmp_path,
+                                                                      failure):
     fixture = _promotion_fixture(monkeypatch, tmp_path)
     if failure == "missing-bm-case":
         fixture.bm["cases"] = {}
@@ -739,7 +793,10 @@ def test_pcie_per_case_identity_guard_runs_before_dispatch(monkeypatch, tmp_path
         output_dir,
         (("sg2260e", "rv"),),
         ("elementwise-add", "elementwise-sub"),
-        {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(tmp_path / "scratch")},
+        {
+            "PPL_PROJECT_ROOT": "/sdk",
+            "TMPDIR": str(tmp_path / "scratch")
+        },
     )
 
     assert status == 1
@@ -752,8 +809,7 @@ def test_pcie_per_case_identity_guard_runs_before_dispatch(monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize("interrupted", (False, True))
-def test_failed_postflight_is_not_retried_on_a_suspect_board(
-        monkeypatch, tmp_path, interrupted):
+def test_failed_postflight_is_not_retried_on_a_suspect_board(monkeypatch, tmp_path, interrupted):
     events = []
 
     class BoardHealthError(RuntimeError):
@@ -791,8 +847,10 @@ def test_failed_postflight_is_not_retried_on_a_suspect_board(
     def invoke_matrix():
         return matrix_module._run_matrix(
             _matrix_args("pcie"), tmp_path, output_dir, (("sg2260e", "rv"),),
-            ("elementwise-add", "elementwise-sub"),
-            {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(tmp_path / "scratch")})
+            ("elementwise-add", "elementwise-sub"), {
+                "PPL_PROJECT_ROOT": "/sdk",
+                "TMPDIR": str(tmp_path / "scratch")
+            })
 
     if interrupted:
         with pytest.raises(KeyboardInterrupt):
@@ -814,9 +872,8 @@ def test_failed_postflight_is_not_retried_on_a_suspect_board(
     assert result["status"] == ("cancelled" if interrupted else "failed")
     assert result["execution_status"] == "passed"
     assert result["failed_phase"] == "board-postflight-settle"
-    assert result["error"] == (
-        "board postflight was interrupted" if interrupted else
-        "postflight board health failed")
+    assert result["error"] == ("board postflight was interrupted"
+                               if interrupted else "postflight board health failed")
     assert result["artifact_dir"] == "profile"
     assert result["raw_instruction_count"] == 1
     assert result["numeric"] == {"fixture": "worker-payload"}
@@ -824,11 +881,15 @@ def test_failed_postflight_is_not_retried_on_a_suspect_board(
         assert "board_postflight_failure" not in result
     else:
         assert result["board_postflight_failure"] == {
-            "samples": [{"tpu_util": "9%"}], "settled": False}
+            "samples": [{
+                "tpu_util": "9%"
+            }],
+            "settled": False
+        }
 
 
-def test_final_identity_capture_failure_cannot_leave_passing_summary(
-        monkeypatch, tmp_path):
+def test_final_identity_capture_failure_cannot_leave_passing_summary(monkeypatch, tmp_path):
+
     class FakeProfiler:
 
         def __init__(self, config):
@@ -838,8 +899,7 @@ def test_final_identity_capture_failure_cannot_leave_passing_summary(
             return _report()
 
     monkeypatch.setattr(matrix_module, "TPUInstructionProfiler", FakeProfiler)
-    monkeypatch.setattr(
-        matrix_module, "git_source_identity", lambda _repo_root: _source_identity())
+    monkeypatch.setattr(matrix_module, "git_source_identity", lambda _repo_root: _source_identity())
     captures = iter((_toolchain_identity("cmodel"), RuntimeError("identity unavailable")))
 
     def capture(_environment, _runtime_mode):
@@ -854,16 +914,15 @@ def test_final_identity_capture_failure_cannot_leave_passing_summary(
         "pin_native_worker_libraries",
         lambda environment, _identity: dict(environment),
     )
-    monkeypatch.setattr(
-        matrix_module, "_worker_payload", lambda _path: {"fixture": "worker-payload"})
-    monkeypatch.setattr(
-        matrix_module, "_validate_worker_payload", lambda _payload, **_expected: None)
+    monkeypatch.setattr(matrix_module, "_worker_payload",
+                        lambda _path: {"fixture": "worker-payload"})
+    monkeypatch.setattr(matrix_module, "_validate_worker_payload",
+                        lambda _payload, **_expected: None)
     output_dir = tmp_path / "matrix"
     output_dir.mkdir()
 
-    status = matrix_module._run_matrix(
-        _matrix_args(), tmp_path, output_dir, (("sg2260e", "rv"),),
-        ("elementwise-add",), {"PPL_PROJECT_ROOT": "/sdk"})
+    status = matrix_module._run_matrix(_matrix_args(), tmp_path, output_dir, (("sg2260e", "rv"),),
+                                       ("elementwise-add",), {"PPL_PROJECT_ROOT": "/sdk"})
 
     assert status == 1
     summary = json.loads((output_dir / "summary.json").read_text())
@@ -872,8 +931,7 @@ def test_final_identity_capture_failure_cannot_leave_passing_summary(
     assert summary["failed_phase"] == "final-identity-check"
 
 
-def test_main_holds_one_exclusive_device_session_and_cleans_scratch(
-        monkeypatch, tmp_path):
+def test_main_holds_one_exclusive_device_session_and_cleans_scratch(monkeypatch, tmp_path):
     events = []
     output_dir = tmp_path / "matrix"
     args = _matrix_args("pcie", output_dir=output_dir)
@@ -908,8 +966,8 @@ def test_main_holds_one_exclusive_device_session_and_cleans_scratch(
         original_cleanup(path)
 
     monkeypatch.setattr(matrix_module, "_parse_args", lambda: args)
-    monkeypatch.setattr(
-        matrix_module, "_worker_environment", lambda *_args: {"PPL_PROJECT_ROOT": "/sdk"})
+    monkeypatch.setattr(matrix_module, "_worker_environment",
+                        lambda *_args: {"PPL_PROJECT_ROOT": "/sdk"})
     monkeypatch.setattr(matrix_module, "_run_matrix", run)
     monkeypatch.setattr(matrix_module, "TPUInstructionProfiler", FakeProfiler)
     monkeypatch.setattr(matrix_module, "remove_execution_scratch", cleanup)
@@ -934,12 +992,11 @@ def test_main_cleans_scratch_when_environment_construction_fails(monkeypatch, tm
     assert not any(output_dir.glob(".scratch-*"))
 
 
-def test_main_rejects_even_empty_existing_output_to_prevent_runner_race(
-        monkeypatch, tmp_path):
+def test_main_rejects_even_empty_existing_output_to_prevent_runner_race(monkeypatch, tmp_path):
     output_dir = tmp_path / "matrix"
     output_dir.mkdir()
-    monkeypatch.setattr(
-        matrix_module, "_parse_args", lambda: _matrix_args("cmodel", output_dir=output_dir))
+    monkeypatch.setattr(matrix_module, "_parse_args",
+                        lambda: _matrix_args("cmodel", output_dir=output_dir))
 
     with pytest.raises(RuntimeError, match="existing matrix output directory"):
         matrix_module.main()

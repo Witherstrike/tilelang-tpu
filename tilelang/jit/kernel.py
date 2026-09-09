@@ -61,8 +61,8 @@ class JITKernel(object):
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
-        execution_backend : Literal["dlpack", "ctypes"], optional
-            Execution backend to use for kernel execution (default: "dlpack").
+        execution_backend : Literal["dlpack", "ctypes", "cython"], optional
+            Wrapper used to invoke the compiled kernel (default: "cython").
         target : Union[str, Target], optional
             Compilation target, either as a string or a TVM Target object (default: "auto").
         target_host : Union[str, Target], optional
@@ -76,6 +76,8 @@ class JITKernel(object):
                 "tl.disable_tma_lower": bool, default: False
         from_database : bool, optional
             Whether to create a TorchFunction from a database.
+        runtime_mode : Literal["pcie", "cmodel"], optional
+            TPU execution environment. Leave unset for non-TPU targets.
         """
         self.execution_backend = execution_backend
         self.target_host = target_host

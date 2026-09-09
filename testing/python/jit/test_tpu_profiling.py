@@ -1045,9 +1045,9 @@ def test_pcie_device_lock_is_session_wide_reentrant_and_exclusive(tmp_path, monk
         with TPUInstructionProfiler.exclusive_pcie_device(17) as nested:
             assert nested == lock_path
             assert session_path.is_file()
-        with lock_path.open("a+", encoding="utf-8") as competitor:
-            with pytest.raises(BlockingIOError):
-                fcntl.flock(competitor.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with lock_path.open("a+", encoding="utf-8") as competitor, \
+                pytest.raises(BlockingIOError):
+            fcntl.flock(competitor.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     assert not session_path.exists()
     with lock_path.open("a+", encoding="utf-8") as available:
@@ -1059,13 +1059,17 @@ def test_pcie_device_lock_rejects_crash_persistent_prior_session(tmp_path, monke
     monkeypatch.setattr(tpu_profiling_module, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
     marker = tmp_path / "tilelang-tpu-device-8.session.json"
     marker.write_text(
-        json.dumps({"status": "active", "device_id": 8, "owner_pid": 1234}),
+        json.dumps({
+            "status": "active",
+            "device_id": 8,
+            "owner_pid": 1234
+        }),
         encoding="utf-8",
     )
 
-    with pytest.raises(TPUProfilingError, match="incomplete prior session"):
-        with TPUInstructionProfiler.exclusive_pcie_device(8):
-            pass
+    with pytest.raises(TPUProfilingError, match="incomplete prior session"), \
+            TPUInstructionProfiler.exclusive_pcie_device(8):
+        pass
 
     assert marker.is_file()
 
@@ -1078,18 +1082,18 @@ def test_pcie_device_quarantine_is_persistent_and_never_auto_cleared(tmp_path, m
         observed = TPUInstructionProfiler.fail_closed_pcie_device(
             3, process_group=8765, reason="unit-test unreaped process group")
         assert observed == marker
-        with pytest.raises(TPUProfilingError, match="became unsafe"):
-            with TPUInstructionProfiler.exclusive_pcie_device(3):
-                pass
+        with pytest.raises(TPUProfilingError, match="became unsafe"), \
+                TPUInstructionProfiler.exclusive_pcie_device(3):
+            pass
 
     payload = json.loads(marker.read_text(encoding="utf-8"))
     assert payload["status"] == "quarantined"
     assert payload["device_id"] == 3
     assert payload["process_group"] == 8765
     assert payload["process_group_known"] is True
-    with pytest.raises(TPUProfilingError, match="fail-closed"):
-        with TPUInstructionProfiler.exclusive_pcie_device(3):
-            pass
+    with pytest.raises(TPUProfilingError, match="fail-closed"), \
+            TPUInstructionProfiler.exclusive_pcie_device(3):
+        pass
 
 
 def test_pcie_device_fail_closed_without_observed_process_group(tmp_path, monkeypatch):
@@ -1148,10 +1152,10 @@ def test_pcie_device_fail_closed_rejects_invalid_process_group_without_poisoning
         tmp_path, monkeypatch, process_group):
     monkeypatch.setattr(tpu_profiling_module, "_PCIE_DEVICE_LOCK_ROOT", tmp_path)
 
-    with TPUInstructionProfiler.exclusive_pcie_device(14):
-        with pytest.raises(ValueError, match="process_group must be a positive integer or None"):
-            TPUInstructionProfiler.fail_closed_pcie_device(
-                14, reason="postflight incomplete", process_group=process_group)
+    with TPUInstructionProfiler.exclusive_pcie_device(14), \
+            pytest.raises(ValueError, match="process_group must be a positive integer or None"):
+        TPUInstructionProfiler.fail_closed_pcie_device(
+            14, reason="postflight incomplete", process_group=process_group)
 
     assert not (tmp_path / "tilelang-tpu-device-14.session.json").exists()
     assert not (tmp_path / "tilelang-tpu-device-14.quarantine.json").exists()
@@ -1184,15 +1188,15 @@ def test_pcie_quarantine_creation_failure_retains_active_session(tmp_path, monke
         with pytest.raises(TPUProfilingError, match="session marker .* retained fail-closed"):
             TPUInstructionProfiler.fail_closed_pcie_device(
                 6, process_group=999, reason="simulated incomplete cleanup")
-        with pytest.raises(TPUProfilingError, match="became unsafe"):
-            with TPUInstructionProfiler.exclusive_pcie_device(6):
-                pass
+        with pytest.raises(TPUProfilingError, match="became unsafe"), \
+                TPUInstructionProfiler.exclusive_pcie_device(6):
+            pass
 
     assert session.is_file()
     assert not quarantine.exists()
-    with pytest.raises(TPUProfilingError, match="incomplete prior session"):
-        with TPUInstructionProfiler.exclusive_pcie_device(6):
-            pass
+    with pytest.raises(TPUProfilingError, match="incomplete prior session"), \
+            TPUInstructionProfiler.exclusive_pcie_device(6):
+        pass
 
 
 def test_pcie_fail_closed_keyboard_interrupt_retains_active_session(tmp_path, monkeypatch):
@@ -1209,16 +1213,16 @@ def test_pcie_fail_closed_keyboard_interrupt_retains_active_session(tmp_path, mo
         return real_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(tpu_profiling_module.os, "open", interrupt_quarantine_open)
-    with pytest.raises(KeyboardInterrupt):
-        with TPUInstructionProfiler.exclusive_pcie_device(16):
-            TPUInstructionProfiler.fail_closed_pcie_device(
-                16, reason="postflight observation was interrupted")
+    with pytest.raises(KeyboardInterrupt), \
+            TPUInstructionProfiler.exclusive_pcie_device(16):
+        TPUInstructionProfiler.fail_closed_pcie_device(
+            16, reason="postflight observation was interrupted")
 
     assert session.is_file()
     assert not quarantine.exists()
-    with pytest.raises(TPUProfilingError, match="incomplete prior session"):
-        with TPUInstructionProfiler.exclusive_pcie_device(16):
-            pass
+    with pytest.raises(TPUProfilingError, match="incomplete prior session"), \
+            TPUInstructionProfiler.exclusive_pcie_device(16):
+        pass
 
 
 def test_pcie_probe_quarantines_incomplete_process_group_cleanup(tmp_path, monkeypatch):
@@ -1232,13 +1236,13 @@ def test_pcie_probe_quarantines_incomplete_process_group_cleanup(tmp_path, monke
         cleanup_complete=False,
         process_group=4567,
     )
-    monkeypatch.setattr(
-        tpu_profiling_module, "run_tpu_supervised_command", lambda *args, **kwargs: incomplete)
+    monkeypatch.setattr(tpu_profiling_module, "run_tpu_supervised_command",
+                        lambda *args, **kwargs: incomplete)
 
-    with TPUInstructionProfiler.exclusive_pcie_device(4):
-        with pytest.raises(TPUProfilingError, match="quarantined"):
-            TPUInstructionProfiler.run_supervised_pcie_probe(
-                4, [sys.executable, "-c", "pass"], cwd=tmp_path)
+    with TPUInstructionProfiler.exclusive_pcie_device(4), \
+            pytest.raises(TPUProfilingError, match="quarantined"):
+        TPUInstructionProfiler.run_supervised_pcie_probe(
+            4, [sys.executable, "-c", "pass"], cwd=tmp_path)
 
     marker = tmp_path / "tilelang-tpu-device-4.quarantine.json"
     assert json.loads(marker.read_text(encoding="utf-8"))["process_group"] == 4567

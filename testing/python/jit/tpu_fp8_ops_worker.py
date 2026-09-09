@@ -22,10 +22,11 @@ _RESULT_SCHEMA_VERSION = 1
 
 def _emit_result(payload) -> None:
     print(
-        _RESULT_PREFIX + json.dumps(
-            payload, sort_keys=True, separators=(",", ":"), allow_nan=False),
+        _RESULT_PREFIX +
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False),
         flush=True,
     )
+
 
 _PCIE_GATE_VARIABLES = (
     "TILELANG_TPU_ALLOW_PCIE_LOAD",
@@ -397,9 +398,8 @@ def main() -> None:
             _run_fill_zero(dtype, torch_dtype, chip, runtime_mode)
         elif args.case.startswith("cast-"):
             _run_cast(args.case[len("cast-"):], dtype, torch_dtype, chip, runtime_mode)
-        elif args.case in (
-                "add", "sub", "mul", "max", "add-broadcast", "sub-broadcast",
-                "mul-broadcast", "max-broadcast"):
+        elif args.case in ("add", "sub", "mul", "max", "add-broadcast", "sub-broadcast",
+                           "mul-broadcast", "max-broadcast"):
             operation = _elementwise_operation(args.case)
             _run_elementwise(
                 operation,
@@ -444,7 +444,9 @@ def main() -> None:
         "runtime_mode": runtime_mode,
         "dtype": args.dtype,
         "case": args.case,
-        "metrics": {"passed": True},
+        "metrics": {
+            "passed": True
+        },
     })
 
 

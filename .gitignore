@@ -102,30 +102,10 @@ tilelang/lib
 # under the separately ignored research/artifacts/ tree.
 /tilelang-tpu-profiles/
 
-# TPU demo C sources are compiler outputs.  Keep the Python kernels as the
-# source of truth and regenerate C in an isolated build workspace.
-/tpu_demo/**/*.c
-
-# Local SDK/PDF investigation artifacts stay untracked. Maintained design,
-# capability-contract, profiling, and gap reports are explicit exceptions.
-/research/*
 # Local experiment logs and raw outputs. Keep them out of Git deliberately.
 /research/artifacts/
+# Historical local ISA notes were moved to .local_content. Keep the retired
+# path ignored so it cannot be recreated accidentally.
+/research/rv_tensor_extension/
+# Local SDK manuals and converted reference material are not repository data.
 /.local_content/
-!/research/upstream-gap/
-!/research/upstream-gap/README.md
-!/research/ppl-profiling/
-!/research/ppl-profiling/README.md
-!/research/rv-backend/
-!/research/rv-backend/README.md
-!/research/rv-backend/TESTING.md
-!/research/tpu-op-contract/
-!/research/tpu-op-contract/README.md
-!/research/tpu-op-contract/schema.json
-!/research/tpu-op-contract/contract.json
-!/research/tpu-op-contract/validate.py
-!/research/tpu-backend-design/
-!/research/tpu-backend-design/README.md
-!/research/tpu-backend-design/test-report.md
-!/research/tpu-demo-ops/
-!/research/tpu-demo-ops/README.md

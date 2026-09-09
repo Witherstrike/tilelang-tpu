@@ -11,8 +11,13 @@ from typing import Optional, Sequence
 from tpu_demo.cases import CHIPS, PROGRAMMING_MODELS, build_cases, case_by_id
 
 
-def run_case(case_id: str, *, chip: str, programming_model: str, runtime_mode: str,
-             allow_pcie: bool = False, device_id: Optional[int] = None,
+def run_case(case_id: str,
+             *,
+             chip: str,
+             programming_model: str,
+             runtime_mode: str,
+             allow_pcie: bool = False,
+             device_id: Optional[int] = None,
              seed: int = 0) -> dict:
     case = case_by_id(case_id)
     common = {
@@ -47,13 +52,15 @@ def run_case(case_id: str, *, chip: str, programming_model: str, runtime_mode: s
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", choices=tuple(case.case_id for case in build_cases()),
-                        required=True)
+    parser.add_argument(
+        "--case", choices=tuple(case.case_id for case in build_cases()), required=True)
     parser.add_argument("--chip", choices=CHIPS, default="sg2260e")
-    parser.add_argument("--programming-model", choices=PROGRAMMING_MODELS,
-                        default="tpukernel")
-    parser.add_argument("--runtime-mode", choices=("cmodel",), default="cmodel",
-                        help="board execution is available only through tpu_demo_ops_matrix.py")
+    parser.add_argument("--programming-model", choices=PROGRAMMING_MODELS, default="tpukernel")
+    parser.add_argument(
+        "--runtime-mode",
+        choices=("cmodel",),
+        default="cmodel",
+        help="board execution is available only through tpu_demo_ops_matrix.py")
     parser.add_argument("--seed", type=int, default=0)
     return parser
 

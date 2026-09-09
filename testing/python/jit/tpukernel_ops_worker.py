@@ -498,8 +498,8 @@ def _run_elementwise(spec: CaseSpec, chip: str, runtime_mode: str, tilelang: Any
     if operation == "max" and spec.parameters.get("negative_infinity_sentinel"):
         if dtype != "float32" or rhs_shape != shape:
             raise AssertionError("the max negative-infinity sentinel is a dense FP32 probe")
-        finite = torch.linspace(-8.0, 8.0, steps=shape[0] * shape[1],
-                                dtype=torch.float32).reshape(shape)
+        finite = torch.linspace(
+            -8.0, 8.0, steps=shape[0] * shape[1], dtype=torch.float32).reshape(shape)
         lhs = finite.clone()
         rhs = torch.flip(finite, dims=(1,)).clone()
         lhs[:, 0::4] = -float("inf")

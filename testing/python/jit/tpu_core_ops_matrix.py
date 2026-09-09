@@ -18,7 +18,6 @@ import argparse
 from datetime import datetime, timezone
 import json
 import math
-import os
 from pathlib import Path
 import sys
 import tempfile
@@ -82,13 +81,10 @@ _MAX_CASES = ("elementwise-max-fp16-dense", "elementwise-max-bf16-dense",
               "elementwise-max-bf16-broadcast", "elementwise-max-fp32-broadcast",
               "elementwise-max-fp32-negative-infinity")
 _BROADCAST_CASES = tuple(
-    f"elementwise-{operation}-{dtype}-broadcast"
-    for operation in ("add", "sub", "mul", "div")
-    for dtype in ("fp16", "bf16", "fp32")
-)
+    f"elementwise-{operation}-{dtype}-broadcast" for operation in ("add", "sub", "mul", "div")
+    for dtype in ("fp16", "bf16", "fp32"))
 _CASES = ("elementwise-add", "elementwise-sub", "elementwise-mul", "elementwise-div",
-          *_BROADCAST_CASES, *_MAX_CASES, "matmul",
-          *_COPY_CASES)
+          *_BROADCAST_CASES, *_MAX_CASES, "matmul", *_COPY_CASES)
 _MATRIX_KIND = "tpu_core_ops"
 _SCHEMA_VERSION = 1
 _WORKER_RESULT_PREFIX = "TPU_CORE_NUMERIC_RESULT="
@@ -158,8 +154,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         if args.device_id != 0:
             raise RuntimeError("this single-card validation host accepts only --device-id 0")
         if args.chip != "sg2260e":
-            raise RuntimeError(
-                "this machine requires explicit --chip sg2260e for PCIe cases")
+            raise RuntimeError("this machine requires explicit --chip sg2260e for PCIe cases")
         if not args.cases and not args.all_pcie_cases:
             raise RuntimeError("PCIe requires an explicit --case or --all-pcie-cases")
         if args.bm_cmodel_summary is None or args.sg_cmodel_summary is None:
@@ -171,9 +166,9 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise RuntimeError("--all-pcie-cases is valid only with PCIe")
     elif args.chip is None:
         raise RuntimeError("CModel promotion requires one explicit --chip per invocation")
-    if args.runtime_mode != "pcie" and (
-            args.pcie_decoder_python is not None or args.pcie_decoder_pythonpath or
-            args.require_decoded_timing or args.bm_cmodel_summary or args.sg_cmodel_summary):
+    if args.runtime_mode != "pcie" and (args.pcie_decoder_python is not None or
+                                        args.pcie_decoder_pythonpath or args.require_decoded_timing
+                                        or args.bm_cmodel_summary or args.sg_cmodel_summary):
         raise RuntimeError("PCIe decoder/promotion options must not be supplied to CModel")
 
 
@@ -182,8 +177,7 @@ def _utc_now() -> str:
 
 
 def _worker_payload(stdout_path: Path) -> dict[str, Any]:
-    return unique_prefixed_json_payload(
-        stdout_path, _WORKER_RESULT_PREFIX, "core-op worker")
+    return unique_prefixed_json_payload(stdout_path, _WORKER_RESULT_PREFIX, "core-op worker")
 
 
 def _validate_worker_payload(
@@ -297,9 +291,8 @@ def _validate_pcie_promotion(
                     case=expected_case,
                 )
     if missing:
-        raise RuntimeError(
-            "PCIe core-op promotion evidence is missing passing cases: "
-            + ", ".join(sorted(set(missing))))
+        raise RuntimeError("PCIe core-op promotion evidence is missing passing cases: " +
+                           ", ".join(sorted(set(missing))))
     return {
         "git_commit": commit,
         "source_state_sha256": source_digest,
@@ -334,10 +327,11 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
         "passed_case_count": 0,
         "failed_case_count": 0,
         "cancelled_case_count": 0,
-        "scheduled": [
-            {"chip": chip, "programming_model": model, "case": case}
-            for chip, model in configurations for case in cases
-        ],
+        "scheduled": [{
+            "chip": chip,
+            "programming_model": model,
+            "case": case
+        } for chip, model in configurations for case in cases],
         "target_scope": matrix_target_scope(configurations),
         "cases": {},
     }
@@ -349,10 +343,10 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
     }
 
     try:
-        summary["toolchain_identity"] = toolchain_identity(
-            worker_environment_values, args.runtime_mode)
-        worker_environment_values = pin_native_worker_libraries(
-            worker_environment_values, summary["toolchain_identity"])
+        summary["toolchain_identity"] = toolchain_identity(worker_environment_values,
+                                                           args.runtime_mode)
+        worker_environment_values = pin_native_worker_libraries(worker_environment_values,
+                                                                summary["toolchain_identity"])
         if args.runtime_mode == "pcie":
             assert args.device_id is not None
             summary["promotion_evidence"] = _validate_pcie_promotion(
@@ -390,10 +384,12 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                 **decoder_config,
             )
             summary["decoder_preflight"] = {
-                "status": "ready",
-                "identity": dict(
-                    TPUInstructionProfiler(preflight_config).preflight_pcie_decoder(
-                        environment=worker_environment_values)),
+                "status":
+                    "ready",
+                "identity":
+                    dict(
+                        TPUInstructionProfiler(preflight_config).preflight_pcie_decoder(
+                            environment=worker_environment_values)),
             }
         if args.runtime_mode == "pcie":
             assert args.device_id is not None
@@ -432,8 +428,8 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
             try:
                 if args.runtime_mode == "pcie":
                     assert_source_identity_unchanged(repo_root, summary)
-                    assert_toolchain_identity_unchanged(
-                        worker_environment_values, summary["toolchain_identity"])
+                    assert_toolchain_identity_unchanged(worker_environment_values,
+                                                        summary["toolchain_identity"])
                 config = TPUProfilingConfig(
                     chip=chip,
                     programming_model=programming_model,
@@ -450,9 +446,8 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                 launch_attempted = True
                 report = (
                     profiler.run_pcie(command, environment=worker_environment_values)
-                    if args.runtime_mode == "pcie"
-                    else profiler.run_cmodel(command, environment=worker_environment_values)
-                )
+                    if args.runtime_mode == "pcie" else profiler.run_cmodel(
+                        command, environment=worker_environment_values))
                 _validate_profile_report(report, require_decoded_timing=args.require_decoded_timing)
                 numeric = _worker_payload(Path(report.stdout_path))
                 _validate_worker_payload(
@@ -462,13 +457,11 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                     runtime_mode=args.runtime_mode,
                     case=case,
                 )
-                result = _report_summary(
-                    report, require_decoded_timing=args.require_decoded_timing)
+                result = _report_summary(report, require_decoded_timing=args.require_decoded_timing)
                 result["numeric"] = numeric
                 if args.runtime_mode == "pcie":
                     assert args.device_id is not None
-                    tpu_smi = Path(
-                        summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
+                    tpu_smi = Path(summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
                     postflight_attempted = True
                     result["board_postflight"] = board_health(
                         args.device_id, tpu_smi, quarantine_on_failure=True)
@@ -495,12 +488,10 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                     summary["cases"][key] = result
                     summary["completed_case_count"] += 1
                     summary["cancelled_case_count"] += 1
-                if (args.runtime_mode == "pcie" and launch_attempted and
-                        not postflight_attempted):
+                if (args.runtime_mode == "pcie" and launch_attempted and not postflight_attempted):
                     assert args.device_id is not None
                     try:
-                        tpu_smi = Path(
-                            summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
+                        tpu_smi = Path(summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
                         summary["board_after_cancel"] = board_health(
                             args.device_id, tpu_smi, quarantine_on_failure=True)
                     except Exception as health_error:
@@ -527,12 +518,10 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                         "error_type": type(exc).__name__,
                         "error": str(exc),
                     }
-                if (args.runtime_mode == "pcie" and launch_attempted and
-                        not postflight_attempted):
+                if (args.runtime_mode == "pcie" and launch_attempted and not postflight_attempted):
                     assert args.device_id is not None
                     try:
-                        tpu_smi = Path(
-                            summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
+                        tpu_smi = Path(summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
                         result["board_after_failure"] = board_health(
                             args.device_id, tpu_smi, quarantine_on_failure=True)
                     except Exception as health_error:
@@ -553,12 +542,9 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
 
     try:
         ending_identity = git_source_identity(repo_root)
-        source_fields = (
-            "git_commit", "implementation_worktree_dirty", "source_state_sha256")
-        source_changed = (
-            not isinstance(summary.get("source_state_sha256"), str)
-            or any(ending_identity.get(field) != summary.get(field) for field in source_fields)
-        )
+        source_fields = ("git_commit", "implementation_worktree_dirty", "source_state_sha256")
+        source_changed = (not isinstance(summary.get("source_state_sha256"), str) or any(
+            ending_identity.get(field) != summary.get(field) for field in source_fields))
         ending_toolchain = toolchain_identity(worker_environment_values, args.runtime_mode)
     except KeyboardInterrupt:
         summary.update({
@@ -638,8 +624,8 @@ def main() -> int:
             try:
                 with TPUInstructionProfiler.exclusive_pcie_device(args.device_id):
                     lock_acquired = True
-                    return _run_matrix(
-                        args, repo_root, output_dir, configurations, cases, environment)
+                    return _run_matrix(args, repo_root, output_dir, configurations, cases,
+                                       environment)
             except Exception as error:
                 summary_path = output_dir / "summary.json"
                 failure: dict[str, Any] = {}

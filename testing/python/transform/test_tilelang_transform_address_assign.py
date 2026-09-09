@@ -44,8 +44,9 @@ def _raw_local_allocations(*, data_names, buffer_names=None):
     """Build nested Allocate/DeclBuffer nodes without parser name uniquing."""
     if buffer_names is None:
         buffer_names = data_names
+    assert len(data_names) == len(buffer_names)
     body = tvm.tir.Evaluate(0)
-    for data_name, buffer_name in reversed(list(zip(data_names, buffer_names))):
+    for data_name, buffer_name in reversed(list(zip(data_names, buffer_names))):  # noqa: B905
         pointer_type = tvm.ir.PointerType(tvm.ir.PrimType("float32"), "shared")
         data = tvm.tir.Var(data_name, pointer_type)
         buffer = tvm.tir.decl_buffer((32,), "float32", name=buffer_name, data=data, scope="shared")
@@ -270,8 +271,8 @@ def _liveness_copy(src, dst):
 
 
 def _liveness_attrs(body, target_spec):
-    function = tvm.tir.PrimFunc(tvm.tir.analysis.undefined_vars(body), body).with_attr(
-        "global_symbol", "main")
+    function = tvm.tir.PrimFunc(tvm.tir.analysis.undefined_vars(body),
+                                body).with_attr("global_symbol", "main")
     target = tvm.target.Target(target_spec)
     mod = tvm.tir.transform.BindTarget(target)(tvm.IRModule({"main": function}))
     return tilelang.transform.AddressAssign()(mod)["main"].attrs
@@ -287,8 +288,8 @@ TPU_ADDRESS_TARGETS = [
 @pytest.mark.parametrize("target_spec", TPU_ADDRESS_TARGETS)
 @pytest.mark.parametrize("loop_kind", ["for", "symbolic", "while", "nested"])
 @pytest.mark.parametrize("initialize_before_loop", [False, True])
-def test_loop_external_allocations_cannot_alias_later_scratch(
-        target_spec, loop_kind, initialize_before_loop):
+def test_loop_external_allocations_cannot_alias_later_scratch(target_spec, loop_kind,
+                                                              initialize_before_loop):
     weight, scratch, out = [_liveness_buffer(name) for name in ("weight", "scratch", "out")]
     read = _liveness_copy(weight, out)
     if loop_kind == "nested":
@@ -315,12 +316,12 @@ def test_loop_external_allocations_cannot_alias_later_scratch(
 @pytest.mark.parametrize("loop_extent", [None, 0, 1])
 def test_no_backedge_preserves_sequential_address_reuse(loop_extent):
     weight, scratch, out = [_liveness_buffer(name) for name in ("weight", "scratch", "out")]
-    body = tvm.tir.SeqStmt([
-        _liveness_copy(weight, out), _liveness_fill(scratch), _liveness_copy(scratch, out)
-    ])
+    body = tvm.tir.SeqStmt(
+        [_liveness_copy(weight, out),
+         _liveness_fill(scratch),
+         _liveness_copy(scratch, out)])
     if loop_extent is not None:
-        body = tvm.tir.For(tvm.tir.Var("i", "int32"), 0, loop_extent, tvm.tir.ForKind.SERIAL,
-                           body)
+        body = tvm.tir.For(tvm.tir.Var("i", "int32"), 0, loop_extent, tvm.tir.ForKind.SERIAL, body)
     body = tvm.tir.SeqStmt([_liveness_fill(weight), body])
     for buffer in (out, scratch, weight):
         body = _liveness_allocate(buffer, body)
@@ -335,7 +336,9 @@ def test_no_backedge_preserves_sequential_address_reuse(loop_extent):
 def test_loop_local_allocations_keep_sequential_address_reuse():
     weight, scratch, out = [_liveness_buffer(name) for name in ("weight", "scratch", "out")]
     body = tvm.tir.SeqStmt([
-        _liveness_fill(weight), _liveness_copy(weight, out), _liveness_fill(scratch),
+        _liveness_fill(weight),
+        _liveness_copy(weight, out),
+        _liveness_fill(scratch),
         _liveness_copy(scratch, out)
     ])
     for buffer in (out, scratch, weight):
@@ -355,12 +358,12 @@ def test_loop_local_scratch_can_reuse_addresses_without_clobbering_external_weig
     ]
     body = tvm.tir.SeqStmt([
         _liveness_copy(weight, out),
-        _liveness_allocate(scratch0, tvm.tir.SeqStmt([
-            _liveness_fill(scratch0), _liveness_copy(scratch0, out)
-        ])),
-        _liveness_allocate(scratch1, tvm.tir.SeqStmt([
-            _liveness_fill(scratch1), _liveness_copy(scratch1, out)
-        ])),
+        _liveness_allocate(
+            scratch0, tvm.tir.SeqStmt([_liveness_fill(scratch0),
+                                       _liveness_copy(scratch0, out)])),
+        _liveness_allocate(
+            scratch1, tvm.tir.SeqStmt([_liveness_fill(scratch1),
+                                       _liveness_copy(scratch1, out)])),
     ])
     body = tvm.tir.For(tvm.tir.Var("i", "int32"), 0, 2, tvm.tir.ForKind.SERIAL, body)
     body = _liveness_allocate(weight, tvm.tir.SeqStmt([_liveness_fill(weight), body]))
@@ -375,12 +378,11 @@ def test_loop_local_scratch_can_reuse_addresses_without_clobbering_external_weig
 
 
 def test_while_condition_local_read_survives_body_scratch_writes():
-    condition, scratch, out = [
-        _liveness_buffer(name) for name in ("condition", "scratch", "out")
-    ]
+    condition, scratch, out = [_liveness_buffer(name) for name in ("condition", "scratch", "out")]
     body = tvm.tir.While(
         tvm.tir.BufferLoad(condition, [0]) > 0,
-        tvm.tir.SeqStmt([_liveness_fill(scratch), _liveness_copy(scratch, out)]))
+        tvm.tir.SeqStmt([_liveness_fill(scratch),
+                         _liveness_copy(scratch, out)]))
     for buffer in (out, scratch, condition):
         body = _liveness_allocate(buffer, body)
     attrs = _liveness_attrs(body, TPU_ADDRESS_TARGETS[0])

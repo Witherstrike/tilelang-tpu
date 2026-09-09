@@ -37,7 +37,8 @@ def test_auto_target_never_implicitly_selects_a_tpu(monkeypatch):
     monkeypatch.setenv("TILELANG_TPU_CHIP", "sg2260e")
     monkeypatch.setenv("TILELANG_TPU_PROGRAMMING_MODEL", "rv")
     monkeypatch.setenv("PPL_PROJECT_ROOT", "/not/consulted/by-auto-target")
-    assert target_utils.determine_target("auto") == "c"
+    with pytest.raises(ValueError, match="complete TPU target"):
+        target_utils.determine_target("auto")
 
 
 def test_tpu_pipeline_does_not_run_unvalidated_pipeline_or_vector_passes(monkeypatch):
@@ -94,8 +95,8 @@ def test_direct_tpu_phase_entrypoints_reject_a_different_bound_identity(
     prim_func = tvm.tir.PrimFunc(
         [],
         tvm.tir.Evaluate(0),
-    ).with_attr("global_symbol", "phase_target_mismatch").with_attr(
-        "target", tvm.target.Target(function_target))
+    ).with_attr("global_symbol",
+                "phase_target_mismatch").with_attr("target", tvm.target.Target(function_target))
     mod = tvm.IRModule({"phase_target_mismatch": prim_func})
 
     with pytest.raises(ValueError, match=rf"{phase.__name__} target identity mismatch"):
@@ -147,6 +148,34 @@ def test_compile_forwards_only_canonical_target_and_runtime(monkeypatch):
 
     assert captured["target"] == target
     assert captured["runtime_mode"] == "cmodel"
+
+
+def test_jit_forwards_explicit_tpu_runtime_mode(monkeypatch):
+    captured = {}
+    adapter = object()
+
+    def fake_compile(*args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(adapter=adapter)
+
+    monkeypatch.setattr(jit_api, "compile", fake_compile)
+    result = jit_api.jit(
+        func=object(),
+        target=_tpu_target("sg2260e", "rv"),
+        runtime_mode="pcie",
+    )
+
+    assert result is adapter
+    assert captured["runtime_mode"] == "pcie"
+
+
+def test_tpu_target_kind_registration_matches_backend_contract():
+    options = tvm.target.TargetKind.options_from_name("tpu")
+    assert options["mcpu"] == "runtime.String"
+    assert options["tpu-programming-model"] == "runtime.String"
+
+    target = tvm.target.Target(_tpu_target("sg2260e", "rv"))
+    assert "tpu" in target.keys
 
 
 def test_tpu_chip_capabilities_are_explicit_and_fail_closed():

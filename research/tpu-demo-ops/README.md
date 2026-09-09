@@ -5,11 +5,11 @@
 本报告覆盖 `tpu_demo` 中面向用户的 elementwise、matmul、RMSNorm、RMSNorm
 split-k、RoPE、SwiGLU 和 FlashAttention。公开数据类型为 FP16、BF16、FP32。
 
-当前 canonical 基线为：
+当前正式验收基线为：
 
-- revision：`e5774525e3a6e11d0d6010e979203c55181a8872`；
-- source state：`c49cf3594f2ce5d215e54d331a10ca0bbbf92bd6667fba3e172b2b3621f7f5c4`；
-- evidence root：`research/artifacts/2026-09-09/final-e5774525/`；
+- Git 提交：`e5774525e3a6e11d0d6010e979203c55181a8872`；
+- 源码快照标识：`c49cf3594f2ce5d215e54d331a10ca0bbbf92bd6667fba3e172b2b3621f7f5c4`；
+- 本地证据根目录：`research/artifacts/2026-09-09/final-e5774525/`（该目录已被 Git 忽略，不随仓库提交）；
 - 2 份 CModel summary 与 15 份 PCIe 分片 summary 均记录 `implementation_worktree_dirty=false`、
   `complete=true`、`status=passed`。
 
@@ -22,7 +22,7 @@ split-k、RoPE、SwiGLU 和 FlashAttention。公开数据类型为 FP16、BF16�
 ```text
 tpu_demo/cases.py                         能力和 case 注册
   -> tpu_demo/run.py                      唯一语义分派入口
-    -> <operator>/<operator>.py           TileLang builder + PyTorch oracle
+    -> <operator>/<operator>.py           TileLang builder + PyTorch 参考结果
       -> tpu_demo/common.py               target/runtime 门禁、编译、执行、比较
 
 testing/python/jit/tpu_demo_ops_matrix.py 矩阵、晋级门和首错停止
@@ -36,7 +36,7 @@ TPU-Kernel；SG2260E 接受 TPU-Kernel 与 RV Tensor。未实现的映射在注�
 不回退到另一后端，也不通过名字猜测能力。
 
 算子模块导入时不编译、不加载 runtime。用于验证单条 op 的程序放在 `testing/`，
-`tpu_demo/` 只保留可复用的用户级表达、输入生成器和 oracle。
+`tpu_demo/` 只保留可复用的用户级表达、输入生成器和参考结果。
 
 ## 3. 能力矩阵
 
@@ -67,7 +67,7 @@ elementwise 将公开张量分块搬入 local memory，执行 add/sub/mul/div �
 使用严格正且远离零的分母，当前证据不覆盖除零和异常值传播。
 
 matmul 使用 FP32 local accumulator 跨 K tile 累加。FP16/BF16 直接作为矩阵乘数；公开
-FP32 路径先把 A/B 转为 BF16 再进入矩阵引擎，结果仍写为 FP32。oracle 在同一边界量化
+FP32 路径先把 A/B 转为 BF16 再进入矩阵引擎，结果仍写为 FP32。参考结果在同一边界量化
 A/B，既维持 FP32 用户接口，也不把硬件不具备的 FP32 乘数能力写进契约。
 
 ### 4.2 RMSNorm、RoPE 与 SwiGLU
@@ -86,9 +86,9 @@ FlashAttention 使用 BSHD 布局和跨 K/V tile 的 online softmax。每轮保�
 
 三个变体分别检查常规数值、后一 tile 最大值下降时的历史最大值保持，以及 key-dependent
 value 对非均匀权重的敏感性。公开 FP32 路径先将 Q/K/V 量化为 BF16，softmax 状态保持
-FP32；oracle 复现 Q/K/V 的量化边界，但不把 probability tile 的实现舍入写成数学定义。
-当前 `is_causal` 只接受严格布尔值，并仅实现 `False`；对角 tile 内 mask 完成前，`True`
-必须 fail-closed。
+FP32；参考结果复现 Q/K/V 的量化边界，但不把 probability tile 的实现舍入写成数学定义。
+当前 `is_causal` 只接受严格布尔值，并仅实现 `False`；在完成对角 tile 内的 mask 之前，
+`True` 必须在编译期拒绝。
 
 所有 builder 当前只接受静态正整数 shape，并要求公开 extent 可被 tile 整除。实现尚无 tail
 predicate 或 masked DMA，因而非整 tile shape 不能靠向上取整后越界访问来“兼容”。
@@ -114,11 +114,11 @@ predicate 或 masked DMA，因而非整 tile shape 不能靠向上取整后越�
 
 ## 6. 分阶段验收结果
 
-| 阶段 | 调度范围 | 结果 | canonical evidence |
+| 阶段 | 调度范围 | 结果 | 验收证据（相对本地证据根目录） |
 | --- | --- | ---: | --- |
-| BM1690 CModel | TPU-Kernel 36 | 36/36 | [summary](../artifacts/2026-09-09/final-e5774525/demo-bm1690-cmodel/summary.json) |
-| SG2260E CModel | TPU-Kernel 36 + RV 15 | 51/51 | [summary](../artifacts/2026-09-09/final-e5774525/demo-sg2260e-cmodel-retry1/summary.json) |
-| SG2260E PCIe | 与 SG CModel 相同的 51 项 | 51/51 | [15 个分片](../artifacts/2026-09-09/final-e5774525/demo-sg2260e-pcie-shards/) |
+| BM1690 CModel | TPU-Kernel 36 | 36/36 | `demo-bm1690-cmodel/summary.json` |
+| SG2260E CModel | TPU-Kernel 36 + RV 15 | 51/51 | `demo-sg2260e-cmodel-retry1/summary.json` |
+| SG2260E PCIe | 与 SG CModel 相同的 51 项 | 51/51 | `demo-sg2260e-pcie-shards/`（15 个分片） |
 
 两份 CModel summary 和 15 份 PCIe 分片的 scheduled、completed、passed 分别相等，
 failed 与 cancelled 均为 0；15 个分片的 case 并集与 51 项清单严格相等，无重复或遗漏。
@@ -132,31 +132,31 @@ warm-up、重复采样、稳态统计或 recorder 开销校正，不能作为后
 
 ## 7. PCIe 安全闭环
 
-PCIe 只在 BM1690 与 SG2260E 的同 revision CModel summary 完整通过后晋级。每个 case 在
-fresh worker 中编译一次、执行一次；任一编译、加载、deadline、数值、raw、decoder 或板卡
-健康错误都会保存失败并停止剩余矩阵。仍存活的受控进程组会被有界清理；只有无法证明进程组
-已回收或板卡健康/静默的失败才持久隔离设备。
+只有同一 Git 提交对应的 BM1690 与 SG2260E CModel summary 全部通过后，PCIe 测试才会开始。
+每个 case 均在新建的独立子进程中编译一次、执行一次；任何编译、加载、deadline、数值、raw、
+decoder 或板卡健康检查错误都会被记录，并停止剩余矩阵。仍存活的受控进程组会在限定时间内清理；
+只有当无法证明进程组已回收，或无法确认板卡健康且空闲时，才会持久隔离设备。
 
-板卡空闲判断持有完整 device session lock，并在一个 monotonic 总 deadline 内轮询。只有
-`Active` 且连续两个、间隔采样的 `0%` 才视为稳定空闲；`0 -> 非零` 会重置连续计数，
-Fault、拓扑不符、无效 JSON 和 probe 失败立即拒绝。发射后的 settle 若超时或观察不完整，
-当前 session 会保持 fail-closed 并写入 quarantine；已完成的数值与 profiling 证据仍保存在
-失败 case 中，失败阶段标为 board postflight。
+板卡空闲判断持有完整 device session lock，并在一个 monotonic 总 deadline 内轮询。只有连续
+两次间隔采样的状态均为 `Active/0%`，才视为稳定空闲；`0 -> 非零` 会重置连续计数，
+Fault、拓扑不符、无效 JSON 和 probe 失败都会立即终止测试。发射后的 settle 若超时或观察不完整，
+当前 session 会保持禁用，并写入 quarantine；已完成的数值与 profiling 证据仍保存在
+失败 case 中，失败阶段标为板卡运行后检查。
 
-本轮整批 demo 在前 11 项通过后，于 `tpukernel/elementwise-div.float32` 的 postflight
+本轮整批 demo 在前 11 项通过后，于 `tpukernel/elementwise-div.float32` 的运行后检查
 读到一次 `Fault`；该 case 的数值误差为 `3.576e-7`，但温度、时钟、利用率和电压字段同时为
 `F`。runner 按约定停止、保留完整 probe payload 并隔离设备，没有把数值通过改写成板端通过。
 受控进程退出且板卡连续恢复为 `Active/0%` 后，先执行该精确 case 的 canary，再将正式矩阵拆成
-15 个串行分片。分片并集 51/51 全部通过严格数值、raw、decoder 与 postflight 门禁。现有证据
+15 个串行分片。分片并集 51/51 全部通过严格数值、raw、decoder 与运行后检查门禁。现有证据
 只说明管理遥测曾短暂不可用，不能确定驱动、固件或监控工具中的具体根因；失败整批与 canary
-仅作诊断，不计入 canonical 结果。
+仅作诊断，不计入正式验收结果。
 
 ## 8. 当前边界与下一步
 
 1. 为 RV Tensor 补齐 reduction、rsqrt/exp/sigmoid 和复合算子所需语义，再逐项开放
-   RMSNorm、RoPE、SwiGLU、FlashAttention；在此之前继续 fail-closed。
-2. 实现 tail predicate/masked DMA、动态 shape 和 causal mask，并为每项增加独立 oracle。
-3. 在可用 BM1690 板卡上执行同 revision PCIe 矩阵；SG2260E 结果不能外推。
+   RMSNorm、RoPE、SwiGLU、FlashAttention；在此之前继续保持禁用。
+2. 实现 tail predicate/masked DMA、动态 shape 和 causal mask，并为每项增加独立参考结果。
+3. 在可用 BM1690 板卡上执行同 Git 提交 PCIe 矩阵；SG2260E 结果不能外推。
 4. 如需性能结论，另建无诊断 recorder 的 warm-up/repeat benchmark，报告统计分布；不得把
    本报告的单次指令 timing 改写为稳态性能。
 5. 增加四核分片和跨核依赖验证。当前正确性矩阵不证明 SG2260E 四核并行效率。

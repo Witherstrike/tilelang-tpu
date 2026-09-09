@@ -15,13 +15,13 @@ from typing import Any, Iterable, Mapping
 
 
 def unique_prefixed_json_payload_text(
-    output: str, prefix: str, label: str,
+    output: str,
+    prefix: str,
+    label: str,
 ) -> dict[str, Any]:
     """Parse exactly one machine payload from supervised worker output."""
 
-    markers = [
-        line[len(prefix):] for line in output.splitlines() if line.startswith(prefix)
-    ]
+    markers = [line[len(prefix):] for line in output.splitlines() if line.startswith(prefix)]
     if not markers:
         raise RuntimeError(f"{label} emitted no machine-readable result")
     if len(markers) != 1:
@@ -45,16 +45,14 @@ def unique_prefixed_json_payload(path: Path, prefix: str, label: str) -> dict[st
     return unique_prefixed_json_payload_text(output, prefix, label)
 
 
-def matrix_target_scope(
-    targets: Iterable[tuple[str, str]],
-) -> list[dict[str, str]]:
+def matrix_target_scope(targets: Iterable[tuple[str, str]],) -> list[dict[str, str]]:
     """Return a stable, duplicate-free chip/programming-model manifest."""
 
     unique = tuple(dict.fromkeys(targets))
-    return [
-        {"chip": chip, "programming_model": programming_model}
-        for chip, programming_model in unique
-    ]
+    return [{
+        "chip": chip,
+        "programming_model": programming_model
+    } for chip, programming_model in unique]
 
 
 def _summary_time(payload: Mapping[str, Any], field: str, label: str) -> datetime:
@@ -67,11 +65,9 @@ def _summary_time(payload: Mapping[str, Any], field: str, label: str) -> datetim
     try:
         parsed = datetime.fromisoformat(normalized)
     except ValueError as error:
-        raise RuntimeError(
-            f"{label} promotion summary has an invalid {field} timestamp") from error
+        raise RuntimeError(f"{label} promotion summary has an invalid {field} timestamp") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise RuntimeError(
-            f"{label} promotion summary {field} timestamp is not timezone-aware")
+        raise RuntimeError(f"{label} promotion summary {field} timestamp is not timezone-aware")
     return parsed
 
 
@@ -81,13 +77,11 @@ def _load_promotion_summary(path: Path, label: str) -> dict[str, Any]:
         raw = resolved.read_bytes()
         payload = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise RuntimeError(
-            f"cannot read {label} promotion summary {resolved}: {error}") from error
+        raise RuntimeError(f"cannot read {label} promotion summary {resolved}: {error}") from error
     if not isinstance(payload, dict):
         raise RuntimeError(f"{label} promotion summary is not a JSON object: {resolved}")
     if payload.get("status") != "passed" or payload.get("complete") is not True:
-        raise RuntimeError(
-            f"{label} promotion summary is not complete and passing: {resolved}")
+        raise RuntimeError(f"{label} promotion summary is not complete and passing: {resolved}")
     if payload.get("runtime_mode") != "cmodel":
         raise RuntimeError(f"{label} promotion summary is not CModel evidence: {resolved}")
     if payload.get("implementation_worktree_dirty") is not False:
@@ -112,8 +106,7 @@ def validate_promotion_stages(
     bm = _load_promotion_summary(bm_summary_path, "BM1690")
     sg = _load_promotion_summary(sg_summary_path, "SG2260E")
     if bm["_resolved_path"] == sg["_resolved_path"]:
-        raise RuntimeError(
-            "BM1690 and SG2260E promotion summaries must be different files")
+        raise RuntimeError("BM1690 and SG2260E promotion summaries must be different files")
 
     def validate_identity_and_scope(
         payload: Mapping[str, Any],
@@ -121,12 +114,10 @@ def validate_promotion_stages(
         allowed_scope: Iterable[tuple[str, str]],
     ) -> None:
         if payload.get("matrix_kind") != matrix_kind:
-            raise RuntimeError(
-                f"{label} promotion summary has the wrong matrix_kind")
+            raise RuntimeError(f"{label} promotion summary has the wrong matrix_kind")
         observed_schema = payload.get("schema_version")
         if type(observed_schema) is not int or observed_schema != schema_version:
-            raise RuntimeError(
-                f"{label} promotion summary has the wrong schema_version")
+            raise RuntimeError(f"{label} promotion summary has the wrong schema_version")
         raw_scope = payload.get("target_scope")
         if not isinstance(raw_scope, list) or not raw_scope:
             raise RuntimeError(f"{label} promotion summary has no target_scope")
@@ -138,12 +129,10 @@ def validate_promotion_stages(
             chip = entry.get("chip")
             programming_model = entry.get("programming_model")
             if not isinstance(chip, str) or not isinstance(programming_model, str):
-                raise RuntimeError(
-                    f"{label} promotion summary has an invalid target_scope entry")
+                raise RuntimeError(f"{label} promotion summary has an invalid target_scope entry")
             observed.append((chip, programming_model))
         if len(observed) != len(set(observed)):
-            raise RuntimeError(
-                f"{label} promotion summary has duplicate target_scope entries")
+            raise RuntimeError(f"{label} promotion summary has duplicate target_scope entries")
         allowed = set(allowed_scope)
         if not set(observed).issubset(allowed):
             raise RuntimeError(
@@ -157,7 +146,9 @@ def validate_promotion_stages(
         default_model = payload.get("programming_model")
 
         def work_identity(
-            entry: Mapping[str, Any], chip: str, programming_model: str,
+            entry: Mapping[str, Any],
+            chip: str,
+            programming_model: str,
         ) -> tuple[str, str, Any, Any]:
             case = entry.get("case")
             case_id = case.get("case_id") if isinstance(case, dict) else case
@@ -173,8 +164,7 @@ def validate_promotion_stages(
                 raise RuntimeError(
                     f"{label} promotion summary contains a result without an exact case")
             if dtype is not None and not isinstance(dtype, str):
-                raise RuntimeError(
-                    f"{label} promotion summary contains an invalid dtype identity")
+                raise RuntimeError(f"{label} promotion summary contains an invalid dtype identity")
             return chip, programming_model, dtype, case_id
 
         for entry in scheduled:
@@ -184,8 +174,7 @@ def validate_promotion_stages(
             chip = entry.get("chip")
             programming_model = entry.get("programming_model", default_model)
             if not isinstance(chip, str) or not isinstance(programming_model, str):
-                raise RuntimeError(
-                    f"{label} promotion summary has an invalid scheduled target")
+                raise RuntimeError(f"{label} promotion summary has an invalid scheduled target")
             scheduled_scope.append((chip, programming_model))
             scheduled_identities.append(work_identity(entry, chip, programming_model))
         if set(scheduled_scope) != set(observed):
@@ -201,13 +190,11 @@ def validate_promotion_stages(
             result_entries = raw_results
             for entry in result_entries:
                 if not isinstance(entry, dict):
-                    raise RuntimeError(
-                        f"{label} promotion summary contains a non-object result")
+                    raise RuntimeError(f"{label} promotion summary contains a non-object result")
                 chip = entry.get("chip")
                 programming_model = entry.get("programming_model", default_model)
                 if not isinstance(chip, str) or not isinstance(programming_model, str):
-                    raise RuntimeError(
-                        f"{label} promotion summary has an invalid result target")
+                    raise RuntimeError(f"{label} promotion summary has an invalid result target")
                 if (chip, programming_model) not in set(observed):
                     raise RuntimeError(
                         f"{label} promotion summary contains a result outside target_scope")
@@ -220,8 +207,7 @@ def validate_promotion_stages(
             result_entries = list(raw_cases.values())
             for key, entry in raw_cases.items():
                 if not isinstance(key, str) or not isinstance(entry, dict):
-                    raise RuntimeError(
-                        f"{label} promotion summary contains an invalid case result")
+                    raise RuntimeError(f"{label} promotion summary contains an invalid case result")
                 parts = key.split("/")
                 if len(parts) not in (3, 4):
                     raise RuntimeError(
@@ -239,8 +225,7 @@ def validate_promotion_stages(
             raise RuntimeError(
                 f"{label} promotion summary scheduled work does not match its results")
         if any(status not in ("passed", "failed") for status in result_statuses):
-            raise RuntimeError(
-                f"{label} promotion summary contains an invalid result status")
+            raise RuntimeError(f"{label} promotion summary contains an invalid result status")
         scheduled_count = len(scheduled_identities)
         passed_count = sum(status == "passed" for status in result_statuses)
         failed_count = sum(status == "failed" for status in result_statuses)
@@ -253,35 +238,27 @@ def validate_promotion_stages(
         for field, expected in expected_counts.items():
             value = payload.get(field)
             if type(value) is not int or value != expected:
-                raise RuntimeError(
-                    f"{label} promotion summary has inconsistent {field}")
+                raise RuntimeError(f"{label} promotion summary has inconsistent {field}")
         if failed_count or passed_count != scheduled_count:
-            raise RuntimeError(
-                f"{label} promotion summary is not internally complete and passing")
+            raise RuntimeError(f"{label} promotion summary is not internally complete and passing")
 
-    validate_identity_and_scope(
-        bm, "BM1690", bm_allowed_scope)
-    validate_identity_and_scope(
-        sg, "SG2260E", sg_allowed_scope)
+    validate_identity_and_scope(bm, "BM1690", bm_allowed_scope)
+    validate_identity_and_scope(sg, "SG2260E", sg_allowed_scope)
 
     bm_started = _summary_time(bm, "started_at", "BM1690")
     bm_finished = _summary_time(bm, "finished_at", "BM1690")
     sg_started = _summary_time(sg, "started_at", "SG2260E")
     sg_finished = _summary_time(sg, "finished_at", "SG2260E")
-    pcie_started = _summary_time(
-        {"started_at": pcie_started_at}, "started_at", "PCIe")
+    pcie_started = _summary_time({"started_at": pcie_started_at}, "started_at", "PCIe")
     if bm_started > bm_finished:
-        raise RuntimeError(
-            "CModel promotion order is invalid: BM1690 starts after it finishes")
+        raise RuntimeError("CModel promotion order is invalid: BM1690 starts after it finishes")
     if sg_started > sg_finished:
-        raise RuntimeError(
-            "CModel promotion order is invalid: SG2260E starts after it finishes")
+        raise RuntimeError("CModel promotion order is invalid: SG2260E starts after it finishes")
     if bm_finished > sg_started:
         raise RuntimeError(
             "CModel promotion order is invalid: BM1690 must finish before SG2260E starts")
     if sg_finished > pcie_started:
-        raise RuntimeError(
-            "promotion order is invalid: SG2260E must finish before PCIe starts")
+        raise RuntimeError("promotion order is invalid: SG2260E must finish before PCIe starts")
     return bm, sg
 
 

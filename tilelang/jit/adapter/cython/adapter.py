@@ -146,14 +146,12 @@ def _load_cython_kernel_wrapper():
         raise RuntimeError("No C++ compiler is available for the Cython execution backend.")
     compiler_path = shutil.which(compiler_name)
     if compiler_path is None:
-        raise RuntimeError(
-            f"Cannot resolve the Cython execution backend compiler: {compiler_name}")
+        raise RuntimeError(f"Cannot resolve the Cython execution backend compiler: {compiler_name}")
     compiler = Path(compiler_path).resolve(strict=True)
     source_path = Path(__file__).resolve().with_name("cython_wrapper.pyx")
     identity = _cython_build_identity(source_path, compiler, Cython.__version__)
     fingerprint = hashlib.sha256(
-        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     cache_root = _cython_cache_root()
     cache_root.mkdir(parents=True, exist_ok=True)
     entry = cache_root / fingerprint
@@ -181,14 +179,19 @@ def _load_cython_kernel_wrapper():
                 generated_cpp = build_dir / "cython_wrapper.cpp"
                 generated_library = build_dir / "cython_wrapper.so"
                 subprocess.run(
-                    [sys.executable, "-m", "cython", str(source_path), "--cplus", "-o",
-                     str(generated_cpp)],
+                    [
+                        sys.executable, "-m", "cython",
+                        str(source_path), "--cplus", "-o",
+                        str(generated_cpp)
+                    ],
                     check=True,
                 )
                 subprocess.run(
-                    [compiler, *_CYTHON_BUILD_FLAGS,
-                     f"-I{identity['python_include_path']}", str(generated_cpp), "-o",
-                     str(generated_library)],
+                    [
+                        compiler, *_CYTHON_BUILD_FLAGS, f"-I{identity['python_include_path']}",
+                        str(generated_cpp), "-o",
+                        str(generated_library)
+                    ],
                     check=True,
                 )
                 if generated_library.is_symlink() or not generated_library.is_file():
@@ -218,12 +221,12 @@ def _load_cython_kernel_wrapper():
 
 
 class CythonKernelAdapter(BaseKernelAdapter):
-    """Adapter class that converts TVM/TIR functions to callable CUDA kernels using ctypes.
+    """Convert TVM/TIR functions to callable native kernels using Cython.
     
     This adapter handles:
-    1. Converting TIR functions to compiled CUDA libraries
+    1. Converting TIR functions to compiled target libraries
     2. Managing dynamic shapes in tensor operations
-    3. Wrapping C++ kernels for Python/PyTorch usage
+    3. Wrapping native kernels for Python/PyTorch usage
     """
 
     # Class attributes to store compiled kernel information
@@ -267,7 +270,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         Args:
             params: List of tensor types for inputs/outputs
             result_idx: Indices of output tensors
-            target: Target platform (e.g., 'cuda')
+            target: Compilation target (for example, ``cuda``, ``hip``, ``c``, or ``tpu``)
             func_or_mod: TIR function or module to be compiled
             verbose: Enable verbose logging
         """
@@ -357,7 +360,6 @@ class CythonKernelAdapter(BaseKernelAdapter):
         else:
             adapter.ir_module = func_or_mod
 
-        target = determine_target(target, return_object=True)
         adapter.target = Target.canon_target(determine_target(target))
 
         adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
@@ -384,12 +386,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
             tpu_runtime=adapter.tpu_runtime,
         )
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
-
-        if is_tpu_target(adapter.target):
-            adapter.func = make_tpu_forward(adapter.lib, adapter.params, adapter.result_idx,
-                                            adapter.dynamic_symbolic_map)
-            return adapter
-
+        # TPU database artifacts are rejected above until they carry a verified
+        # manifest, so only the ordinary native-library path reaches this point.
         adapter.lib.get_last_error.restype = ctypes.c_char_p
         result = adapter.lib.init()
         if result != 0:

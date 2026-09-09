@@ -192,8 +192,7 @@ def test_runtime_case_counts_are_static_without_local_artifacts(monkeypatch):
     schema = validator._load_json(validator.SCHEMA_PATH)
     contract = _machine_contract()
     runtime_evidence = next(
-        item for item in contract["evidence"]
-        if item["id"] == "artifact.cmodel-rv-core-region-abi")
+        item for item in contract["evidence"] if item["id"] == "artifact.cmodel-rv-core-region-abi")
     runtime_evidence["runtime_expectation"]["case_count"] += 1
 
     with pytest.raises(validator.ContractError, match="case_count disagrees"):
@@ -202,10 +201,14 @@ def test_runtime_case_counts_are_static_without_local_artifacts(monkeypatch):
 
 def _mixed_backend_runtime_fixture():
     expectation = {
-        "runtime_mode": "cmodel",
-        "complete": True,
-        "case_count": 2,
-        "all_cases_passed": True,
+        "runtime_mode":
+            "cmodel",
+        "complete":
+            True,
+        "case_count":
+            2,
+        "all_cases_passed":
+            True,
         "claim_targets": ["sg2260e.tpukernel", "sg2260e.rv"],
         "capability_ids": ["add.fp16-bf16.numeric"],
         "target_case_counts": {
@@ -218,23 +221,33 @@ def _mixed_backend_runtime_fixture():
         ],
     }
     artifact = {
-        "runtime_mode": "cmodel",
-        "complete": True,
+        "runtime_mode":
+            "cmodel",
+        "complete":
+            True,
         "results": [
             {
                 "key": "cmodel/sg2260e/tpukernel/elementwise-add.float16",
                 "chip": "sg2260e",
                 "programming_model": "tpukernel",
-                "numeric": {"runtime_mode": "cmodel"},
-                "case": {"case_id": "elementwise-add.float16"},
+                "numeric": {
+                    "runtime_mode": "cmodel"
+                },
+                "case": {
+                    "case_id": "elementwise-add.float16"
+                },
                 "status": "passed",
             },
             {
                 "key": "cmodel/sg2260e/rv/elementwise-add.float16",
                 "chip": "sg2260e",
                 "programming_model": "rv",
-                "numeric": {"runtime_mode": "cmodel"},
-                "case": {"case_id": "elementwise-add.float16"},
+                "numeric": {
+                    "runtime_mode": "cmodel"
+                },
+                "case": {
+                    "case_id": "elementwise-add.float16"
+                },
                 "status": "passed",
             },
         ],
@@ -252,13 +265,12 @@ def test_runtime_report_accepts_per_result_programming_models():
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
+        (lambda artifact: artifact["results"][1].update({"programming_model": "future"}),
+         "invalid programming model"),
+        (lambda artifact: artifact["results"][1].update({"runtime_mode": "pcie"}),
+         "runtime mode disagrees"),
         (lambda artifact: artifact["results"][1].update(
-            {"programming_model": "future"}), "invalid programming model"),
-        (lambda artifact: artifact["results"][1].update(
-            {"runtime_mode": "pcie"}), "runtime mode disagrees"),
-        (lambda artifact: artifact["results"][1].update(
-            {"key": "cmodel/sg2260e/tpukernel/elementwise-add.float16"}),
-         "key disagrees"),
+            {"key": "cmodel/sg2260e/tpukernel/elementwise-add.float16"}), "key disagrees"),
         (lambda artifact: artifact["results"][1].pop("key"), "lacks a key"),
     ],
 )
@@ -432,8 +444,7 @@ def test_runtime_evidence_claims_form_a_closed_contract_set(monkeypatch, field, 
     schema = validator._load_json(validator.SCHEMA_PATH)
     contract = _machine_contract()
     runtime_evidence = next(
-        item for item in contract["evidence"]
-        if item["id"] == "artifact.cmodel-rv-core-region-abi")
+        item for item in contract["evidence"] if item["id"] == "artifact.cmodel-rv-core-region-abi")
     runtime_evidence["runtime_expectation"][field].append(phantom)
 
     real_load = validator._load_json

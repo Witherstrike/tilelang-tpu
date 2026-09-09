@@ -20,7 +20,7 @@ kernel = tilelang.compile(
 )
 ```
 
-有效组合为 BM1690+TPU-Kernel、SG2260E+TPU-Kernel 和 SG2260E+RV。BM1690+RV 在 target 解析阶段失败。BM1690 与 SG2260E 共享当前 allocator 使用的 TPUv7 LMEM 几何；物理核数分别为 8 和 4。物理核数是拓扑事实，不代表当前单核 host launch 已实现多核分片。
+有效组合为 BM1690+TPU-Kernel、SG2260E+TPU-Kernel 和 SG2260E+RV。BM1690+RV 在 target 解析阶段失败。BM1690 与 SG2260E 共享当前 allocator 使用的 TPUv7 LMEM 几何；物理核数分别为 8 和 4。物理核数是拓扑事实，不表示当前由 host 发起的单核执行已经支持多核分片。
 
 ## 2. 单一选择源
 
@@ -31,7 +31,7 @@ kernel = tilelang.compile(
 
 `TPUTargetSpec(chip, programming_model)` 只从完整 target 构造；`TPURuntimeConfig(runtime_mode)` 独立构造，缺省为安全的 CModel。PPL resolver、JIT adapter 和 profiling 都消费这两个对象，不再各自推断芯片或编程模型。native build 入口仍做同样的防御性校验，防止 Python 边界被绕过。
 
-设计不提供模糊 selector：裸 `target="tpu"`、缺少 `-mcpu`、缺少 `-tpu-programming-model`、未知取值以及 BM1690+RV 都在工具链调用前失败。非 TPU target 也不得携带 TPU semantic extern。
+设计不接受不完整或无效的 target：裸 `target="tpu"`、缺少 `-mcpu`、缺少 `-tpu-programming-model`、取值未知以及 BM1690+RV，都会在调用工具链前失败。非 TPU target 也不得携带 TPU semantic extern。
 
 ## 3. 编译流程与 pass 映射
 
@@ -82,7 +82,7 @@ contract verifier 在 target pass 前后各运行一次。它拒绝 vector resid
 
 descriptor 合法性也在 TPU 代码生成器中单源化。TPU 本地 scope 只有 `shared/shared.dyn/local/local.fragment`；所有 `dim4` extent 必须是编译期整数且位于 `[1,65535]`。copy 两侧原始 rank 可分别为 1..4，按统一 N/C/H/W 规则左补 1 后比较，不要求原始 rank 相等。TPU-Kernel 特殊约束继续在编程模型层验证：exp/sigmoid 要求完整 shape4 一致且 `H*W<=65535`，reduction 的 EU 对齐后 padded width 也必须可由 `dim4` 表示。
 
-所有 typed TPU semantic op 的 buffer 参数统一以 `tl.region(BufferLoad, access_mask, extents)` 穿过 TIR/native 边界。非 copy 算子只接受从零开始、覆盖完整逻辑 Buffer 的 region；copy 保留显式子区间，并独立证明连续性与边界。native 层再以 data Var 身份核对 compiler-owned descriptor 的 dtype、原始 rank、归一化 shape、scope 与 ownership。裸 `tir.tvm_access_ptr` 不再是兼容入口，因为它会丢失 `T.view/T.reshape` 的逻辑形状。只改变展示名称且 descriptor 完全等价的 alias 可以作为唯一表示；改变 rank、shape、dtype、scope，或同时制造第二个 allocation owner 的 alias 会 fail-closed。
+所有 typed TPU semantic op 的 buffer 参数统一以 `tl.region(BufferLoad, access_mask, extents)` 穿过 TIR/native 边界。非 copy 算子只接受从零开始、覆盖完整逻辑 Buffer 的 region；copy 保留显式子区间，并独立证明连续性与边界。native 层再以 data Var 身份核对 compiler-owned descriptor 的 dtype、原始 rank、归一化 shape、scope 与 ownership。裸 `tir.tvm_access_ptr` 不再是兼容入口，因为它会丢失 `T.view/T.reshape` 的逻辑形状。只改变展示名称且 descriptor 完全等价的 alias 可以作为唯一表示；改变 rank、shape、dtype、scope，或同时制造第二个 allocation owner 的 alias 会直接拒绝。
 
 ## 4. ABI 分层
 
@@ -93,7 +93,7 @@ descriptor 合法性也在 TPU 代码生成器中单源化。TPU 本地 scope �
 | TPU-Kernel 语义 | `tl.tpukernel.*` | scalar、exp、sigmoid、rsqrt、reduction、gather、topk、rope |
 | RV 专家 ABI | 隔离的 `rvt_*` | 用户自管 descriptor/lifecycle 的低层路径；不能与 `tl.tpu.*` 混用 |
 
-内部 `ppl.*` 不是编程模型，raw `tpu_*` 也不是支持的 TIR ABI。共同层只持有 tensor region、dtype、shape、effect 和目标选择；TPU-Kernel/RV 文件持有各自的函数签名、descriptor 及指令配置。这样增加一个新编程模型时，不需要在前端复制一组核心 op。
+内部 `ppl.*` 不是编程模型，raw `tpu_*` 也不是支持的 TIR ABI。`codegen_tpu` 负责两种编程模型都需要的 tensor region、dtype、shape、effect 检查和目标分派；TPU-Kernel/RV 文件分别保存各自的函数签名、descriptor 和指令配置。这样增加新编程模型时，不需要在前端复制一组核心 op。
 
 RV 的 compiler-owned 路径配置 CR/TR/GR descriptor、precision/FP8 subtype、FREE stride 与 lane mask，并负责 `rvt_kernel_start → body → rvt_sync_i`。TPU-Kernel 使用独立的 `tpu_initialize → body → tpu_poll` 生命周期；两个协议不会在同一 kernel 中拼接。
 
@@ -152,19 +152,19 @@ SwiGLU 和 FlashAttention 仍依赖 reduction、rsqrt、exp 或 TPU-Kernel RoPE 
 
 NT accumulation 采用编程模型与 dtype 双重选择：TPU-Kernel 只为 FP8 A/B + FP32 C 放行 `_R_trans(..., result_add=true)`，基础 FP16/BF16 因原始右转置 API 没有 accumulation 参数而在 codegen 拒绝；SG2260E/RV 的 FP16/BF16 + FP32 C 已有 `rvt_fmm2a_nt` 精确源码选择回归，但 CModel 与 PCIe 数值均未验证。
 
-FP8 div 明确不支持；非零 fill、其他 cast、FP8 output GEMM 以及 exp/sigmoid/rsqrt/reduction/topk 不从已测子集外推。RV ISA 虽声明 FP8 arithmetic/GEMM，当前 TileLang RV codegen 尚未实现这些 descriptor/指令组合，故 fail-closed。PPL 1.7 可读手册进一步确认 pointwise DataType 包含 FP8、矩阵输入包含 E4M3/E5M2，并记录 BM1690/tpub_7_1_e 的 saturation 差异；这些只作为 declaration evidence，支持提升仍依赖精确 codegen/CModel/PCIe 结果。
+FP8 div 明确不支持；非零 fill、其他 cast、FP8 output GEMM 以及 exp/sigmoid/rsqrt/reduction/topk 不从已测子集外推。RV ISA 虽声明 FP8 arithmetic/GEMM，当前 TileLang RV codegen 尚未实现这些 descriptor/指令组合，因此保持禁用。PPL 1.7 可读手册进一步确认 pointwise DataType 包含 FP8、矩阵输入包含 E4M3/E5M2，并记录 BM1690/tpub_7_1_e 的 saturation 差异；这些只作为 declaration evidence，支持提升仍依赖精确 codegen/CModel/PCIe 结果。
 
-FP8 scalar 采用 PPL 1.7 的 canonical same-format 路径：FP32 常量先 `tpu_cast(..., RM_HALF_TO_EVEN)` 到目标格式，再调用通用 `tpu_bdc_fp_add_C/fp_mul_C`。moderate 输入与公开生产路径均通过。历史 direct `tpu_bdc_fp8_*_C` exit 139 是 FP8 dst/src + FP32 `C_dtype` 的非法参数探针，不是硬件负向证据。边界实验证实当前为非饱和语义：E4M3 overflow 产生 NaN，E5M2 产生 infinity；可选 saturation 仍不得暴露。
+FP8 scalar 采用 PPL 1.7 的标准同格式路径：先用 `tpu_cast(..., RM_HALF_TO_EVEN)` 将 FP32 常量转换为目标格式，再调用通用的 `tpu_bdc_fp_add_C/fp_mul_C`。常规范围输入和公开生产路径均已通过验证。历史上 direct `tpu_bdc_fp8_*_C` 的 exit 139 来自 FP8 dst/src 与 FP32 `C_dtype` 这一非法参数组合，不是硬件不支持的证据。边界实验证实当前为非饱和语义：E4M3 溢出产生 NaN，E5M2 溢出产生 infinity；因此仍不能向用户开放可选 saturation。
 
-机器可读的逐 selector 事实位于 `research/tpu-op-contract/contract.json`。当前验收实现基线
-`e5774525e3a6e11d0d6010e979203c55181a8872` 的八份 CModel summary 均位于
-[正式工件目录](../artifacts/2026-09-09/final-e5774525/)，合计 553/553 次 launch。SG2260E 只取四份
+机器可读的逐项能力事实位于 `research/tpu-op-contract/contract.json`。当前验收实现基线
+`e5774525e3a6e11d0d6010e979203c55181a8872` 的八份 CModel summary 均位于本地证据根目录
+`research/artifacts/2026-09-09/final-e5774525/`；该目录已被 Git 忽略，不随仓库提交。八份 summary 合计 553/553 次执行。SG2260E 只取四份
 `*-cmodel-retry1`，BM1690 取四份原始矩阵：核心矩阵为 BM1690
 28/28、SG2260E 56/56，FP8 为 42/42 + 42/42，demo 为 36/36 + 51/51，完整
-TPU-Kernel 为 152/152 + 146/146。各 summary 均自记同一 revision 并确认
-`implementation_worktree_dirty=false`。这些矩阵之间存在有意的 selector 重叠，553 是回归
-launch 数，不是 553 项独立能力；能力提升仍须落到 contract 的精确 chip/model/dtype/layout
-selector。
+TPU-Kernel 为 152/152 + 146/146。各 summary 均记录同一 Git 提交，并确认
+`implementation_worktree_dirty=false`。这些矩阵有意覆盖部分相同的支持条件，因此 553 是回归
+执行次数，不是 553 项互不重叠的能力；扩展支持范围时，仍须在 contract 中明确对应的
+chip、programming model、dtype 和 layout 组合。
 
 ## 7. 地址、effect 与失败策略
 
@@ -192,36 +192,36 @@ extent）或 `While`，凡在循环外分配、循环内使用的 local buffer�
 
 工具链只识别 PPL 1.7 `deps/` 发布布局。基础 device 编译、CModel runtime、PCIe runtime 与 profiling 依赖分层校验：普通 CModel 不需要 PCIe cross compiler/TPUDNN profiling 库；PCIe 不得链接 SDK 内的 emulator runtime，而应使用已安装的板端 `libtpuv7_rt.so`。
 
-本地 `tpu_kernel_manual.md` 是官方 v23.03.01 网页手册的可搜索转录，用于解释 TPU-Kernel 编程模型、内存、同步与通用 API 语义；其正文面向较早芯片，不能单独证明 BM1690/SG2260E 或 FP8 selector。当前芯片的声明范围以 PPL 1.7 手册、对应 `tpub_7_1/tpub_7_1_e` 头文件为准，最终支持仍以 source/codegen/CModel/PCIe 分层证据为准。
+本地 `tpu_kernel_manual.md` 是官方 v23.03.01 网页手册的可搜索转录，用于解释 TPU-Kernel 编程模型、内存、同步与通用 API 语义；其正文面向较早芯片，不能单独证明 BM1690/SG2260E 或具体的 FP8 支持组合。当前芯片的声明范围以 PPL 1.7 手册和对应的 `tpub_7_1/tpub_7_1_e` 头文件为准，最终支持范围仍由 source/codegen/CModel/PCIe 分层证据共同确定。
 
 profiling 复用 PPL 的运行记录协议，而非把 `ppl_compile.py --profiling` 原样套到 TileLang 生成的 C：
 
 - CModel：`FILE_DUMP_CMD` 收集 raw 命令；有 PerfAI 时再解码；
-- PCIe：TPUDNN recorder 包围一次 launch 并保留 raw 文件；仅当调用方显式提供兼容的 `bigTpuProfile/PerfAI` 时，才在独立解释器和 `PYTHONPATH` 中离线投影为稳定 JSON。该 decoder 环境不注入编译或数值 worker。
+- PCIe：TPUDNN recorder 包围一次执行并保留 raw 文件；仅当调用方显式提供兼容的 `bigTpuProfile/PerfAI` 时，才在独立解释器和 `PYTHONPATH` 中离线投影为稳定 JSON。该 decoder 环境不注入编译或数值子进程。
 
-生产代码不会联网或自动安装 decoder。严格 timing 矩阵在任何板端派发前先做无硬件 preflight，确认结构化 parser API 可用，并把实际包版本与 API 身份写入 summary。当前隔离环境验证的身份为 `bigTpuProfile 0.3.5` 和 `bigTpuProfile.bmprofile_perfAI.ProfileParser.parse`；这仍是显式外部依赖，不是基础 runtime 保证。
+生产代码不会联网或自动安装 decoder。严格 timing 矩阵在任何板端派发前先做无硬件运行前检查，确认结构化 parser API 可用，并把实际包版本与 API 身份写入 summary。当前隔离环境验证的身份为 `bigTpuProfile 0.3.5` 和 `bigTpuProfile.bmprofile_perfAI.ProfileParser.parse`；这仍是显式外部依赖，不是基础 runtime 保证。
 
-数值验证与 profiling 分开判定。当前 [SG2260E PCIe core
-56/56](../artifacts/2026-09-09/final-e5774525/core-sg2260e-pcie/summary.json)、[FP8
-42/42](../artifacts/2026-09-09/final-e5774525/fp8-sg2260e-pcie/summary.json) 和 [demo
-51/51](../artifacts/2026-09-09/final-e5774525/demo-sg2260e-pcie-shards/) 共 149 个
-case，均通过 numeric、非空 raw recorder 与 decoded timing 三重门禁；对应 149 组 recorder
+数值验证与 profiling 分开判定。当前 SG2260E PCIe 的 core、FP8 和 demo 结果分别记录在上述
+证据根目录的 `core-sg2260e-pcie/summary.json`、`fp8-sg2260e-pcie/summary.json` 和
+`demo-sg2260e-pcie-shards/` 中，结果依次为 56/56、42/42 和 51/51，共 149 个 case。
+所有 case 均通过数值校验、非空 raw recorder 和 decoded timing 三重门禁；对应 149 组 recorder
 目录和 3568 条合法 ns 事件。每组目录恰含 `global.profile` 与四个 SG2260E 核的
 `cdmlib0_*.profile`，因此 summary 的 `raw_trace_file_count=1` 指一组目录，不是一个物理文件。
 decoder 身份为 `bigTpuProfile 0.3.5` 和
 `bigTpuProfile.bmprofile_perfAI.ProfileParser.parse`。
 
-[完整 TPU-Kernel PCIe 矩阵](../artifacts/2026-09-09/final-e5774525/tpukernel-sg2260e-pcie-shards/)
+完整 TPU-Kernel PCIe 矩阵记录在上述证据根目录的 `tpukernel-sg2260e-pcie-shards/` 中，
 由 14 个完整通过分片覆盖 146/146 次数值执行，不启用 profiling；demo 的 51/51 项则由
 15 个完整通过分片覆盖。两类分片分别按 case 去重汇总，失败矩阵和 canary 不计入验收。
 数值矩阵与 149 个 profiling case 的验收条件不同。demo 的 51 项由 TPU-Kernel 36 项和
 RV 15 项组成；RV 只包含三种 dtype 的四则与
 matmul；RMSNorm、Split-K、RoPE、SwiGLU、FlashAttention 的 RV composite 仍未实现。
 
-PCIe preflight/postflight 在同一 device session lock 内执行有界静默检查：仅
-`Active + 合法非零利用率` 可以继续轮询，拓扑、状态、JSON、probe 或进程组异常立即失败；
-10 秒总 deadline 内必须取得两次间隔 0.25 秒的连续 `Active/0%`。dispatch 后若仍不能证明
-静默，session/quarantine marker 持久保留，后续 launch 停止。单次 `Fault` 也立即触发隔离，
+PCIe 运行前和运行后检查共用同一个 device session lock，并在限定时间内确认板卡稳定空闲。
+只有状态为 `Active` 且利用率数值合法时才允许继续轮询；拓扑、状态、JSON、probe 或进程组异常
+会立即导致失败。10 秒总 deadline 内必须取得两次间隔 0.25 秒的连续 `Active/0%`。任务发射后
+若仍无法确认板卡空闲，session/quarantine marker 会持续保留，并停止后续执行。单次 `Fault`
+也会立即触发隔离，
 不因数值或 decoder 已通过而放行。
 
 `e5774525` 的正式结果为 CModel 553/553、SG2260E PCIe 295/295，合计 848/848。该集合
@@ -241,8 +241,8 @@ PCIe timing 来自每 case 一次带 recorder 的设备指令事件，只用于�
 1. 在能力注册中声明合法 target 组合，不在 codegen 中猜测；
 2. 先定义 semantic ABI、operand effect、shape/dtype/layout 与 failure policy；
 3. 让 pass/verifier/AddressAssign 消费同一契约；
-4. 编程模型各自实现指令选择，未实现项 fail-closed；
+4. 编程模型各自实现指令选择，未实现项在编译期明确拒绝；
 5. 先 source-only，再 CModel 数值，最后受控 PCIe；
-6. 只按精确 selector 更新机器契约，不能从 SDK 声明、另一芯片或另一运行时复制状态。
+6. 只按精确的支持条件更新机器契约，不能从 SDK 声明、另一芯片或另一运行时复制状态。
 
-当前实现仍有两项重要架构债务：Python 与 native 目标能力表尚需生成式单源化；operation spec 仍分散在 frontend、verifier、AddressAssign 和 codegen。FP8 NT accumulate 的修复说明合法性必须按完整 dtype/layout/attribute selector 判断。下一阶段应引入注册式 `TpuOpSpec`，由同一 selector 规则生成 frontend 校验、verifier/effect 与 backend capability 查询，再迁移到上游式 `tilelang/tpu`、`src/tpu` 后端边界。
+当前实现仍有两项重要架构债务：Python 与 native 目标能力表尚需通过生成机制实现单一数据源；operation spec 仍分散在 frontend、verifier、AddressAssign 和 codegen。FP8 NT accumulate 的修复说明，合法性必须结合完整的 dtype、layout 和 attribute 判断。下一阶段应引入注册式 `TpuOpSpec`，由同一组支持规则生成 frontend 校验、verifier/effect 和 backend capability 查询，再迁移到上游风格的 `tilelang/tpu`、`src/tpu` 后端边界。

@@ -80,11 +80,16 @@ else:
         sys.path.insert(0, develop_tvm_path + "/python")
         TVM_IMPORT_PYTHON_PATH = develop_tvm_path + "/python"
 
-    develop_tvm_library_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "build", "tvm")
+    source_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    develop_tvm_library_paths = [
+        os.path.join(source_root, "build-tpu", "tvm"),
+        os.path.join(source_root, "build", "tvm"),
+    ]
     install_tvm_library_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
     if os.environ.get("TVM_LIBRARY_PATH") is None:
-        if os.path.exists(develop_tvm_library_path):
+        develop_tvm_library_path = next(
+            (path for path in develop_tvm_library_paths if os.path.exists(path)), None)
+        if develop_tvm_library_path is not None:
             os.environ["TVM_LIBRARY_PATH"] = develop_tvm_library_path
         elif os.path.exists(install_tvm_library_path):
             os.environ["TVM_LIBRARY_PATH"] = install_tvm_library_path

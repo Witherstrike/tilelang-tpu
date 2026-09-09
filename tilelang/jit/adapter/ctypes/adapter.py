@@ -23,12 +23,12 @@ from tilelang.utils.language import retrieve_func_from_module
 
 
 class CtypesKernelAdapter(BaseKernelAdapter):
-    """Adapter class that converts TVM/TIR functions to callable CUDA kernels using ctypes.
+    """Convert TVM/TIR functions to callable native kernels using ctypes.
     
     This adapter handles:
-    1. Converting TIR functions to compiled CUDA libraries
+    1. Converting TIR functions to compiled target libraries
     2. Managing dynamic shapes in tensor operations
-    3. Wrapping C++ kernels for Python/PyTorch usage
+    3. Wrapping native kernels for Python/PyTorch usage
     """
 
     # Class attributes to store compiled kernel information
@@ -65,7 +65,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         Args:
             params: List of tensor types for inputs/outputs
             result_idx: Indices of output tensors
-            target: Target platform (e.g., 'cuda')
+            target: Compilation target (for example, ``cuda``, ``hip``, ``c``, or ``tpu``)
             func_or_mod: TIR function or module to be compiled
             verbose: Enable verbose logging
         """
@@ -187,11 +187,9 @@ class CtypesKernelAdapter(BaseKernelAdapter):
             tpu_runtime=adapter.tpu_runtime,
         )
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
-        if is_tpu_target(adapter.target):
-            adapter.tpu_forward = make_tpu_forward(adapter.lib, adapter.params, adapter.result_idx,
-                                                   adapter.dynamic_symbolic_map)
-        else:
-            adapter.lib.init()
+        # TPU database artifacts are rejected above until they carry a verified
+        # manifest, so only the ordinary native-library path reaches this point.
+        adapter.lib.init()
 
         adapter._post_init()
         return adapter

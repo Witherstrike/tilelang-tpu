@@ -78,11 +78,27 @@ _SCHEMA_VERSION = 1
 _WORKER_RESULT_PREFIX = "TPU_FP8_NUMERIC_RESULT="
 _DTYPES = ("e4m3", "e5m2")
 _CASES = (
-    "copy", "copy-global-to-global", "fill-zero", "cast-to-fp8",
-    "cast-from-fp8", "add", "sub", "mul", "max", "add-broadcast",
-    "sub-broadcast", "mul-broadcast", "max-broadcast", "add-scalar",
-    "mul-scalar", "rope", "gather", "gemm-nn-overwrite",
-    "gemm-nn-accumulate", "gemm-nt-overwrite", "gemm-nt-accumulate",
+    "copy",
+    "copy-global-to-global",
+    "fill-zero",
+    "cast-to-fp8",
+    "cast-from-fp8",
+    "add",
+    "sub",
+    "mul",
+    "max",
+    "add-broadcast",
+    "sub-broadcast",
+    "mul-broadcast",
+    "max-broadcast",
+    "add-scalar",
+    "mul-scalar",
+    "rope",
+    "gather",
+    "gemm-nn-overwrite",
+    "gemm-nn-accumulate",
+    "gemm-nt-overwrite",
+    "gemm-nt-accumulate",
 )
 
 
@@ -169,8 +185,7 @@ def _utc_now() -> str:
 
 
 def _worker_payload(stdout_path: Path) -> dict[str, Any]:
-    return unique_prefixed_json_payload(
-        stdout_path, _WORKER_RESULT_PREFIX, "FP8 worker")
+    return unique_prefixed_json_payload(stdout_path, _WORKER_RESULT_PREFIX, "FP8 worker")
 
 
 def _validate_worker_payload(
@@ -193,8 +208,7 @@ def _validate_worker_payload(
     }
     for field, value in expected.items():
         if payload.get(field) != value:
-            raise RuntimeError(
-                f"FP8 worker result {field} does not identify the scheduled case")
+            raise RuntimeError(f"FP8 worker result {field} does not identify the scheduled case")
     metrics = payload.get("metrics")
     if not isinstance(metrics, dict) or metrics.get("passed") is not True:
         raise RuntimeError("FP8 worker result lacks metrics.passed=true")
@@ -284,9 +298,8 @@ def _validate_pcie_promotion(
                     case=expected_case,
                 )
     if missing:
-        raise RuntimeError(
-            "PCIe FP8 promotion evidence is missing passing cases: "
-            + ", ".join(sorted(set(missing))))
+        raise RuntimeError("PCIe FP8 promotion evidence is missing passing cases: " +
+                           ", ".join(sorted(set(missing))))
     return {
         "git_commit": commit,
         "source_state_sha256": source_digest,
@@ -309,9 +322,9 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
         "status": "running",
         "runtime_mode": args.runtime_mode,
         "programming_model": "tpukernel",
-        "acceptance": (
-            "numeric-raw-and-decoded-timing"
-            if args.require_decoded_timing else "numeric-and-raw"),
+        "acceptance":
+            ("numeric-raw-and-decoded-timing" if args.require_decoded_timing else "numeric-and-raw"
+            ),
         "decoded_timing_required": args.require_decoded_timing,
         "complete": False,
         "started_at": _utc_now(),
@@ -321,17 +334,13 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
         "passed_case_count": 0,
         "failed_case_count": 0,
         "cancelled_case_count": 0,
-        "target_scope": matrix_target_scope(
-            (chip, "tpukernel") for chip in chips),
-        "scheduled": [
-            {
-                "chip": chip,
-                "programming_model": "tpukernel",
-                "dtype": dtype,
-                "case": case,
-            }
-            for chip in chips for dtype in dtypes for case in cases
-        ],
+        "target_scope": matrix_target_scope((chip, "tpukernel") for chip in chips),
+        "scheduled": [{
+            "chip": chip,
+            "programming_model": "tpukernel",
+            "dtype": dtype,
+            "case": case,
+        } for chip in chips for dtype in dtypes for case in cases],
         "cases": {},
     }
     summary.update(git_source_identity(repo_root))
@@ -341,10 +350,10 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
     worker_environment_values = dict(environment)
 
     try:
-        summary["toolchain_identity"] = toolchain_identity(
-            worker_environment_values, args.runtime_mode)
-        worker_environment_values = pin_native_worker_libraries(
-            worker_environment_values, summary["toolchain_identity"])
+        summary["toolchain_identity"] = toolchain_identity(worker_environment_values,
+                                                           args.runtime_mode)
+        worker_environment_values = pin_native_worker_libraries(worker_environment_values,
+                                                                summary["toolchain_identity"])
         if args.runtime_mode == "pcie":
             assert args.device_id == 0
             summary["promotion_evidence"] = _validate_pcie_promotion(
@@ -369,23 +378,31 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
             profiler = TPUInstructionProfiler(
                 _profiling_config(args, output_dir, chips[0], "pcie-decoder-preflight"))
             summary["decoder_preflight"] = {
-                "status": "passed",
-                "identity": dict(
-                    profiler.preflight_pcie_decoder(environment=worker_environment_values)),
+                "status":
+                    "passed",
+                "identity":
+                    dict(profiler.preflight_pcie_decoder(environment=worker_environment_values)),
             }
         if args.runtime_mode == "pcie":
             tpu_smi = Path(summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
             summary["board_preflight"] = board_health(0, tpu_smi)
         _write_summary(summary_path, summary)
     except KeyboardInterrupt:
-        summary.update({"status": "cancelled", "failed_phase": "preflight",
-                        "finished_at": _utc_now()})
+        summary.update({
+            "status": "cancelled",
+            "failed_phase": "preflight",
+            "finished_at": _utc_now()
+        })
         _write_summary(summary_path, summary)
         raise
     except Exception as exc:
-        summary.update({"status": "failed", "failed_phase": "preflight",
-                        "error_type": type(exc).__name__, "error": str(exc),
-                        "finished_at": _utc_now()})
+        summary.update({
+            "status": "failed",
+            "failed_phase": "preflight",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "finished_at": _utc_now()
+        })
         _write_summary(summary_path, summary)
         print(f"STOP preflight: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
@@ -403,15 +420,16 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                 try:
                     if args.runtime_mode == "pcie":
                         assert_source_identity_unchanged(repo_root, summary)
-                        assert_toolchain_identity_unchanged(
-                            worker_environment_values, summary["toolchain_identity"])
+                        assert_toolchain_identity_unchanged(worker_environment_values,
+                                                            summary["toolchain_identity"])
                     profiler = TPUInstructionProfiler(
                         _profiling_config(args, output_dir, chip,
                                           f"{chip}-tpukernel-{dtype}-{case}"))
                     launch_attempted = True
-                    report = (profiler.run_pcie(command, environment=worker_environment_values)
-                              if args.runtime_mode == "pcie" else
-                              profiler.run_cmodel(command, environment=worker_environment_values))
+                    report = (
+                        profiler.run_pcie(command, environment=worker_environment_values)
+                        if args.runtime_mode == "pcie" else profiler.run_cmodel(
+                            command, environment=worker_environment_values))
                     _validate_profile_report(
                         report, require_decoded_timing=args.require_decoded_timing)
                     numeric = _worker_payload(Path(report.stdout_path))
@@ -426,14 +444,15 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                         report, require_decoded_timing=args.require_decoded_timing)
                     result["numeric"] = numeric
                     if args.runtime_mode == "pcie":
-                        tpu_smi = Path(
-                            summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
+                        tpu_smi = Path(summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
                         postflight_attempted = True
                         result["board_postflight"] = board_health(
                             0, tpu_smi, quarantine_on_failure=True)
                     summary["cases"][key] = result
-                    print(f"PASS {key} raw={len(report.raw_instructions)} "
-                          f"timed={len(report.instruction_timings)}", flush=True)
+                    print(
+                        f"PASS {key} raw={len(report.raw_instructions)} "
+                        f"timed={len(report.instruction_timings)}",
+                        flush=True)
                 except KeyboardInterrupt as error:
                     summary["status"] = "cancelled"
                     summary["stopped_after"] = key
@@ -454,8 +473,7 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                     if (args.runtime_mode == "pcie" and launch_attempted and
                             not postflight_attempted):
                         try:
-                            tpu_smi = Path(
-                                summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
+                            tpu_smi = Path(summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
                             summary["board_after_cancel"] = board_health(
                                 0, tpu_smi, quarantine_on_failure=True)
                         except Exception as health_error:
@@ -477,13 +495,15 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                         if postflight_evidence is not None:
                             result["board_postflight_failure"] = postflight_evidence
                     else:
-                        result = {"status": "failed", "error_type": type(exc).__name__,
-                                  "error": str(exc)}
+                        result = {
+                            "status": "failed",
+                            "error_type": type(exc).__name__,
+                            "error": str(exc)
+                        }
                     if (args.runtime_mode == "pcie" and launch_attempted and
                             not postflight_attempted):
                         try:
-                            tpu_smi = Path(
-                                summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
+                            tpu_smi = Path(summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
                             result["board_after_failure"] = board_health(
                                 0, tpu_smi, quarantine_on_failure=True)
                         except Exception as health_error:
@@ -506,10 +526,14 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
         ending_source = git_source_identity(repo_root)
         ending_toolchain = toolchain_identity(worker_environment_values, args.runtime_mode)
     except Exception as exc:
-        summary.update({"status": "failed", "complete": False,
-                        "failed_phase": "final-identity-check",
-                        "error_type": type(exc).__name__, "error": str(exc),
-                        "finished_at": _utc_now()})
+        summary.update({
+            "status": "failed",
+            "complete": False,
+            "failed_phase": "final-identity-check",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "finished_at": _utc_now()
+        })
         _write_summary(summary_path, summary)
         return 1
     source_fields = ("git_commit", "implementation_worktree_dirty", "source_state_sha256")
@@ -517,11 +541,14 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
         ending_source.get(field) != summary.get(field) for field in source_fields))
     toolchain_changed = ending_toolchain != summary.get("toolchain_identity")
     if source_changed or toolchain_changed:
-        summary.update({"status": "failed", "complete": False,
-                        "failed_phase": "final-identity-check",
-                        "source_changed_during_run": ending_source if source_changed else None,
-                        "toolchain_changed_during_run": toolchain_changed,
-                        "finished_at": _utc_now()})
+        summary.update({
+            "status": "failed",
+            "complete": False,
+            "failed_phase": "final-identity-check",
+            "source_changed_during_run": ending_source if source_changed else None,
+            "toolchain_changed_during_run": toolchain_changed,
+            "finished_at": _utc_now()
+        })
         _write_summary(summary_path, summary)
         return 1
     summary["status"] = "passed"
@@ -575,16 +602,22 @@ def main() -> int:
                     except (OSError, ValueError):
                         pass
                 if not failure:
-                    failure.update({"schema_version": _SCHEMA_VERSION,
-                                    "matrix_kind": _MATRIX_KIND,
-                                    "runtime_mode": "pcie",
-                                    "programming_model": "tpukernel",
-                                    "started_at": _utc_now()})
+                    failure.update({
+                        "schema_version": _SCHEMA_VERSION,
+                        "matrix_kind": _MATRIX_KIND,
+                        "runtime_mode": "pcie",
+                        "programming_model": "tpukernel",
+                        "started_at": _utc_now()
+                    })
                     failure.update(git_source_identity(repo_root))
-                failure.update({"status": "failed", "complete": False,
-                                "failed_phase": "pcie-session" if lock_acquired else "device-lock",
-                                "error_type": type(exc).__name__, "error": str(exc),
-                                "finished_at": _utc_now()})
+                failure.update({
+                    "status": "failed",
+                    "complete": False,
+                    "failed_phase": "pcie-session" if lock_acquired else "device-lock",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "finished_at": _utc_now()
+                })
                 _write_summary(summary_path, failure)
                 print(f"PCIe session stopped: {type(exc).__name__}: {exc}", file=sys.stderr)
                 return 1

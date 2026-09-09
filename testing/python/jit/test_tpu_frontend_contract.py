@@ -181,8 +181,8 @@ def test_invalid_elementwise_broadcast_fails_at_frontend():
 )
 @pytest.mark.parametrize("dtype", ("float16", "bfloat16", "float32"))
 @pytest.mark.parametrize("rhs_shape", ((4, 32), (4, 1)))
-def test_portable_max_selects_backend_instruction(chip, programming_model, instruction,
-                                                  dtype, rhs_shape):
+def test_portable_max_selects_backend_instruction(chip, programming_model, instruction, dtype,
+                                                  rhs_shape):
 
     @T.prim_func
     def kernel():
@@ -209,8 +209,7 @@ def test_portable_max_selects_backend_instruction(chip, programming_model, instr
 
 @pytest.mark.parametrize(
     ("operation", "instruction"),
-    (("add", "rvt_fadd"), ("sub", "rvt_fsub"),
-     ("mul", "rvt_fmul"), ("div", "rvt_fdiv")),
+    (("add", "rvt_fadd"), ("sub", "rvt_fsub"), ("mul", "rvt_fmul"), ("div", "rvt_fdiv")),
 )
 def test_rv_w_broadcast_uses_a_zero_stride_descriptor(operation, instruction):
 
@@ -247,8 +246,7 @@ def test_rv_w_broadcast_uses_a_zero_stride_descriptor(operation, instruction):
     (("e4m3_float8", "DT_FP8E4M3"), ("e5m2_float8", "DT_FP8E5M2")),
 )
 @pytest.mark.parametrize("rhs_shape", ((4, 32), (4, 1)))
-def test_tpukernel_fp8_max_selects_generic_instruction(
-        chip, dtype, dtype_token, rhs_shape):
+def test_tpukernel_fp8_max_selects_generic_instruction(chip, dtype, dtype_token, rhs_shape):
 
     @T.prim_func
     def kernel():
@@ -442,8 +440,8 @@ def test_invalid_copy_operand_fails_with_a_frontend_diagnostic():
 def test_rank4_singleton_slice_roundtrips_through_rank2_local_tile(chip):
 
     @T.prim_func
-    def kernel(source: T.Tensor((1, 16, 1, 16), "float32"),
-               destination: T.Tensor((1, 16, 1, 16), "float32")):
+    def kernel(source: T.Tensor((1, 16, 1, 16), "float32"), destination: T.Tensor((1, 16, 1, 16),
+                                                                                  "float32")):
         with T.Kernel(1, is_cpu=True) as _:
             local = T.alloc_shared((16, 16), "float32")
             T.ppl_copy(source[0:1, 0:16, 0:1, 0:16], local)

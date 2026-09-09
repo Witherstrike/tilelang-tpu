@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from tilelang.engine.tpu_config import TPU_CHIP_SPECS
-from tpu_demo.cases import CHIP_CORE_COUNTS, TARGET_CONFIGS, build_cases
+from tpu_demo.cases import (CHIP_CORE_COUNTS, RV_SUPPORTED_OPERATIONS, TARGET_CONFIGS, build_cases)
 from tpu_demo.common import DemoNumericalMismatch, comparison, validate_selection
 from tpu_demo.elementwise import build_elementwise
 from tpu_demo.flashattn import build_flashattn
@@ -24,11 +24,11 @@ def test_registry_is_unique_complete_and_capability_scoped():
     assert len(cases) == 36
     assert len({case.case_id for case in cases}) == len(cases)
     assert sum(case.supports_rv for case in cases) == 15
+    assert {"elementwise-add", "elementwise-sub", "elementwise-mul", "elementwise-div",
+            "matmul"} == RV_SUPPORTED_OPERATIONS
     flash_cases = [case for case in cases if case.operation == "flashattn"]
     assert len(flash_cases) == 9
-    assert {case.variant for case in flash_cases} == {
-        "balanced", "descending-max", "weighted-keys"
-    }
+    assert {case.variant for case in flash_cases} == {"balanced", "descending-max", "weighted-keys"}
 
 
 @pytest.mark.parametrize("invalid", (1, 0, "false", None))
@@ -47,38 +47,52 @@ def test_flashattn_weighted_keys_rejects_uniform_weight_degeneracy(dtype):
 
 
 def test_lightweight_demo_target_registry_matches_compiler_capabilities():
-    assert CHIP_CORE_COUNTS == {
+    assert {
         name: spec.physical_core_count for name, spec in TPU_CHIP_SPECS.items()
-    }
-    assert set(TARGET_CONFIGS) == {
-        (name, programming_model)
-        for name, spec in TPU_CHIP_SPECS.items()
-        for programming_model in spec.programming_models
-    }
+    } == CHIP_CORE_COUNTS
+    assert {(name, programming_model)
+            for name, spec in TPU_CHIP_SPECS.items()
+            for programming_model in spec.programming_models} == set(TARGET_CONFIGS)
 
 
 def test_backend_selection_rejects_unsupported_or_unsupervised_paths(monkeypatch):
     with pytest.raises(ValueError, match="BM1690.*RV Tensor"):
         validate_selection(
-            chip="bm1690", programming_model="rv", runtime_mode="cmodel",
-            supports_rv=True, allow_pcie=False, device_id=None)
+            chip="bm1690",
+            programming_model="rv",
+            runtime_mode="cmodel",
+            supports_rv=True,
+            allow_pcie=False,
+            device_id=None)
     with pytest.raises(ValueError, match="does not yet expose"):
         validate_selection(
-            chip="sg2260e", programming_model="rv", runtime_mode="cmodel",
-            supports_rv=False, allow_pcie=False, device_id=None)
+            chip="sg2260e",
+            programming_model="rv",
+            runtime_mode="cmodel",
+            supports_rv=False,
+            allow_pcie=False,
+            device_id=None)
     monkeypatch.delenv("TILELANG_TPU_PROFILE_SESSION", raising=False)
     with pytest.raises(ValueError, match="supervised demo matrix"):
         validate_selection(
-            chip="sg2260e", programming_model="tpukernel", runtime_mode="pcie",
-            supports_rv=False, allow_pcie=True, device_id=0)
+            chip="sg2260e",
+            programming_model="tpukernel",
+            runtime_mode="pcie",
+            supports_rv=False,
+            allow_pcie=True,
+            device_id=0)
 
 
 @pytest.mark.parametrize("chip,cores", (("bm1690", "8"), ("sg2260e", "4")))
 def test_cmodel_selection_sets_physical_core_topology(monkeypatch, chip, cores):
     monkeypatch.setenv("TILELANG_TPU_ALLOW_PCIE_LOAD", "1")
     validate_selection(
-        chip=chip, programming_model="tpukernel", runtime_mode="cmodel",
-        supports_rv=False, allow_pcie=False, device_id=None)
+        chip=chip,
+        programming_model="tpukernel",
+        runtime_mode="cmodel",
+        supports_rv=False,
+        allow_pcie=False,
+        device_id=None)
     assert __import__("os").environ["TPU_RT_CORE_NUM"] == cores
     assert "TILELANG_TPU_ALLOW_PCIE_LOAD" not in __import__("os").environ
 
@@ -101,13 +115,32 @@ def test_nonfinite_mismatch_payload_is_json_serializable():
 @pytest.mark.parametrize(
     "builder,kwargs,diagnostic",
     (
-        (build_elementwise, {"operation": "add", "rows": 0}, "positive integer"),
-        (build_matmul, {"m": 17, "block_m": 16}, "divisible"),
-        (build_rmsnorm, {"rows": 5, "block_rows": 4}, "divisible"),
-        (build_rmsnorm_splitk, {"width": 65, "block_k": 32}, "divisible"),
-        (build_rope, {"width": 31}, "divisible"),
-        (build_swiglu, {"width": 33, "block_width": 32}, "divisible"),
-        (build_flashattn, {"sequence": 33}, "divisible"),
+        (build_elementwise, {
+            "operation": "add",
+            "rows": 0
+        }, "positive integer"),
+        (build_matmul, {
+            "m": 17,
+            "block_m": 16
+        }, "divisible"),
+        (build_rmsnorm, {
+            "rows": 5,
+            "block_rows": 4
+        }, "divisible"),
+        (build_rmsnorm_splitk, {
+            "width": 65,
+            "block_k": 32
+        }, "divisible"),
+        (build_rope, {
+            "width": 31
+        }, "divisible"),
+        (build_swiglu, {
+            "width": 33,
+            "block_width": 32
+        }, "divisible"),
+        (build_flashattn, {
+            "sequence": 33
+        }, "divisible"),
     ),
 )
 def test_demo_builders_reject_unimplemented_tail_paths(builder, kwargs, diagnostic):

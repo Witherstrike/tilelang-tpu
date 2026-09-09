@@ -16,8 +16,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 import torch
 
-from tpu_demo.cases import (CHIP_CORE_COUNTS, CHIPS, PROGRAMMING_MODELS,
-                            RUNTIME_MODES)
+from tpu_demo.cases import (CHIP_CORE_COUNTS, CHIPS, PROGRAMMING_MODELS, RUNTIME_MODES)
 
 
 class DemoNumericalMismatch(AssertionError):
@@ -43,23 +42,20 @@ def validate_dimensions(operation: str, **dimensions: int) -> None:
     """Reject dynamic, boolean, zero, and negative demo dimensions early."""
     for name, value in dimensions.items():
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise ValueError(
-                f"{operation} requires positive integer {name}, got {value!r}")
+            raise ValueError(f"{operation} requires positive integer {name}, got {value!r}")
 
 
 def validate_exact_tiling(operation: str, *axes: tuple[str, int, int]) -> None:
     """Require full tiles because these demos intentionally have no tail path."""
     for name, extent, tile in axes:
         if extent % tile:
-            raise ValueError(
-                f"{operation} requires {name}={extent} to be divisible by tile {tile}")
+            raise ValueError(f"{operation} requires {name}={extent} to be divisible by tile {tile}")
 
 
 def validate_positive_scalar(operation: str, name: str, value: float) -> None:
     if (isinstance(value, bool) or not isinstance(value, (int, float)) or
             not math.isfinite(value) or value <= 0):
-        raise ValueError(
-            f"{operation} requires finite positive {name}, got {value!r}")
+        raise ValueError(f"{operation} requires finite positive {name}, got {value!r}")
 
 
 def validate_selection(
@@ -91,14 +87,13 @@ def validate_selection(
         }
         for name, expected in expected_profile.items():
             if os.environ.get(name) != expected:
-                raise ValueError(
-                    "PCIe demos may run only in the supervised demo matrix; "
-                    f"missing runner-owned {name}={expected!r}")
+                raise ValueError("PCIe demos may run only in the supervised demo matrix; "
+                                 f"missing runner-owned {name}={expected!r}")
     configure_runtime(runtime_mode, allow_pcie, device_id, chip=chip)
 
 
-def configure_runtime(runtime_mode: str, allow_pcie: bool,
-                      device_id: Optional[int], *, chip: str) -> None:
+def configure_runtime(runtime_mode: str, allow_pcie: bool, device_id: Optional[int], *,
+                      chip: str) -> None:
     if runtime_mode == "cmodel":
         if allow_pcie or device_id is not None:
             raise ValueError("PCIe acknowledgement/device id are invalid in CModel mode")
@@ -207,6 +202,7 @@ def comparison(
         "element_count": actual.numel(),
     }
     if not passed:
+
         def json_sample(tensor: torch.Tensor) -> list[Any]:
             return [
                 repr(value) if isinstance(value, float) and not math.isfinite(value) else value

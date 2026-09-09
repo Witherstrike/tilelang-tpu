@@ -615,12 +615,7 @@ class TLCPUSourceWrapper(object):
             raise ValueError("Cannot find primary function in the module.")
 
 
-# (xxw-keju,add wrapper for tpu backend)
 class TLTPUSourceWrapper(object):
-    #    {DT_FP32,    DT_FP32,    DT_FP16,  DT_BFP16,
-    #     DT_FP8E5M2, DT_FP8E4M3, DT_FP20,  DT_TF32,
-    #     DT_INT32,   DT_UINT32,  DT_INT16, DT_UINT16,
-    #     DT_INT8,    DT_UINT8,   DT_INT4,  DT_UINT4};
     _TYPE_MAP = {
         "float32": "DT_FP32",
         "float16": "DT_FP16",
@@ -650,35 +645,26 @@ class TLTPUSourceWrapper(object):
     }
 
     backend = "tl"
-    device_mod: Optional[IRModule] = None
-    host_mod: Optional[IRModule] = None
-    pass_configs: Optional[Dict[str, Any]] = None
     output_indices: List[int] = []
 
     def __init__(self,
                  scheduled_ir_module: IRModule,
                  source: str,
                  target: Target,
-                 device_mod: Optional[IRModule] = None,
-                 host_mod: Optional[IRModule] = None,
-                 pass_configs: Optional[Dict[str, Any]] = None,
                  output_indices: Optional[List[int]] = None,
                  output_dir: Optional[str] = None):
+        if not is_tpu_target(target):
+            raise ValueError("TLTPUSourceWrapper requires a TPU target")
+        if output_dir is None:
+            raise ValueError("TLTPUSourceWrapper requires an explicit output directory")
         self.mod = scheduled_ir_module
         self.target = target
         self.source = source
-        self.device_mod = device_mod
-        self.host_mod = host_mod
-        self.pass_configs = pass_configs
         self.output_indices = output_indices if output_indices is not None else []
         self.template_dir = get_tpu_template_dir()
-        self.output_dir = os.path.abspath(output_dir or self.template_dir)
+        self.output_dir = os.path.abspath(output_dir)
         os.makedirs(self.output_dir, exist_ok=True)
         self.function_args = None
-        self.function_names: Optional[str] = None
-        self.dynamic_smem_buf: Optional[int] = None
-        self.srcpath: Optional[str] = None
-        self.libpath: Optional[str] = None
         self.lib_code: Optional[str] = self.update_lib_code(source)
 
     def parse_func_args(self):
@@ -722,13 +708,13 @@ class TLTPUSourceWrapper(object):
         with open(template_file, "r") as f:
             template_content = f.read()
 
-        # 生成参数相关的内容
+        # Generate positional host-ABI parameters.
         param_names = [f"ptr_v{i+1}" for i in range(num_params)]
 
-        # 结构体成员
+        # Kernel argument-structure members.
         struct_members = "\n  ".join([f"unsigned long long {name};" for name in param_names])
 
-        # 函数参数
+        # Wrapper function parameters.
         func_params = ", ".join([f"unsigned long long {name}" for name in param_names])
         struct_params = ", ".join(
             [f"unsigned long long {name}" for i, name in enumerate(param_names)])
@@ -749,12 +735,12 @@ class TLTPUSourceWrapper(object):
         with open(template_file, "r") as f:
             template_content = f.read()
 
-        # 生成参数相关的内容
+        # Generate positional host-ABI parameters.
         param_names = [f"ptr_v{i+1}" for i in range(num_params)]
         func_params = ", ".join([f"unsigned long long {name}" for name in param_names])
         struct_assignments = "\n  ".join([f"api.{name} = {name};" for name in param_names])
 
-        # 格式化内容
+        # Render the host wrapper.
         formatted_content = template_content.format(
             function_name=function_name,
             func_params=func_params,
@@ -769,7 +755,7 @@ class TLTPUSourceWrapper(object):
         with open(template_file, "r") as f:
             template_content = f.read()
 
-        # 生成各个代码段
+        # Build the generated host-code sections.
         arg_declarations = []
         device_declarations = []
         malloc_statements = []
@@ -777,15 +763,15 @@ class TLTPUSourceWrapper(object):
         memcpy_d2s_statements = []
         free_statements = []
         kernel_call_args = []
-        # TIR BufferStore analysis supplies output_indices for ordinary PPL
-        # kernels.  Raw RVT calls are opaque C ABI operations, so they have no
-        # TIR write effect for that analysis.  They may intentionally mutate
-        # any pointer argument; always D2S every argument in that case even
-        # when a caller supplied result_idx.  The Python adapter follows the
-        # same rule for an explicit full-parameter call.
-        # Canonical RV lowering has precise TIR effects and therefore uses the
-        # ordinary output set.  Only the explicit marker emitted for opaque raw
-        # rvt_* calls needs conservative copy-back of every argument.
+        # TIR BufferStore analysis supplies output_indices for compiler-owned
+        # TPU semantic kernels. Raw RVT calls are opaque C ABI operations, so
+        # they have no TIR write effect for that analysis. They may
+        # intentionally mutate any pointer argument; always D2S every argument
+        # in that case even when a caller supplied result_idx. The Python
+        # adapter follows the same rule for an explicit full-parameter call.
+        # Compiler-owned RV lowering has precise TIR effects and therefore uses
+        # the inferred output set. Only the explicit marker emitted for opaque
+        # raw rvt_* calls needs conservative copy-back of every argument.
         has_raw_rvt_abi = "TILELANG_TPU_OPAQUE_RAW_RVT_ABI" in self.source
         copy_back_indices = (
             set(range(len(self.function_args)))
@@ -824,7 +810,7 @@ class TLTPUSourceWrapper(object):
         kernel_call = f'  int rst = {function_name}({", ".join(kernel_call_args)});'
         pure_kernel_call = f'  rst = {function_name}({", ".join(kernel_call_args)});'
 
-        # 格式化内容
+        # Render the host entry point.
         formatted_content = template_content.format(
             arg_declarations="\n".join(arg_declarations),
             device_declarations="\n".join(device_declarations),
@@ -925,9 +911,6 @@ class TLWrapper(BaseWrapper):
                 scheduled_ir_module=self.scheduled_ir_module,
                 source=c_source,
                 target=self.target,
-                device_mod=self.device_mod,
-                host_mod=self.host_mod,
-                pass_configs=self.pass_configs,
                 output_indices=self.output_indices,
                 output_dir=self.tpu_workspace_dir,
             )

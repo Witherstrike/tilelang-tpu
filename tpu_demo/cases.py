@@ -29,6 +29,13 @@ OPERATIONS = (
     "swiglu",
     "flashattn",
 )
+RV_SUPPORTED_OPERATIONS = frozenset({
+    "elementwise-add",
+    "elementwise-sub",
+    "elementwise-mul",
+    "elementwise-div",
+    "matmul",
+})
 
 
 @dataclass(frozen=True)
@@ -46,12 +53,10 @@ class DemoCase:
 def build_cases() -> tuple[DemoCase, ...]:
     cases = []
     for operation in OPERATIONS:
-        supports_rv = operation.startswith("elementwise-") or operation == "matmul"
+        supports_rv = operation in RV_SUPPORTED_OPERATIONS
         for dtype in DTYPES:
-            variants = (
-                ("balanced", "descending-max", "weighted-keys")
-                if operation == "flashattn" else ("default",)
-            )
+            variants = (("balanced", "descending-max",
+                         "weighted-keys") if operation == "flashattn" else ("default",))
             for variant in variants:
                 suffix = f".{variant}" if variant != "default" else ""
                 cases.append(

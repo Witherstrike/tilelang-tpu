@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) Tile-AI Corporation.
+# Licensed under the MIT License.
 """Validate the TileLang TPU operation contract with the Python standard library.
 
 This checker deliberately does not require ``jsonschema``.  It verifies the
@@ -709,7 +711,9 @@ def _extract_python_chip_specs(path: Path) -> dict[str, dict[str, Any]]:
         raise ContractError("TPU_CHIP_SPECS must remain a literal mapping constructor")
 
     result: dict[str, dict[str, Any]] = {}
-    for key_node, spec_node in zip(value.args[0].keys, value.args[0].values):
+    # ast.Dict always stores keys and values in matching positions. Python 3.8
+    # does not support zip(strict=True), so keep the invariant explicit here.
+    for key_node, spec_node in zip(value.args[0].keys, value.args[0].values):  # noqa: B905
         if (not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str) or
                 not isinstance(spec_node, ast.Call)):
             raise ContractError("TPU_CHIP_SPECS contains a non-literal chip entry")

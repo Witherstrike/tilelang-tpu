@@ -30,10 +30,9 @@ def _validate_tpu_phase_target(mod: IRModule, target: Target, phase_name: str) -
                 f"target kind {function_target.kind.name!r} with a TPU target")
         function_selection = resolve_tpu_target(target=function_target)
         if function_selection != selected_target:
-            raise ValueError(
-                f"{phase_name} target identity mismatch for PrimFunc "
-                f"{global_var.name_hint!r}: function={function_selection}, "
-                f"requested={selected_target}")
+            raise ValueError(f"{phase_name} target identity mismatch for PrimFunc "
+                             f"{global_var.name_hint!r}: function={function_selection}, "
+                             f"requested={selected_target}")
 
 
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
@@ -49,10 +48,10 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
     mod = tilelang.transform.FrontendLegalize()(mod)
     mod = tir.transform.Simplify()(mod)
-    # The TPU source emitter does not yet implement residual vector Ramp/load
+    # The TPU source generator does not yet implement residual vector Ramp/load
     # expressions.  Preserve scalar loops until that codegen contract exists;
     # turning an explicit vectorized loop into vector IR here would otherwise
-    # let the emitter silently omit parts of an expression.
+    # let code generation silently omit parts of an expression.
     if target.kind.name != "tpu":
         mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     mod = tir.transform.Simplify()(mod)
@@ -89,10 +88,10 @@ def _optimize_tpu(mod: IRModule) -> IRModule:
     # StorageRewrite assumes flattened storage and can duplicate the
     # structured DeclBuffer/Allocate pairs consumed by TPU codegen. BM1690 and
     # SG2260E share this LMEM geometry; their programming models diverge later
-    # at the target-selected emitter, not in these semantic passes.
+    # during target-selected code generation, not in these semantic passes.
     # Software-pipeline planning/injection remains disabled until TPU DMA and
     # compute operations have an explicit dependency/token model.  Likewise,
-    # vectorization must not run before the TPU emitter supports residual
+    # vectorization must not run before TPU code generation supports residual
     # vector IR.  Both optimizations have previously produced source that was
     # syntactically plausible but did not preserve the serial program.
     return _finalize_scheduled_ir(mod, rewrite_storage=False, vectorize=False)

@@ -15,7 +15,7 @@ _TPU_EXECUTION_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
-class _TPURuntimeProfile:
+class _TPURuntimeIdentity:
     """One process-global vendor runtime identity.
 
     The vendor API exposed by generated ``main.so`` has no verified process
@@ -32,11 +32,11 @@ class _TPURuntimeProfile:
     sdk_identity: Tuple[str, str, str]
 
 
-_TPU_RUNTIME_PROFILE: Optional[_TPURuntimeProfile] = None
+_TPU_RUNTIME_IDENTITY: Optional[_TPURuntimeIdentity] = None
 
 
-def reserve_tpu_runtime_profile(tpu_target, tpu_runtime, device_id: int,
-                                sdk_identity: Tuple[str, str, str]) -> None:
+def reserve_tpu_runtime_identity(tpu_target, tpu_runtime, device_id: int,
+                                 sdk_identity: Tuple[str, str, str]) -> None:
     """Reserve the vendor runtime identity before loading a TPU library.
 
     CModel and PCIe share process-global vendor runtime state.  Since the
@@ -44,13 +44,13 @@ def reserve_tpu_runtime_profile(tpu_target, tpu_runtime, device_id: int,
     process switch runtime mode, chip/core topology, programming model, PCIe
     device, or the PPL runtime libraries can reuse stale state despite
     unloading a module.  Fail closed before ``ctypes.CDLL``; use a fresh
-    process for every different profile.
+    process for every different identity.
     """
-    if not isinstance(device_id, int) or device_id < 0:
+    if isinstance(device_id, bool) or not isinstance(device_id, int) or device_id < 0:
         raise ValueError(f"TPU runtime device id must be a non-negative int, got {device_id!r}")
     if len(sdk_identity) != 3:
         raise ValueError("TPU runtime SDK identity must contain root, runtime, and backend paths")
-    profile = _TPURuntimeProfile(
+    identity = _TPURuntimeIdentity(
         runtime_mode=tpu_runtime.runtime_mode,
         chip=tpu_target.chip,
         core_count=tpu_target.chip_spec.physical_core_count,
@@ -58,24 +58,24 @@ def reserve_tpu_runtime_profile(tpu_target, tpu_runtime, device_id: int,
         device_id=device_id,
         sdk_identity=sdk_identity,
     )
-    global _TPU_RUNTIME_PROFILE
+    global _TPU_RUNTIME_IDENTITY
     with _TPU_EXECUTION_LOCK:
-        if _TPU_RUNTIME_PROFILE is None:
-            _TPU_RUNTIME_PROFILE = profile
-        elif profile != _TPU_RUNTIME_PROFILE:
+        if _TPU_RUNTIME_IDENTITY is None:
+            _TPU_RUNTIME_IDENTITY = identity
+        elif identity != _TPU_RUNTIME_IDENTITY:
             raise RuntimeError("TileLang TPU runtime is already reserved for "
-                               f"runtime={_TPU_RUNTIME_PROFILE.runtime_mode}, "
-                               f"chip={_TPU_RUNTIME_PROFILE.chip}, "
-                               f"cores={_TPU_RUNTIME_PROFILE.core_count}, "
-                               f"programming_model={_TPU_RUNTIME_PROFILE.programming_model}, "
-                               f"device={_TPU_RUNTIME_PROFILE.device_id}, "
-                               f"sdk={_TPU_RUNTIME_PROFILE.sdk_identity[0]}; cannot load "
-                               f"runtime={profile.runtime_mode}, chip={profile.chip}, "
-                               f"cores={profile.core_count}, "
-                               f"programming_model={profile.programming_model}, "
-                               f"device={profile.device_id}, sdk={profile.sdk_identity[0]} "
+                               f"runtime={_TPU_RUNTIME_IDENTITY.runtime_mode}, "
+                               f"chip={_TPU_RUNTIME_IDENTITY.chip}, "
+                               f"cores={_TPU_RUNTIME_IDENTITY.core_count}, "
+                               f"programming_model={_TPU_RUNTIME_IDENTITY.programming_model}, "
+                               f"device={_TPU_RUNTIME_IDENTITY.device_id}, "
+                               f"sdk={_TPU_RUNTIME_IDENTITY.sdk_identity[0]}; cannot load "
+                               f"runtime={identity.runtime_mode}, chip={identity.chip}, "
+                               f"cores={identity.core_count}, "
+                               f"programming_model={identity.programming_model}, "
+                               f"device={identity.device_id}, sdk={identity.sdk_identity[0]} "
                                "in the same process. "
-                               "Use a fresh process for another TPU runtime profile.")
+                               "Use a fresh process for another TPU runtime identity.")
 
 
 def reject_unverified_tpu_database_artifact(target) -> None:

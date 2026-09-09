@@ -19,16 +19,16 @@
 
 `cmodel/pcie` 是执行模式，不是 target，也不参与算子或指令选择。契约只为三个有效 target 建立结果。
 
-运行资料按可信度分层：PPL 1.7 手册及 `tpub_7_1/tpub_7_1_e` 头文件说明 selector；TileLang 源码与 codegen 证明接入；CModel/PCIe 数值工件才证明精确 case。`.local_content/tpu_kernel_manual.md` 是通用 TPU-Kernel API 参考，不能据此推导 TPUv7、FP8 或某个 target 的可执行性。
+运行资料按可信度分层：PPL 1.7 手册及 `tpub_7_1/tpub_7_1_e` 头文件说明底层候选能力；TileLang 源码与 codegen 证明编译器已经接入；CModel/PCIe 数值工件才证明具体 case 可执行。`.local_content/tpu_kernel_manual.md` 是通用 TPU-Kernel API 参考，不能据此推导 TPUv7、FP8 或某个 target 的可执行性。
 
 ## 2. 状态与匹配规则
 
-capability 由 `operation_id + variant + dtype_bindings + constraints` 唯一限定，并按 target 记录：
+每项 capability 均由 `operation_id + variant + dtype_bindings + constraints` 组成的支持条件（下文称 selector）唯一限定，并按 target 记录结果：
 
 1. `declared`：公开 TileLang 前端能否表达；
 2. `codegen_passed`：精确 selector 是否通过目标相关 lowering/source emission；
-3. `cmodel_numeric_passed`：CModel 输出是否通过指定 oracle；
-4. `pcie_numeric_passed`：真实芯片输出是否通过指定 oracle；
+3. `cmodel_numeric_passed`：CModel 输出是否通过指定参考结果；
+4. `pcie_numeric_passed`：真实芯片输出是否通过指定参考结果；
 5. `sdk_declared`：可选，只说明底层手册或头文件有声明。
 
 阶段状态包括 `passed/historical_passed/failed/unverified/not_applicable`。`historical_passed` 仅保留旧基线硬件事实，不能授权当前实现上板。`support_status="supported"` 也不等价于数值或 PCIe 已通过；调度器必须额外检查所需执行阶段为 `passed`。
@@ -39,39 +39,39 @@ capability 由 `operation_id + variant + dtype_bindings + constraints` 唯一限
 
 全局 invariant `semantic-buffer.region-abi` 覆盖 16 个 operation。每个 typed semantic buffer 参数必须以 `tl.region(BufferLoad, access_mask, logical_extents)` 跨越 TPU 语义边界；不保留裸 `tir.tvm_access_ptr` 兼容入口。非 copy op 要求零起点 whole-buffer region；copy 可以携带显式子区间，但必须满足连续 Ramp、bounds 与 local C-axis 起点约束。
 
-native 层把 dtype、原始 rank、shape、scope 和 storage identity 与 compiler-owned descriptor 逐项核对。改变这些属性的 view/reshape/重新包装会 fail-closed；只有 descriptor 完全等价、且不引入第二种表示的 presentation alias 合法。
+native 层把 dtype、原始 rank、shape、scope 和 storage identity 与 compiler-owned descriptor 逐项核对。改变这些属性的 view/reshape/重新包装会直接拒绝；只有 descriptor 完全等价、且不引入第二种表示的 presentation alias 合法。
 
-## 3. 当前 canonical 回归
+## 3. 当前正式验收回归
 
-当前契约绑定完整 revision `e5774525e3a6e11d0d6010e979203c55181a8872` 和 source state `c49cf3594f2ce5d215e54d331a10ca0bbbf92bd6667fba3e172b2b3621f7f5c4`。canonical 根目录为 [`research/artifacts/2026-09-09/final-e5774525`](../artifacts/2026-09-09/final-e5774525/)。正式集合共 39 份 summary；它们均满足 `complete=true`、全部 case `passed`、`implementation_worktree_dirty=false`，且源码身份范围为 tracked 与 untracked 文件（排除 `research/**`）。
+当前契约绑定完整 Git 提交 `e5774525e3a6e11d0d6010e979203c55181a8872` 和源码快照标识 `c49cf3594f2ce5d215e54d331a10ca0bbbf92bd6667fba3e172b2b3621f7f5c4`。本地证据根目录为 `research/artifacts/2026-09-09/final-e5774525/`；该目录已被 Git 忽略，不随仓库提交。验收集合共 39 份 summary；它们均满足 `complete=true`、全部 case `passed`、`implementation_worktree_dirty=false`，且源码身份同时覆盖 Git 已跟踪和未跟踪的文件（排除 `research/**`）。下表中的文件路径均相对于该证据根目录。
 
 ### 3.1 CModel：553/553
 
-| summary | target 分布 | 结果 |
+| summary（相对路径） | target 分布 | 结果 |
 | --- | --- | ---: |
-| [core BM1690](../artifacts/2026-09-09/final-e5774525/core-bm1690-cmodel/summary.json) | TPU-Kernel 28 | 28/28 |
-| [core SG2260E](../artifacts/2026-09-09/final-e5774525/core-sg2260e-cmodel-retry1/summary.json) | TPU-Kernel 28 + RV 28 | 56/56 |
-| [FP8 BM1690](../artifacts/2026-09-09/final-e5774525/fp8-bm1690-cmodel/summary.json) | TPU-Kernel 42 | 42/42 |
-| [FP8 SG2260E](../artifacts/2026-09-09/final-e5774525/fp8-sg2260e-cmodel-retry1/summary.json) | TPU-Kernel 42 | 42/42 |
-| [TPU-Kernel BM1690](../artifacts/2026-09-09/final-e5774525/tpukernel-bm1690-cmodel/summary.json) | TPU-Kernel 152 | 152/152 |
-| [TPU-Kernel SG2260E](../artifacts/2026-09-09/final-e5774525/tpukernel-sg2260e-cmodel-retry1/summary.json) | TPU-Kernel 146 | 146/146 |
-| [demo BM1690](../artifacts/2026-09-09/final-e5774525/demo-bm1690-cmodel/summary.json) | TPU-Kernel 36 | 36/36 |
-| [demo SG2260E](../artifacts/2026-09-09/final-e5774525/demo-sg2260e-cmodel-retry1/summary.json) | TPU-Kernel 36 + RV 15 | 51/51 |
+| `core-bm1690-cmodel/summary.json` | TPU-Kernel 28 | 28/28 |
+| `core-sg2260e-cmodel-retry1/summary.json` | TPU-Kernel 28 + RV 28 | 56/56 |
+| `fp8-bm1690-cmodel/summary.json` | TPU-Kernel 42 | 42/42 |
+| `fp8-sg2260e-cmodel-retry1/summary.json` | TPU-Kernel 42 | 42/42 |
+| `tpukernel-bm1690-cmodel/summary.json` | TPU-Kernel 152 | 152/152 |
+| `tpukernel-sg2260e-cmodel-retry1/summary.json` | TPU-Kernel 146 | 146/146 |
+| `demo-bm1690-cmodel/summary.json` | TPU-Kernel 36 | 36/36 |
+| `demo-sg2260e-cmodel-retry1/summary.json` | TPU-Kernel 36 + RV 15 | 51/51 |
 
 core 矩阵直接覆盖 copy、FP16/BF16/FP32 四则与 broadcast、max 以及 GEMM；matmul 内的 `T.ppl_fill(C_acc, 0)` 同时覆盖零 fill。FP8 矩阵在两芯片各覆盖 E4M3/E5M2 的 21 项，共 42 项；包括同格式 copy、零 fill、FP32 双向 cast、dense/W-broadcast add/sub/mul/max、scalar add/mul、gather、rope，以及 NN/NT overwrite/accumulate GEMM。
 
-BM1690 与 SG2260E 的 TPU-Kernel 基础差异是 topk：BM 的 152 项包含 FP32/INT32/UINT32 升降序 topk，SG 的运行库明确拒绝该原语，因此在 codegen fail-closed，不进入 CModel/PCIe。
+BM1690 与 SG2260E 的 TPU-Kernel 基础差异是 topk：BM 的 152 项包含 FP32/INT32/UINT32 升降序 topk；SG 的运行库不支持该原语，因此 codegen 会直接拒绝，不进入 CModel/PCIe。
 
 ### 3.2 PCIe：295/295
 
-| summary | target 分布 | 结果 |
+| summary（相对路径） | target 分布 | 结果 |
 | --- | --- | ---: |
-| [core SG2260E](../artifacts/2026-09-09/final-e5774525/core-sg2260e-pcie/summary.json) | TPU-Kernel 28 + RV 28 | 56/56 |
-| [FP8 SG2260E](../artifacts/2026-09-09/final-e5774525/fp8-sg2260e-pcie/summary.json) | TPU-Kernel 42 | 42/42 |
-| [TPU-Kernel SG2260E：14 个分片](../artifacts/2026-09-09/final-e5774525/tpukernel-sg2260e-pcie-shards/) | TPU-Kernel 146 | 146/146 |
-| [demo SG2260E：15 个分片](../artifacts/2026-09-09/final-e5774525/demo-sg2260e-pcie-shards/) | TPU-Kernel 36 + RV 15 | 51/51 |
+| `core-sg2260e-pcie/summary.json` | TPU-Kernel 28 + RV 28 | 56/56 |
+| `fp8-sg2260e-pcie/summary.json` | TPU-Kernel 42 | 42/42 |
+| `tpukernel-sg2260e-pcie-shards/`（14 个分片） | TPU-Kernel 146 | 146/146 |
+| `demo-sg2260e-pcie-shards/`（15 个分片） | TPU-Kernel 36 + RV 15 | 51/51 |
 
-39 份 canonical summary 的实际 launch 总数是 `553 + 295 = 848`。两个分片集合均经过精确并集校验，没有重复、遗漏或额外 case。848 是验收执行次数，不是互斥 capability 数；core、TPU-Kernel 专项和 demo 之间存在 selector 重叠，不能重复解释为新增能力。
+39 份验收 summary 的实际执行总数是 `553 + 295 = 848`。两个分片集合均经过精确并集校验，没有重复、遗漏或额外 case。848 是验收执行次数，不是互斥 capability 数；core、TPU-Kernel 专项和 demo 之间存在 selector 重叠，不能重复解释为新增能力。
 
 早先并发启动的 SG2260E CModel 结果不满足顺序晋级要求；PCIe 的失败整批、失败分片和恢复 canary 也不构成完整闭集。这些工件保留用于诊断，但不参与 848 的计数，也不被 `evidence[]` 中带 `runtime_expectation` 的条目引用。
 
@@ -81,12 +81,12 @@ FP8 的 42 个 SG2260E PCIe case 已全部实证，包含两种格式的 dense �
 
 demo summary 是 mixed-backend 工件：运行时由 summary 顶层字段和 `numeric.runtime_mode` 共同给出；每条 `results[]` 直接记录 `chip/programming_model/status/key`。TPU-Kernel 36 项覆盖 elementwise、matmul、rmsnorm、rmsnorm-splitk、rope、swiglu、flashattn；RV 15 项只覆盖 elementwise 与 matmul 的直接 selector。
 
-这些 demo 只能给已验证的 selector/stage 提供证据。TPU-Kernel composite 通过不能提升 RV 的 rmsnorm、split-k、rope、swiglu 或 flashattn；demo 中 FP32 用户输出若内部使用 BF16 计算，也不能据此提升“FP32 A/B 直接 GEMM”能力。
+这些 demo 只能为已验证的 selector 和阶段提供证据。TPU-Kernel 组合算子通过，不能据此提升 RV 的 rmsnorm、split-k、rope、swiglu 或 flashattn 支持状态；demo 中 FP32 用户输出若内部使用 BF16 计算，也不能据此提升“FP32 A/B 直接 GEMM”能力。
 
-`validate.py` 对 mixed-backend summary 逐条重建 canonical key `runtime/chip/backend/case_id`，并 fail-closed 检查：
+`validate.py` 对 mixed-backend summary 逐条重建规范键（canonical key）`runtime/chip/backend/case_id`，并按“任一条件不满足即拒绝”的原则检查：
 
 - 必需字段缺失、未知 backend 或 top-level/record backend 冲突；
-- runtime 不一致、非 `passed` 状态、重复 key 或重复 canonical case；
+- runtime 不一致、状态不是 `passed`、规范键重复或验收 case 重复；
 - case 总数、target 分布、精确 required case 集与契约 expectation 不一致。
 
 其余使用 `cases{}` 或 `results[]` collection 的 summary 也按同样的闭集规则校验；`cases{}` 本身不表示单后端，例如 SG core 同时包含 TPU-Kernel 与 RV。
@@ -101,16 +101,16 @@ profiling 与数值通过是两个正交维度：
 
 单次 timing 用于核对实际指令与定位退化，不是稳定 benchmark。PCIe runner 对每个 case 使用独立进程组、超时与 TERM→KILL 有界清理；每次执行后要求板卡连续两次报告 0% utilization，首错即停止并跳过余项。
 
-## 4. canonical 与历史特征证据
+## 4. 正式验收与历史特征证据
 
-canonical 回归负责授权当前 revision 的数值阶段；较早工件只在它提供不可替代的语义或失败边界时保留，不与 canonical launch 数累计，也不覆盖当前授权：
+正式验收回归用于确认当前 Git 提交的数值验证阶段；较早工件只在能够提供不可替代的语义或失败边界时保留，不计入正式验收执行总数，也不扩大当前支持范围：
 
-- [topk tail sentinel](../artifacts/2026-09-05/tpukernel-topk-tail-semantics-cmodel/summary.json)：证明只写 `[0,K)`；
-- [topk stable ties](../artifacts/2026-09-05/tpukernel-topk-stable-ties-cmodel/summary.json)：证明相同值按自然索引稳定排序；
-- [SG topk rejection](../artifacts/2026-09-05/tpukernel-sg2260e-rope-topk-cmodel/summary.json)：解释当前 fail-closed guard；
-- [FP8 scalar PPL probe](../artifacts/2026-09-05/fp8-scalar-ppl-probe/summary.json)：刻画合法 scalar lowering 与 boundary 行为；历史 direct `tpu_bdc_fp8_*_C` exit 139 只是非法 dtype tuple 的反例，不代表芯片不支持。
+- topk tail sentinel（本地记录：`research/artifacts/2026-09-05/tpukernel-topk-tail-semantics-cmodel/summary.json`）：证明只写 `[0,K)`；
+- topk stable ties（本地记录：`research/artifacts/2026-09-05/tpukernel-topk-stable-ties-cmodel/summary.json`）：证明相同值按自然索引稳定排序；
+- SG topk rejection（本地记录：`research/artifacts/2026-09-05/tpukernel-sg2260e-rope-topk-cmodel/summary.json`）：解释当前的拒绝规则；
+- FP8 scalar PPL probe（本地记录：`research/artifacts/2026-09-05/fp8-scalar-ppl-probe/summary.json`）：刻画合法 scalar lowering 与 boundary 行为；历史 direct `tpu_bdc_fp8_*_C` exit 139 只是非法 dtype tuple 的反例，不代表芯片不支持。
 
-被 canonical clean-run 覆盖、且不再提供独立语义的 dirty max 探针不属于当前契约证据。
+已经被本轮 clean run 覆盖、且不再提供独立语义的 dirty max 探针，不属于当前契约证据。
 
 ## 5. 自动化消费与升级
 
@@ -119,10 +119,10 @@ canonical 回归负责授权当前 revision 的数值阶段；较早工件只在
 - CModel 调度要求 `support_status="supported"` 且 `cmodel_numeric_passed.status="passed"`；上板还要求 `pcie_numeric_passed.status="passed"`。
 - `unverified/not_applicable/unsupported/experimental/historical_passed` 均不得作为当前上板授权。
 - `target_results` 没有某 target，表示该 operation 不适用该组合，不是默认支持。
-- runtime evidence 的 `claim_targets` 与 `capability_ids` 只定义候选闭集；stage 还必须匹配 runtime、revision、target、capability 和精确 case 语义。
+- runtime evidence 的 `claim_targets` 与 `capability_ids` 只定义候选闭集；stage 还必须匹配 runtime、Git 提交、target、capability 和精确 case 语义。
 - `sdk_declared=passed` 只用于排定实现候选，不能提升任何 TileLang 阶段。
 
-升级能力时，应先收窄 selector，再依次补充 frontend/codegen、CModel、PCIe 证据。每份 runner-recorded 工件必须带完整 Git revision、干净实现身份、target case counts 和 required case manifest。`research/artifacts/**` 被 Git 忽略；在没有本地工件的 clone 中，普通校验检查静态闭包，验收机用 strict-local 模式校验工件内容。
+扩展能力时，应先明确 selector，再依次补充 frontend/codegen、CModel、PCIe 证据。每份 runner-recorded 工件必须带完整 Git 提交、干净实现身份、各 target 的 case 数量和必需 case 清单。`research/artifacts/**` 被 Git 忽略；在没有本地工件的 clone 中，普通校验只检查静态闭包，验收机则用 strict-local 模式校验工件内容。
 
 ## 6. 校验
 

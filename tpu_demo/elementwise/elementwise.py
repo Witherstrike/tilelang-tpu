@@ -7,14 +7,13 @@ from typing import Optional
 import tilelang.language as T
 import torch
 
-from tpu_demo.common import (comparison, compile_and_launch, result_payload, tolerance,
-                             torch_dtype, validate_dimensions, validate_selection)
+from tpu_demo.common import (comparison, compile_and_launch, result_payload, tolerance, torch_dtype,
+                             validate_dimensions, validate_selection)
 
 OPERATIONS = ("add", "sub", "mul", "div")
 
 
-def build_elementwise(operation: str, *, rows: int = 4, width: int = 32,
-                      dtype: str = "float32"):
+def build_elementwise(operation: str, *, rows: int = 4, width: int = 32, dtype: str = "float32"):
     if operation not in OPERATIONS:
         raise ValueError(f"unsupported elementwise operation: {operation!r}")
     torch_dtype(dtype)
@@ -43,8 +42,14 @@ def build_elementwise(operation: str, *, rows: int = 4, width: int = 32,
     return kernel
 
 
-def run(*, operation: str, dtype: str, chip: str, programming_model: str,
-        runtime_mode: str, allow_pcie: bool = False, device_id: Optional[int] = None,
+def run(*,
+        operation: str,
+        dtype: str,
+        chip: str,
+        programming_model: str,
+        runtime_mode: str,
+        allow_pcie: bool = False,
+        device_id: Optional[int] = None,
         seed: int = 0) -> dict:
     if operation not in OPERATIONS:
         raise ValueError(f"unsupported elementwise operation: {operation!r}")
@@ -83,6 +88,14 @@ def run(*, operation: str, dtype: str, chip: str, programming_model: str,
     atol, rtol = tolerance(dtype, family)
     metrics = comparison(dst, expected_f32.to(host_dtype), atol=atol, rtol=rtol)
     return result_payload(
-        operation=f"elementwise-{operation}", dtype=dtype, chip=chip,
-        programming_model=programming_model, runtime_mode=runtime_mode,
-        metrics=metrics, timing=timing, parameters={"shape": list(shape), "seed": seed})
+        operation=f"elementwise-{operation}",
+        dtype=dtype,
+        chip=chip,
+        programming_model=programming_model,
+        runtime_mode=runtime_mode,
+        metrics=metrics,
+        timing=timing,
+        parameters={
+            "shape": list(shape),
+            "seed": seed
+        })

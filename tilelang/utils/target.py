@@ -21,9 +21,9 @@ def is_tpu_target_spec(target: Union[str, Target]) -> bool:
     """Whether ``target`` names the TPU target kind, including chip variants.
 
     TPU selection uses explicit ``-mcpu`` and ``-tpu-programming-model``
-    attributes. Keep this narrow exception to the historical
-    allow-list: arbitrary target strings remain rejected, while TPU gets the
-    same target-specialisation spelling used by the GPU backends.
+    attributes. Keep this narrow exception to the fixed allow-list: arbitrary
+    target strings remain rejected, while TPU gets the same target-specialization
+    spelling used by the GPU backends.
     """
     if isinstance(target, Target):
         return target.kind.name == "tpu"
@@ -68,16 +68,15 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
 
     Args:
         target (Union[str, Target, Literal["auto"]]): User-specified target.
-            - If "auto", CUDA/HIP are preferred and the portable C backend is
-              the fallback. TPU is never inferred because its chip and
-              programming model must be explicit in the Target.
+            - If "auto", CUDA or HIP is selected when available. TPU is never
+              inferred because its chip and programming model must be explicit.
             - If a string or Target, it is directly validated.
 
     Returns:
         Union[str, Target]: The selected target or a valid Target object.
 
     Raises:
-        ValueError: If the target is invalid.
+        ValueError: If the target is invalid or no automatic target is available.
     """
 
     return_var: Union[str, Target] = target
@@ -94,9 +93,12 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
             return_var = "hip"
         else:
             # TPU compilation requires a complete explicit Target.  Environment
-            # variables are toolchain inputs, not a second compile-time target
-            # selector.  The C backend remains the safe non-device fallback.
-            return_var = "c"
+            # variables are toolchain inputs, not a second target selector.
+            # The C backend is still available when requested explicitly, but
+            # TileLang GPU programs cannot be assumed to be portable C programs.
+            raise ValueError("No CUDA or HIP target is available. Select 'c' explicitly for "
+                             "portable C code, or provide a complete TPU target such as "
+                             "'tpu -mcpu=sg2260e -tpu-programming-model=rv'.")
     else:
         # Validate the target if it's not "auto"
         if not (isinstance(target, Target) or target in AVAILABLE_TARGETS or

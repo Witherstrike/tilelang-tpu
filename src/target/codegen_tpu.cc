@@ -110,26 +110,10 @@ std::string CodeGenTileLangTPU::Finish() {
                    "-tpu-programming-model=tpukernel\"\n"
                 << "#endif\n";
   }
-  decl_stream << "#ifndef TILELANG_PPL_HELPER_HAS_GET_DTYPE\n"
-              << "static data_type_t __ppl_get_dtype(int type) {\n"
-              << "  data_type_t __dtype[] = {DT_FP32,    DT_FP32,    DT_FP16,  "
-                 "DT_BFP16,\n"
-              << "    DT_FP8E5M2, DT_FP8E4M3, DT_FP20,  DT_TF32,\n"
-              << "    DT_INT32,   DT_UINT32,  DT_INT16, DT_UINT16,\n"
-              << "    DT_INT8,    DT_UINT8,   DT_INT4,  DT_UINT4};\n"
-              << "  return __dtype[type];\n"
-              << "}\n"
-              << "#endif\n\n";
   decl_stream << "typedef struct {\n"
               << "    dim4 shape;\n"
               << "    dim4 stride;\n"
               << "    global_addr_t addr;\n"
-              << "    data_type_t dtype;\n"
-              << "    int mode;\n"
-              << "    int align_mode;\n"
-              << "    int size;\n"
-              << "    int offset;\n"
-              << "    bool unsigned_flag;\n"
               << "    bool default_stride;\n"
               << "} __tilelang_tpu_tensor_info;\n\n";
   return CodeGenC::Finish();
@@ -497,19 +481,11 @@ CodeGenTileLangTPU::DescriptorShape4(const VarNode *data_var,
   return shape_it->second;
 }
 
-size_t CodeGenTileLangTPU::DescriptorRank(const VarNode *data_var,
-                                          const std::string &context) const {
-  ICHECK(data_var) << context << " requires a buffer data Var";
-  auto rank_it = descriptor_rank_.find(data_var);
-  ICHECK(rank_it != descriptor_rank_.end())
-      << context << " has no compiler-owned source rank";
-  return rank_it->second;
-}
-
-inline std::string vector2string(const std::vector<int> &vec) {
+static inline std::string Dim4Initializer(const std::vector<int> &values) {
+  ICHECK_EQ(values.size(), 4U);
   std::string ret = "{";
-  for (auto &v : vec) {
-    ret += std::to_string(v) + ", ";
+  for (int value : values) {
+    ret += std::to_string(value) + ", ";
   }
   ret[ret.size() - 2] = '}';
   return ret;
@@ -926,7 +902,7 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
         check_copy_bounds(src_buffer, src_ranges, operand_name);
         std::string new_src_var =
             name_supply_->FreshName(src_buffer->data->name_hint);
-        std::string src_shape = vector2string(LowerRegionToDim4(src_ranges));
+        std::string src_shape = Dim4Initializer(LowerRegionToDim4(src_ranges));
 
         std::string dtype = TargetDTypeName(src_buffer->dtype);
         int bytes_size = TargetDTypeBytes(src_buffer->dtype);
@@ -937,7 +913,7 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
               << "buffer_stride not initialized for global buffer: "
               << src_buffer->name;
           const auto &strides = stride_it->second;
-          std::string src_strides = vector2string(strides);
+          std::string src_strides = Dim4Initializer(strides);
 
           std::string min_expr;
           std::vector<int> stride_idx = StrideIndicesForRank(src_ranges.size());
@@ -957,11 +933,9 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           min_expr[min_expr.size() - 1] = ' ';
           min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
           inst.push_back("__tilelang_tpu_tensor_info " + new_src_var +
-                         " = {.shape = " + src_shape +
-                         ", .stride = " + src_strides + ", .addr = " + src_id +
-                         ".addr + " + min_expr + ", .dtype = " + dtype +
-                         ", .mode = 2, .size = 1, .offset = " + min_expr +
-                         ", .unsigned_flag = 0, .default_stride = false};\n");
+                         " = {.shape = " + src_shape + ", .stride = " +
+                         src_strides + ", .addr = " + src_id + ".addr + " +
+                         min_expr + ", .default_stride = false};\n");
         } else if (is_local) {
           const std::string &parent_var = src_id;
           std::string min_expr;
@@ -982,14 +956,11 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           }
           min_expr[min_expr.size() - 1] = ' ';
           min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
-          inst.push_back("__tilelang_tpu_tensor_info " + new_src_var +
-                         " = {.shape = " + src_shape + ", .stride = " +
-                         parent_var + ".stride, .addr = " + parent_var +
-                         ".addr + " + min_expr + ", .dtype = " + dtype +
-                         ", .mode = 0, .size = 1, .offset = " + min_expr +
-                         ", "
-                         ".unsigned_flag = 0, .default_stride = " +
-                         parent_var + ".default_stride};\n");
+          inst.push_back(
+              "__tilelang_tpu_tensor_info " + new_src_var +
+              " = {.shape = " + src_shape + ", .stride = " + parent_var +
+              ".stride, .addr = " + parent_var + ".addr + " + min_expr +
+              ", .default_stride = " + parent_var + ".default_stride};\n");
         }
         return std::make_tuple(new_src_var, is_global ? "global" : "local",
                                dtype);
@@ -1005,8 +976,8 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
             << op_name
             << " requires source and destination regions to have "
                "the same normalized N/C/H/W extents; source="
-            << vector2string(src_shape4)
-            << ", destination=" << vector2string(dst_shape4);
+            << Dim4Initializer(src_shape4)
+            << ", destination=" << Dim4Initializer(dst_shape4);
         auto [src_var_id, src_flag, src_dtype] =
             process_copy(src, src_ranges, "src");
         auto [dst_var_id, dst_flag, dst_dtype] =
@@ -1325,13 +1296,7 @@ void CodeGenTileLangTPU::VisitStmt_(const AllocateNode *op) {
   auto shape4 =
       tl::tpuv7::NormalizeLocalShape(op->extents, "TileLang TPU codegen");
   std::string bv_shape = Shape4ToDim4Literal(shape4);
-  std::vector<int> shapes;
-  shapes.push_back(static_cast<int>(shape4[1]));
-  shapes.push_back(static_cast<int>(shape4[3]));
   std::string op_dtype = TargetDTypeName(op->dtype);
-  int64_t tensor_size =
-      tl::tpuv7::TpuAlignSizeBytesFromShape4(shape4, op->dtype);
-  ICHECK_LE(tensor_size, std::numeric_limits<int>::max());
   this->PrintIndent();
   const std::string address_attr =
       tl::tpuv7::AddressAttrKey(buffer_var->name_hint);
@@ -1360,17 +1325,10 @@ void CodeGenTileLangTPU::VisitStmt_(const AllocateNode *op) {
   descriptor_rank_[buffer_var] = op->extents.size();
   stream << "__tilelang_tpu_tensor_info " << vid << " = {.shape = " << bv_shape
          << ", .stride = {0}"
-         << ", .addr = " << addr << ", .dtype = " << op_dtype << ", .mode = 3"
-         << ", .align_mode = 1"
-         << ", .size = " << tensor_size
-         << ", .unsigned_flag = 0, .default_stride = false};\n";
+         << ", .addr = " << addr << ", .default_stride = false};\n";
   this->PrintIndent();
   stream << "tpu_aligned_stride(&" << vid << ".stride, 0, &" << vid
          << ".shape, " << op_dtype << ");\n";
-  this->buffer_shape[vid] = shapes;
-  this->buffer_shape4[vid] = descriptor_shape4_.at(buffer_var);
-  // store local tensor shape
-
   this->PrintStmt(op->body);
 
   if (had_old_var) {
@@ -1549,7 +1507,6 @@ void CodeGenTileLangTPU::PrintVecElemLoadExpr(DataType t, int i,
 void CodeGenTileLangTPU::AddFunction(const PrimFunc &f) {
   this->InitFuncState(f);
   buffer_shape.clear();
-  buffer_shape4.clear();
   buffer_stride.clear();
   buffer_addrs_.clear();
   descriptor_dtype_.clear();
@@ -1639,27 +1596,17 @@ void CodeGenTileLangTPU::AddFunction(const PrimFunc &f) {
     auto [shape_it, shape_inserted] = buffer_shape.emplace(rid, dim4_shape);
     ICHECK(shape_inserted) << "Duplicate TPU descriptor metadata for " << rid;
     default_stride(rid);
-    std::string shape_s = vector2string(dim4_shape);
+    std::string shape_s = Dim4Initializer(dim4_shape);
 
-    std::string dtype = TargetDTypeName(buffer_node->dtype);
-    int bytes_size = TargetDTypeBytes(buffer_node->dtype);
     int64_t tensor_size = tl::tpuv7::DescriptorElementCount(
         dim4_shape, "TileLang TPU global tensor");
     descriptor_dtype_[buffer_node->data.get()] = buffer_node->dtype;
     descriptor_element_count_[buffer_node->data.get()] = tensor_size;
     descriptor_shape4_[buffer_node->data.get()] = dim4_shape;
     descriptor_rank_[buffer_node->data.get()] = buffer_node->shape.size();
-    ICHECK_LE(tensor_size, std::numeric_limits<int64_t>::max() / bytes_size)
-        << "TileLang TPU global tensor byte size overflows int64";
-    tensor_size *= bytes_size;
-    ICHECK_LE(tensor_size, std::numeric_limits<int>::max())
-        << "TileLang TPU global tensor byte size exceeds the descriptor ABI "
-           "int range";
     std::string inst =
         "__tilelang_tpu_tensor_info " + rid + " = {.shape = " + shape_s +
-        ", .stride = {0}, .addr = " + vid + ", .dtype = " + dtype +
-        ", .mode = 2, .align_mode = 0, .size = " + std::to_string(tensor_size) +
-        ", .unsigned_flag = 0, .default_stride = true};\n";
+        ", .stride = {0}, .addr = " + vid + ", .default_stride = true};\n";
     global_descriptor_declarations.push_back(inst);
     this->var_idmap_[v_node] = rid;
     compiler_descriptor_vars_.insert(v_node);

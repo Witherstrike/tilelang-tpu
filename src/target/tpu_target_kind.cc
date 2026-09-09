@@ -14,6 +14,8 @@
 #include <tvm/target/target.h>
 #include <tvm/target/target_kind.h>
 
+#include <algorithm>
+
 namespace tvm {
 
 // The target kind belongs to the TileLang TPU backend, not to a copied TVM
@@ -31,10 +33,27 @@ void RegisterTPUTargetKindIfAbsent() {
         << "An existing TVM target kind named 'tpu' does not accept -mcpu; "
         << "TileLang TPU requires -mcpu=<bm1690|sg2260e>. Rebuild against a "
         << "compatible TVM target registration.";
+    ICHECK_EQ(options["mcpu"], "runtime.String")
+        << "An existing TVM target kind named 'tpu' has an incompatible "
+        << "-mcpu option type; expected runtime.String, got "
+        << options["mcpu"];
     ICHECK(options.count("tpu-programming-model"))
         << "An existing TVM target kind named 'tpu' lacks "
         << "-tpu-programming-model=<tpukernel|rv>. Rebuild TVM/TileLang "
         << "instead of extending an incompatible registration at runtime.";
+    ICHECK_EQ(options["tpu-programming-model"], "runtime.String")
+        << "An existing TVM target kind named 'tpu' has an incompatible "
+        << "-tpu-programming-model option type; expected runtime.String, got "
+        << options["tpu-programming-model"];
+    ICHECK_EQ(existing_target_kind.value()->default_device_type, kDLCPU)
+        << "An existing TVM target kind named 'tpu' uses an incompatible "
+        << "default device type; TileLang TPU host wrappers require kDLCPU";
+    const Array<String> &default_keys =
+        existing_target_kind.value()->default_keys;
+    ICHECK(std::find(default_keys.begin(), default_keys.end(), String("tpu")) !=
+           default_keys.end())
+        << "An existing TVM target kind named 'tpu' does not include the "
+        << "required default key 'tpu'";
     return;
   }
 
@@ -54,7 +73,6 @@ void RegisterTPUTargetKindIfAbsent() {
       .add_attr_option<Integer>("target_device_type")
       .add_attr_option<String>("mcpu")
       .add_attr_option<String>("tpu-programming-model")
-      .add_attr_option<String>("march")
       .add_attr_option<Integer>("workspace-byte-alignment")
       .add_attr_option<Integer>("constants-byte-alignment")
       .set_default_keys({"tpu"});

@@ -223,7 +223,7 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, *, accumulate):
         B: Right-hand input tile.
         C: Output/accumulation tile with shape `(M, N)`.
         transpose_A: Whether `A` should be treated as transposed.
-            This option is not recommended in current TPU usage.
+            The current TPU backends do not support `True`.
         transpose_B: Whether `B` should be treated as transposed.
         accumulate: Whether to compute `C += A @ B` instead of overwriting C.
             This keyword is mandatory so the read/write contract of `C` never
@@ -244,8 +244,8 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, *, accumulate):
         TPU-Kernel FP8 uses the separately validated
         ``tpu_bdc_fp8_mm_R_trans`` form, whose explicit ``result_add`` flag
         supports accumulation.
-        `transpose_A` is not recommended in the current TPU path; prefer using
-        `transpose_B=True` when a transpose form is needed.
+        `transpose_A=True` is not supported. Use `transpose_B=True` when a
+        transpose form is needed.
     """
     for name, buffer in (("A", A), ("B", B), ("C", C)):
         _require_local_buffer(name, buffer)
@@ -366,8 +366,8 @@ def ppl_copy(
         raise AssertionError(f"unexpected validated rank {rank}")
 
     merged_dim4 = [
-        _merge_extent(src_value, dst_value)
-        for src_value, dst_value in zip(_to_dim4(src_extent), _to_dim4(dst_extent))
+        _merge_extent(src_value, dst_value) for src_value, dst_value in zip(  # noqa: B905
+            _to_dim4(src_extent), _to_dim4(dst_extent))
     ]
     src_region_extent = _from_dim4(merged_dim4, len(src_extent))
     dst_region_extent = _from_dim4(merged_dim4, len(dst_extent))
@@ -546,8 +546,8 @@ def ppl_exp(out, work0, work1, coeff):
 
     Notes:
         This computes natural exponential `exp(x)`.  It uses the PPL 1.7
-        `tpu_bdc_load_fp_exp_coeff` and `tpu_bdc_fp_exp` contract, which no
-        longer needs the legacy FP32 lookup-table buffer.
+        `tpu_bdc_load_fp_exp_coeff` and `tpu_bdc_fp_exp` coefficient-buffer
+        contract.
     """
     for name, buffer in (("out", out), ("work0", work0), ("work1", work1), ("coeff", coeff)):
         _require_local_buffer(name, buffer)
@@ -574,14 +574,15 @@ def _ppl_sigmoid_safe(out, inp, work0, work1, coeff):
 
 
 def ppl_sigmoid(out, inp, work0, work1, coeff):
-    """Compute sigmoid without the deprecated FP32 exp-table interface.
+    """Compute sigmoid with the PPL 1.7 generic exp-coefficient interface.
 
     The TPU-Kernel lowering uses the PPL 1.7 generic exp coefficient loader,
     followed by exp, scalar reciprocal, and scalar add operations.  ``work0``
     and ``work1`` match ``out``; ``coeff`` has shape ``(64, 32)``.
     """
     buffers = (out, inp, work0, work1, coeff)
-    for name, buffer in zip(("out", "inp", "work0", "work1", "coeff"), buffers):
+    for name, buffer in zip(  # noqa: B905
+        ("out", "inp", "work0", "work1", "coeff"), buffers):
         _require_local_buffer(name, buffer)
         _require_dtype(name, buffer, _TPU_BASE_FLOAT_DTYPES)
     _require_same_dtype("ppl_sigmoid", *buffers)
@@ -940,7 +941,8 @@ def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
         The last dimension of `out` should be even.
     """
     buffers = (out, even_inp1, even_inp2, odd_inp1, odd_inp2)
-    for name, buffer in zip(("out", "even_inp1", "even_inp2", "odd_inp1", "odd_inp2"), buffers):
+    for name, buffer in zip(  # noqa: B905
+        ("out", "even_inp1", "even_inp2", "odd_inp1", "odd_inp2"), buffers):
         _require_local_buffer(name, buffer)
         _require_rank(name, buffer, 2)
         _require_dtype(name, buffer, _TPU_ELEMENTWISE_FLOAT_DTYPES)
@@ -948,7 +950,8 @@ def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
     _require_same_dtype("ppl_rope_add", *buffers)
     if _static_positive_dim("ppl_rope_add W", out.shape[1]) % 2:
         raise ValueError("ppl_rope_add requires an even W dimension")
-    for name, buffer in zip(("even_inp1", "even_inp2", "odd_inp1", "odd_inp2"), buffers[1:]):
+    for name, buffer in zip(  # noqa: B905
+        ("even_inp1", "even_inp2", "odd_inp1", "odd_inp2"), buffers[1:]):
         _require_storage_disjoint("ppl_rope_add", "out", out, name, buffer)
     outptr = _tpu_tensor_region(out, "w")
     even_inpptr1 = _tpu_tensor_region(even_inp1, "r")

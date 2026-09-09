@@ -235,15 +235,13 @@ def _validate_args(args: argparse.Namespace) -> None:
                 args.device_id != 0):
             raise RuntimeError("this single-card validation host accepts only --device-id 0")
         if args.chips is None or tuple(dict.fromkeys(args.chips)) != ("sg2260e",):
-            raise RuntimeError(
-                "this machine can run PCIe cases only for explicit --chip sg2260e")
+            raise RuntimeError("this machine can run PCIe cases only for explicit --chip sg2260e")
         filters_selected = bool(args.operations or args.case_ids)
         if args.all_pcie_cases and (filters_selected or args.dtypes):
             raise RuntimeError(
                 "--all-pcie-cases cannot be combined with --op/--case/--dtype filters")
         if not args.all_pcie_cases and not filters_selected:
-            raise RuntimeError(
-                "PCIe requires an explicit --op/--case subset or --all-pcie-cases")
+            raise RuntimeError("PCIe requires an explicit --op/--case subset or --all-pcie-cases")
         if args.bm_cmodel_summary is None or args.sg_cmodel_summary is None:
             raise RuntimeError(
                 "PCIe requires --bm-cmodel-summary and --sg-cmodel-summary promotion evidence")
@@ -279,9 +277,8 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _worker_environment(base_environment: Mapping[str, str], scratch_dir: Path,
-                        case: CaseSpec, chip: str,
-                        args: argparse.Namespace) -> dict[str, str]:
+def _worker_environment(base_environment: Mapping[str, str], scratch_dir: Path, case: CaseSpec,
+                        chip: str, args: argparse.Namespace) -> dict[str, str]:
     environment = pin_worker_cache_environment(base_environment, scratch_dir)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["TILELANG_TPU_BENCHMARK_RUNS"] = "0"
@@ -320,8 +317,8 @@ def _json_normalized(value: Any) -> Any:
     return json.loads(json.dumps(value, sort_keys=True, allow_nan=False))
 
 
-def _validate_numeric_identity(payload: Mapping[str, Any], *, case: CaseSpec,
-                               chip: str, runtime_mode: str) -> None:
+def _validate_numeric_identity(payload: Mapping[str, Any], *, case: CaseSpec, chip: str,
+                               runtime_mode: str) -> None:
     """Reject a successful marker unless it names this exact scheduled probe."""
 
     expected = {
@@ -333,15 +330,13 @@ def _validate_numeric_identity(payload: Mapping[str, Any], *, case: CaseSpec,
     }
     for field, value in expected.items():
         if payload.get(field) != value:
-            raise RuntimeError(
-                f"worker result has wrong {field}: expected {value!r}, "
-                f"observed {payload.get(field)!r}")
+            raise RuntimeError(f"worker result has wrong {field}: expected {value!r}, "
+                               f"observed {payload.get(field)!r}")
     if not isinstance(payload.get("metrics"), dict):
         raise RuntimeError("worker result has no numerical metrics object")
 
 
-def _validate_pcie_promotion(repo_root: Path, args: argparse.Namespace,
-                             cases: tuple[CaseSpec, ...],
+def _validate_pcie_promotion(repo_root: Path, args: argparse.Namespace, cases: tuple[CaseSpec, ...],
                              current_toolchain: Mapping[str, Any],
                              pcie_started_at: str) -> dict[str, Any]:
     """Require clean, content-identical CModel success for every PCIe case."""
@@ -355,8 +350,7 @@ def _validate_pcie_promotion(repo_root: Path, args: argparse.Namespace,
         raise RuntimeError(
             "PCIe promotion requires the current implementation worktree to be clean")
     highlights = ("git_commit", "source_state_sha256")
-    if any(not isinstance(current.get(field), str) or not current[field]
-           for field in highlights):
+    if any(not isinstance(current.get(field), str) or not current[field] for field in highlights):
         raise RuntimeError("PCIe promotion requires a verifiable source identity")
 
     bm, sg = validate_promotion_stages(
@@ -422,9 +416,8 @@ def _validate_pcie_promotion(repo_root: Path, args: argparse.Namespace,
                 raise RuntimeError(
                     f"TPU-Kernel promotion result has no metrics: {chip}/{case.case_id}")
     if missing:
-        raise RuntimeError(
-            "PCIe TPU-Kernel promotion evidence is missing passing exact cases: "
-            + ", ".join(sorted(missing)))
+        raise RuntimeError("PCIe TPU-Kernel promotion evidence is missing passing exact cases: " +
+                           ", ".join(sorted(missing)))
     return {
         "git_commit": current["git_commit"],
         "source_state_sha256": current["source_state_sha256"],
@@ -566,8 +559,7 @@ def _spawn_guarded_worker(command: Sequence[str], *, cwd: Path,
 
 
 def _worker_payload(stdout: str) -> dict[str, Any]:
-    return unique_prefixed_json_payload_text(
-        stdout, _RESULT_PREFIX, "TPU-Kernel worker")
+    return unique_prefixed_json_payload_text(stdout, _RESULT_PREFIX, "TPU-Kernel worker")
 
 
 def _case_directory(output_dir: Path, chip: str, runtime_mode: str, case: CaseSpec) -> Path:
@@ -687,8 +679,8 @@ def _run_one(args: argparse.Namespace, base_environment: Mapping[str, str], outp
                 remove_execution_scratch(scratch_dir)
             except BaseException as error:
                 cleanup_error = f"scratch cleanup failed: {type(error).__name__}: {error}"
-                launch_error = (
-                    f"{launch_error}; {cleanup_error}" if launch_error else cleanup_error)
+                launch_error = (f"{launch_error}; {cleanup_error}"
+                                if launch_error else cleanup_error)
 
     elapsed = time.monotonic() - begin
     parsed_payload: Optional[dict[str, Any]] = None
@@ -744,8 +736,8 @@ def _run_one(args: argparse.Namespace, base_environment: Mapping[str, str], outp
     except BaseException as error:
         diagnostic = f"result file write failed: {type(error).__name__}: {error}"
         result["status"] = "failed"
-        result["failure"] = (
-            f"{result['failure']}; {diagnostic}" if result.get("failure") else diagnostic)
+        result["failure"] = (f"{result['failure']}; {diagnostic}"
+                             if result.get("failure") else diagnostic)
         result["result_file_error"] = diagnostic
     return result
 
@@ -764,9 +756,8 @@ def _summary_case(result: Mapping[str, Any], result_path: Path, output_dir: Path
         compact["failure"] = result["failure"]
     if result.get("result_file_error") is not None:
         compact["result_file_error"] = result["result_file_error"]
-    for field in (
-            "execution_status", "execution_failure", "failed_phase", "board_postflight",
-            "board_postflight_error", "board_postflight_failure"):
+    for field in ("execution_status", "execution_failure", "failed_phase", "board_postflight",
+                  "board_postflight_error", "board_postflight_failure"):
         if field in result:
             compact[field] = result[field]
     if isinstance(worker_result, dict):
@@ -777,9 +768,8 @@ def _summary_case(result: Mapping[str, Any], result_path: Path, output_dir: Path
     return compact
 
 
-def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
-                chips: tuple[str, ...], cases: tuple[CaseSpec, ...],
-                base_environment: Mapping[str, str]) -> int:
+def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path, chips: tuple[str, ...],
+                cases: tuple[CaseSpec, ...], base_environment: Mapping[str, str]) -> int:
     summary_path = output_dir / "summary.json"
     execution_root = repo_root
     worker_environment_values = dict(base_environment)
@@ -809,8 +799,7 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
         "passed_case_count": 0,
         "failed_case_count": 0,
         "cancelled_case_count": 0,
-        "target_scope": matrix_target_scope(
-            (entry["chip"], "tpukernel") for entry in scheduled),
+        "target_scope": matrix_target_scope((entry["chip"], "tpukernel") for entry in scheduled),
         "scheduled": scheduled,
         "results": [],
     }
@@ -818,10 +807,10 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
     _write_json(summary_path, summary)
 
     try:
-        summary["toolchain_identity"] = toolchain_identity(
-            worker_environment_values, args.runtime_mode)
-        worker_environment_values = pin_native_worker_libraries(
-            worker_environment_values, summary["toolchain_identity"])
+        summary["toolchain_identity"] = toolchain_identity(worker_environment_values,
+                                                           args.runtime_mode)
+        worker_environment_values = pin_native_worker_libraries(worker_environment_values,
+                                                                summary["toolchain_identity"])
         if args.runtime_mode == "pcie":
             assert args.device_id is not None
             summary["promotion_evidence"] = _validate_pcie_promotion(
@@ -877,10 +866,9 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
             try:
                 if args.runtime_mode == "pcie":
                     assert_source_identity_unchanged(repo_root, summary)
-                    assert_toolchain_identity_unchanged(
-                        worker_environment_values, summary["toolchain_identity"])
-                result = _run_one(
-                    args, worker_environment_values, output_dir, worker, chip, case)
+                    assert_toolchain_identity_unchanged(worker_environment_values,
+                                                        summary["toolchain_identity"])
+                result = _run_one(args, worker_environment_values, output_dir, worker, chip, case)
             except BaseException as error:
                 # This path covers runner bookkeeping failures. CModel cleanup
                 # is bounded in _run_one; an unreapable PCIe group has already
@@ -907,8 +895,7 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                 assert args.device_id is not None
                 postflight_exception: Optional[BaseException] = None
                 try:
-                    tpu_smi = Path(
-                        summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
+                    tpu_smi = Path(summary["toolchain_identity"]["pcie"]["tpu_smi"]["path"])
                     result["board_postflight"] = board_health(
                         args.device_id, tpu_smi, quarantine_on_failure=True)
                 except BaseException as health_error:
@@ -924,26 +911,22 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
                     health_evidence = getattr(health_error, "evidence", None)
                     if isinstance(health_evidence, Mapping):
                         result["board_postflight_failure"] = dict(health_evidence)
-                    result["status"] = (
-                        "cancelled" if isinstance(health_error, KeyboardInterrupt) else "failed")
-                    postflight_failure = (
-                        "board postflight failed: " + result["board_postflight_error"])
-                    result["failure"] = (
-                        f"{execution_failure}; {postflight_failure}"
-                        if execution_failure else postflight_failure)
+                    result["status"] = ("cancelled" if isinstance(health_error, KeyboardInterrupt)
+                                        else "failed")
+                    postflight_failure = ("board postflight failed: " +
+                                          result["board_postflight_error"])
+                    result["failure"] = (f"{execution_failure}; {postflight_failure}"
+                                         if execution_failure else postflight_failure)
                 try:
                     _write_json(result_path, result)
                 except Exception as error:
-                    diagnostic = (
-                        f"result file write failed: {type(error).__name__}: {error}")
+                    diagnostic = (f"result file write failed: {type(error).__name__}: {error}")
                     result["status"] = "failed"
-                    result["failure"] = (
-                        f"{result['failure']}; {diagnostic}"
-                        if result.get("failure") else diagnostic)
+                    result["failure"] = (f"{result['failure']}; {diagnostic}"
+                                         if result.get("failure") else diagnostic)
                     result["result_file_error"] = diagnostic
                 if result["status"] == "cancelled":
-                    summary["results"].append(
-                        _summary_case(result, result_path, output_dir))
+                    summary["results"].append(_summary_case(result, result_path, output_dir))
                     summary["completed_case_count"] += 1
                     summary["cancelled_case_count"] += 1
                     summary["status"] = "cancelled"
@@ -990,12 +973,13 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
             "finished_at": _utc_now(),
         })
         _write_json(summary_path, summary)
-        print(f"STOP final identity check: {type(error).__name__}: {error}",
-              file=sys.stderr, flush=True)
+        print(
+            f"STOP final identity check: {type(error).__name__}: {error}",
+            file=sys.stderr,
+            flush=True)
         return 1
     source_fields = ("git_commit", "implementation_worktree_dirty", "source_state_sha256")
-    source_changed = any(
-        ending_source.get(field) != summary.get(field) for field in source_fields)
+    source_changed = any(ending_source.get(field) != summary.get(field) for field in source_fields)
     toolchain_changed = ending_toolchain != summary.get("toolchain_identity")
     if source_changed or toolchain_changed:
         summary.update({
@@ -1007,8 +991,10 @@ def _run_matrix(args: argparse.Namespace, repo_root: Path, output_dir: Path,
             "finished_at": _utc_now(),
         })
         _write_json(summary_path, summary)
-        print("STOP source/toolchain identity changed during matrix execution",
-              file=sys.stderr, flush=True)
+        print(
+            "STOP source/toolchain identity changed during matrix execution",
+            file=sys.stderr,
+            flush=True)
         return 1
 
     summary["status"] = "passed"
@@ -1068,8 +1054,7 @@ def main() -> int:
             try:
                 with TPUInstructionProfiler.exclusive_pcie_device(args.device_id):
                     lock_acquired = True
-                    return _run_matrix(
-                        args, repo_root, output_dir, chips, cases, environment)
+                    return _run_matrix(args, repo_root, output_dir, chips, cases, environment)
             except Exception as error:
                 summary_path = output_dir / "summary.json"
                 failure: dict[str, Any] = {}
@@ -1098,8 +1083,10 @@ def main() -> int:
                     "finished_at": _utc_now(),
                 })
                 _write_json(summary_path, failure)
-                print(f"PCIe session stopped: {type(error).__name__}: {error}",
-                      file=sys.stderr, flush=True)
+                print(
+                    f"PCIe session stopped: {type(error).__name__}: {error}",
+                    file=sys.stderr,
+                    flush=True)
                 return 1
         return _run_matrix(args, repo_root, output_dir, chips, cases, environment)
     finally:

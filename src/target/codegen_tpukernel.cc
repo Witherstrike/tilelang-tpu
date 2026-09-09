@@ -1,8 +1,20 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file distributed
- * with this work for additional information regarding copyright ownership.
- * The ASF licenses this file to you under the Apache License, Version 2.0.
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 /*! \file target/codegen_tpukernel.cc
@@ -241,11 +253,10 @@ void CodeGenTileLangTPU::EmitTPUKernelElementwise(
   }
   PrintIndent();
   stream << (operation == "max" ? "tpu_bdc_max" : "tpu_bdc_fp_" + operation)
-         << "(" << dst << ".addr, " << src0
-         << ".addr, " << src1 << ".addr, &" << dst << ".shape, (" << dst
-         << ".default_stride ? NULL : &" << dst << ".stride), (" << src0
-         << ".default_stride ? NULL : &" << src0 << ".stride), " << src1_stride
-         << dtype_name << ");\n";
+         << "(" << dst << ".addr, " << src0 << ".addr, " << src1 << ".addr, &"
+         << dst << ".shape, (" << dst << ".default_stride ? NULL : &" << dst
+         << ".stride), (" << src0 << ".default_stride ? NULL : &" << src0
+         << ".stride), " << src1_stride << dtype_name << ");\n";
 }
 
 void CodeGenTileLangTPU::EmitTPUKernelScalar(const std::string &operation,
@@ -591,29 +602,21 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     this->PrintIndent();
     this->stream << "  __tilelang_tpu_tensor_info padded_input = {.shape = "
                  << "padded_shape, .stride = padded_stride, .addr = "
-                 << tmp_tensor << ".addr, .dtype = " << dtype
-                 << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = false};\n";
+                 << tmp_tensor << ".addr, .default_stride = false};\n";
     this->PrintIndent();
     this->stream
         << "  __tilelang_tpu_tensor_info input_copy = {.shape = copy_shape, "
         << ".stride = {0}, .addr = " << input_tensor
-        << ".addr, .dtype = " << dtype
-        << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-        << ".unsigned_flag = 0, .default_stride = true};\n";
+        << ".addr, .default_stride = true};\n";
     this->PrintIndent();
     this->stream
         << "  __tilelang_tpu_tensor_info padded_input_copy = {.shape = "
         << "copy_shape, .stride = padded_stride, .addr = " << tmp_tensor
-        << ".addr, .dtype = " << dtype
-        << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-        << ".unsigned_flag = 0, .default_stride = false};\n";
+        << ".addr, .default_stride = false};\n";
     this->PrintIndent();
     this->stream << "  __tilelang_tpu_tensor_info output_view = {.shape = "
                  << "out_reduce_w, .stride = {0}, .addr = " << output_tensor
-                 << ".addr, .dtype = " << dtype
-                 << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = true};\n";
+                 << ".addr, .default_stride = true};\n";
     this->PrintIndent();
     this->stream << "  tpu_bdc_set_C(padded_input.addr, pad_val, "
                  << "&padded_shape, &padded_input.stride, " << dtype << ");\n";
@@ -655,9 +658,7 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
                     "fill_shape, .stride "
                     "= fill_tensor_stride, "
                  << ".addr = " << input_tensor
-                 << ".addr + offset, .dtype = " << dtype << ", "
-                 << ".mode = 0, .align_mode = 4, .size = 1, .offset = offset, "
-                 << ".unsigned_flag = 0, .default_stride = false};\n";
+                 << ".addr + offset, .default_stride = false};\n";
     this->PrintIndent();
     this->stream
         << "    tpu_bdc_set_C(fill_tensor.addr, pad_val, &fill_shape, "
@@ -670,17 +671,13 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     this->stream
         << "  __tilelang_tpu_tensor_info input_view = {.shape = in_reduce_h, "
            ".stride = {0}, "
-        << ".addr = " << input_tensor << ".addr, .dtype = " << dtype << ", "
-        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-        << ".unsigned_flag = 0, .default_stride = true};\n";
+        << ".addr = " << input_tensor << ".addr, .default_stride = true};\n";
 
     this->PrintIndent();
     this->stream
         << "  __tilelang_tpu_tensor_info tmp_view = {.shape = out_reduce_h, "
            ".stride = {0}, "
-        << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype << ", "
-        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-        << ".unsigned_flag = 0, .default_stride = true};\n";
+        << ".addr = " << tmp_tensor << ".addr, .default_stride = true};\n";
 
     this->PrintIndent();
     this->stream << "  tpu_bdc_fp_max_pool2d(tmp_view.addr, input_view.addr, "
@@ -693,16 +690,12 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     this->stream
         << "  __tilelang_tpu_tensor_info output_view = {.shape = out_reduce_w, "
            ".stride = {0}, "
-        << ".addr = " << output_tensor << ".addr, .dtype = " << dtype << ", "
-        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-        << ".unsigned_flag = 0, .default_stride = true};\n";
+        << ".addr = " << output_tensor << ".addr, .default_stride = true};\n";
     this->PrintIndent();
     this->stream
         << "  __tilelang_tpu_tensor_info tmp_view2 = {.shape = in_reduce_w, "
            ".stride = {0}, "
-        << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype << ", "
-        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-        << ".unsigned_flag = 0, .default_stride = true};\n";
+        << ".addr = " << tmp_tensor << ".addr, .default_stride = true};\n";
     this->PrintIndent();
     this->stream << "  pad_val.u32 = FP_NEG_MAX(" << dtype << ");\n";
     this->PrintIndent();
@@ -862,29 +855,21 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     this->PrintIndent();
     this->stream << "  __tilelang_tpu_tensor_info padded_input = {.shape = "
                  << "padded_shape, .stride = padded_stride, .addr = "
-                 << tmp_tensor << ".addr, .dtype = " << dtype
-                 << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = false};\n";
+                 << tmp_tensor << ".addr, .default_stride = false};\n";
     this->PrintIndent();
     this->stream
         << "  __tilelang_tpu_tensor_info input_copy = {.shape = copy_shape, "
         << ".stride = {0}, .addr = " << input_tensor
-        << ".addr, .dtype = " << dtype
-        << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-        << ".unsigned_flag = 0, .default_stride = true};\n";
+        << ".addr, .default_stride = true};\n";
     this->PrintIndent();
     this->stream
         << "  __tilelang_tpu_tensor_info padded_input_copy = {.shape = "
         << "copy_shape, .stride = padded_stride, .addr = " << tmp_tensor
-        << ".addr, .dtype = " << dtype
-        << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-        << ".unsigned_flag = 0, .default_stride = false};\n";
+        << ".addr, .default_stride = false};\n";
     this->PrintIndent();
     this->stream << "  __tilelang_tpu_tensor_info output_view = {.shape = "
                  << "out_reduce_w, .stride = {0}, .addr = " << output_tensor
-                 << ".addr, .dtype = " << dtype
-                 << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                 << ".unsigned_flag = 0, .default_stride = true};\n";
+                 << ".addr, .default_stride = true};\n";
     this->PrintIndent();
     this->stream << "  tpu_bdc_set_C(padded_input.addr, pad_val, "
                  << "&padded_shape, &padded_input.stride, " << dtype << ");\n";
@@ -921,9 +906,7 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
                     "fill_shape, .stride "
                     "= fill_tensor_stride, "
                  << ".addr = " << input_tensor
-                 << ".addr + offset, .dtype = " << dtype << ", "
-                 << ".mode = 0, .align_mode = 4, .size = 1, .offset = offset, "
-                 << ".unsigned_flag = 0, .default_stride = false};\n";
+                 << ".addr + offset, .default_stride = false};\n";
     this->PrintIndent();
     this->stream
         << "    tpu_bdc_set_C(fill_tensor.addr, pad_val, &fill_shape, "
@@ -936,16 +919,12 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     this->stream
         << "  __tilelang_tpu_tensor_info input_view = {.shape = in_reduce_h, "
            ".stride = {0}, "
-        << ".addr = " << input_tensor << ".addr, .dtype = " << dtype << ", "
-        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-        << ".unsigned_flag = 0, .default_stride = true};\n";
+        << ".addr = " << input_tensor << ".addr, .default_stride = true};\n";
     this->PrintIndent();
     this->stream
         << "  __tilelang_tpu_tensor_info tmp_view = {.shape = out_reduce_h, "
            ".stride = {0}, "
-        << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype << ", "
-        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-        << ".unsigned_flag = 0, .default_stride = true};\n";
+        << ".addr = " << tmp_tensor << ".addr, .default_stride = true};\n";
     this->PrintIndent();
     this->stream << "  tpu_bdc_fp_avg_pool2d(tmp_view.addr, input_view.addr, "
                     "&input_view.shape, "
@@ -957,16 +936,12 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     this->stream
         << "  __tilelang_tpu_tensor_info output_view = {.shape = out_reduce_w, "
            ".stride = {0}, "
-        << ".addr = " << output_tensor << ".addr, .dtype = " << dtype << ", "
-        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-        << ".unsigned_flag = 0, .default_stride = true};\n";
+        << ".addr = " << output_tensor << ".addr, .default_stride = true};\n";
     this->PrintIndent();
     this->stream
         << "  __tilelang_tpu_tensor_info tmp_view2 = {.shape = in_reduce_w, "
            ".stride = {0}, "
-        << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype << ", "
-        << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-        << ".unsigned_flag = 0, .default_stride = true};\n";
+        << ".addr = " << tmp_tensor << ".addr, .default_stride = true};\n";
     this->PrintIndent();
     this->stream << "  tpu_bdc_fp_avg_pool2d(output_view.addr, tmp_view2.addr, "
                     "&tmp_view2.shape, "

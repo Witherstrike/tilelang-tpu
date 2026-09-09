@@ -100,14 +100,12 @@ def file_content_identity(path: PathLike) -> dict[str, Any]:
         raise TPUToolchainIdentityError(
             f"toolchain file disappeared while hashing {logical}: {error}") from error
     stable = (
-        _stat_signature(resolved_before) == _stat_signature(opened_before)
-        == _stat_signature(opened_after) == _stat_signature(resolved_after)
-        and _stat_signature(logical_before) == _stat_signature(logical_after)
-        and resolved_after_path == resolved
-    )
+        _stat_signature(resolved_before) == _stat_signature(opened_before) ==
+        _stat_signature(opened_after) == _stat_signature(resolved_after) and
+        _stat_signature(logical_before) == _stat_signature(logical_after) and
+        resolved_after_path == resolved)
     if not stable:
-        raise TPUToolchainIdentityError(
-            f"toolchain file changed while hashing: {logical}")
+        raise TPUToolchainIdentityError(f"toolchain file changed while hashing: {logical}")
     return {
         "path": str(logical),
         "resolved_path": str(resolved),
@@ -195,10 +193,9 @@ def tree_content_identity(path: PathLike) -> dict[str, Any]:
     except OSError as error:
         raise TPUToolchainIdentityError(
             f"toolchain tree disappeared while hashing {logical}: {error}") from error
-    if (before != after or _stat_signature(root_before) != _stat_signature(root_after)
-            or resolved_after != resolved):
-        raise TPUToolchainIdentityError(
-            f"toolchain tree changed while hashing: {logical}")
+    if (before != after or _stat_signature(root_before) != _stat_signature(root_after) or
+            resolved_after != resolved):
+        raise TPUToolchainIdentityError(f"toolchain tree changed while hashing: {logical}")
     return {
         "path": str(logical),
         "resolved_path": str(resolved),
@@ -287,8 +284,7 @@ def _executable(path: PathLike, label: str) -> Path:
     try:
         resolved = Path(path).expanduser().resolve(strict=True)
     except OSError as error:
-        raise TPUToolchainIdentityError(
-            f"cannot resolve {label} {path}: {error}") from error
+        raise TPUToolchainIdentityError(f"cannot resolve {label} {path}: {error}") from error
     if not resolved.is_file() or not os.access(resolved, os.X_OK):
         raise TPUToolchainIdentityError(f"{label} is not an executable regular file: {resolved}")
     return resolved
@@ -298,12 +294,10 @@ def _same_path(paths: Sequence[Path], label: str) -> Path:
     try:
         resolved = tuple(path.resolve(strict=True) for path in paths)
     except OSError as error:
-        raise TPUToolchainIdentityError(
-            f"cannot resolve shared PPL {label}: {error}") from error
+        raise TPUToolchainIdentityError(f"cannot resolve shared PPL {label}: {error}") from error
     if not resolved or any(path != resolved[0] for path in resolved[1:]):
-        raise TPUToolchainIdentityError(
-            f"PPL layouts disagree on their shared {label}: "
-            + ", ".join(str(path) for path in resolved))
+        raise TPUToolchainIdentityError(f"PPL layouts disagree on their shared {label}: " +
+                                        ", ".join(str(path) for path in resolved))
     return resolved[0]
 
 
@@ -371,34 +365,36 @@ def capture_tpu_toolchain_identity(
     chip_map_before_layout = _file_state(chip_map_path)
     layouts = [resolve_ppl_layout(str(ppl_root), chip) for chip in selected_chips]
     if _file_state(chip_map_path) != chip_map_before_layout:
-        raise TPUToolchainIdentityError(
-            "PPL chip map changed while resolving chip layouts")
+        raise TPUToolchainIdentityError("PPL chip map changed while resolving chip layouts")
     for layout in layouts:
         layout.require_runtime("cmodel", environment=resolved_environment)
         if runtime_mode == "pcie":
             layout.require_profiling("pcie", environment=resolved_environment)
 
-    tilelang_path = (Path(tilelang_library) if tilelang_library is not None else
-                     _loaded_library_path("tilelang", ("_LIB_PATH",)))
-    tvm_path = (Path(tvm_library) if tvm_library is not None else
-                _loaded_library_path("tvm._ffi.base", ("_LIB", "_name")))
+    tilelang_path = (
+        Path(tilelang_library) if tilelang_library is not None else _loaded_library_path(
+            "tilelang", ("_LIB_PATH",)))
+    tvm_path = (
+        Path(tvm_library) if tvm_library is not None else _loaded_library_path(
+            "tvm._ffi.base", ("_LIB", "_name")))
     host_c_path = _executable(host_c_compiler, "host C compiler")
     host_cxx_path = _executable(host_cxx_compiler, "host C++ compiler")
 
     common_paths = {
-        "kernel_common_include": _same_path(
-            [layout.kernel_common_include for layout in layouts], "kernel common include"),
-        "device_utils_include": _same_path(
-            [layout.device_utils_include for layout in layouts], "device utilities include"),
-        "host_include": _same_path(
-            [layout.host_include for layout in layouts], "host include"),
-        "runtime_include": _same_path(
-            [layout.runtime_include for layout in layouts], "runtime include"),
+        "kernel_common_include":
+            _same_path([layout.kernel_common_include for layout in layouts],
+                       "kernel common include"),
+        "device_utils_include":
+            _same_path([layout.device_utils_include for layout in layouts],
+                       "device utilities include"),
+        "host_include":
+            _same_path([layout.host_include for layout in layouts], "host include"),
+        "runtime_include":
+            _same_path([layout.runtime_include for layout in layouts], "runtime include"),
     }
-    helper_path = _same_path(
-        [layout.ppl_helper_source for layout in layouts], "ppl_helper.c")
-    cmodel_runtime = _same_path(
-        [layout.runtime_lib for layout in layouts], "CModel runtime directory")
+    helper_path = _same_path([layout.ppl_helper_source for layout in layouts], "ppl_helper.c")
+    cmodel_runtime = _same_path([layout.runtime_lib for layout in layouts],
+                                "CModel runtime directory")
 
     cross_gcc = None
     cross_toolchain_root = None
@@ -406,8 +402,7 @@ def capture_tpu_toolchain_identity(
     tpu_smi_path = None
     if runtime_mode == "pcie":
         cross_gcc = _executable(
-            _same_path(
-                [layout.pcie_cross_gcc() for layout in layouts], "PCIe cross compiler"),
+            _same_path([layout.pcie_cross_gcc() for layout in layouts], "PCIe cross compiler"),
             "PCIe cross GCC",
         )
         cross_toolchain_root = cross_gcc.parent.parent
@@ -449,7 +444,7 @@ def capture_tpu_toolchain_identity(
     stability_before = _capture_stability_snapshot(watched_files, watched_trees)
 
     chip_identities = {}
-    for chip, layout in zip(selected_chips, layouts):
+    for chip, layout in zip(selected_chips, layouts):  # noqa: B905
         chip_identities[chip] = {
             "ppl_arch": layout.arch,
             "physical_core_count": layout.physical_core_count,
@@ -489,16 +484,14 @@ def capture_tpu_toolchain_identity(
         result["pcie"] = {
             "cross_gcc": file_content_identity(cross_gcc),
             "cross_toolchain_tree": tree_content_identity(cross_toolchain_root),
-            "installed_runtime_library": file_content_identity(
-                pcie_runtime / "libtpuv7_rt.so"),
+            "installed_runtime_library": file_content_identity(pcie_runtime / "libtpuv7_rt.so"),
             "tpu_smi": file_content_identity(tpu_smi_path),
             "chips": {
                 chip: {
                     "firmware_archive": file_content_identity(layout.firmware_archive),
                     "tpudnn_include_tree": tree_content_identity(layout.tpudnn_include),
                     "tpudnn_library": file_content_identity(layout.tpudnn_library),
-                }
-                for chip, layout in zip(selected_chips, layouts)
+                } for chip, layout in zip(selected_chips, layouts)  # noqa: B905
             },
         }
     stability_after = _capture_stability_snapshot(watched_files, watched_trees)

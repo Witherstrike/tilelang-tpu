@@ -14,21 +14,30 @@
 正式数值证据统一绑定实现提交 `e5774525e3a6e11d0d6010e979203c55181a8872`，覆盖
 双后端核心、非 FP8 TPU-Kernel、FP8 和公开 demo。选定验收集合为 CModel 553/553、PCIe
 295/295，合计 **848/848**。这些是回归执行次数，不是 848 项独立能力；不同矩阵有意重复
-验证同一 selector。具体能力仍以机器契约中的 chip、编程模型、dtype、shape/属性和 stage 为准。
+验证同一支持条件。本文将由 chip、编程模型、dtype、shape 和属性共同限定的完整支持条件称为
+selector。具体能力以机器契约中的 selector 及其验证阶段为准。
 
 SG2260E CModel 只采用四份 `retry1` 矩阵；PCIe TPU-Kernel 由 14 个完整通过分片覆盖
 146 项，demo 由 15 个完整通过分片覆盖 51 项。失败完整矩阵、失败分片的通过前缀、原始
 并发 CModel 和所有 canary 均不计入验收。选择规则见 [测试报告](../tpu-backend-design/test-report.md)。
+本地证据根目录为 `research/artifacts/2026-09-09/final-e5774525/`；该目录已被 Git 忽略，不随仓库
+提交。下文中的证据路径均相对于该目录。
 
 | 组合 | CModel | PCIe |
 | --- | --- | --- |
-| BM1690 / TPU-Kernel | [核心 28/28](../artifacts/2026-09-09/final-e5774525/core-bm1690-cmodel/summary.json)、[FP8 42/42](../artifacts/2026-09-09/final-e5774525/fp8-bm1690-cmodel/summary.json)、[全量 152/152](../artifacts/2026-09-09/final-e5774525/tpukernel-bm1690-cmodel/summary.json)、[demo 36/36](../artifacts/2026-09-09/final-e5774525/demo-bm1690-cmodel/summary.json)，实际 launch 258/258 | 未验证；本机无 BM1690 板卡 |
+| BM1690 / TPU-Kernel | 核心 28/28（`core-bm1690-cmodel/summary.json`）、FP8 42/42（`fp8-bm1690-cmodel/summary.json`）、全量 152/152（`tpukernel-bm1690-cmodel/summary.json`）、demo 36/36（`demo-bm1690-cmodel/summary.json`），实际执行 258/258 | 未验证；本机无 BM1690 板卡 |
 | SG2260E / TPU-Kernel | 核心 28、FP8 42、全量 146、demo 36，均通过 | 同一四组均通过；FP8、核心和 demo 同时保留严格 decoded timing |
 | SG2260E / RV | 核心 28、demo 15，均通过；demo 覆盖 FP16/BF16/FP32 四则与 matmul | 同一 43 次均通过并保留严格 decoded timing |
 
-SG2260E device 0 已在同一实现基线上按首错停止策略分别完成 [核心 56/56](../artifacts/2026-09-09/final-e5774525/core-sg2260e-pcie/summary.json)、[FP8 42/42](../artifacts/2026-09-09/final-e5774525/fp8-sg2260e-pcie/summary.json)、[TPU-Kernel 全量 146/146](../artifacts/2026-09-09/final-e5774525/tpukernel-sg2260e-pcie-shards/) 和 [demo 51/51](../artifacts/2026-09-09/final-e5774525/demo-sg2260e-pcie-shards/)，选定集合合计 295/295 次执行。核心、FP8 和 demo 共 149 个 profiling case 均保留 raw recorder，并由显式配置的 `bigTpuProfile==0.3.5` 离线解码得到有效 ns 事件；全量 146 项用于扩大数值面，默认不启用 recorder。decoder 解释器与 `PYTHONPATH` 只进入离线 decoder 子进程，严格 timing 任务在首次硬件派发前先做无硬件 preflight。
+SG2260E device 0 已在同一实现基线上按首错停止策略分别完成核心 56/56
+（`core-sg2260e-pcie/summary.json`）、FP8 42/42（`fp8-sg2260e-pcie/summary.json`）、
+TPU-Kernel 全量 146/146（`tpukernel-sg2260e-pcie-shards/`）和 demo 51/51
+（`demo-sg2260e-pcie-shards/`），选定集合合计 295/295 次执行。核心、FP8 和 demo 共 149 个
+profiling case，均保留 raw recorder，并由显式配置的 `bigTpuProfile==0.3.5` 离线解码得到有效
+ns 事件；全量 146 项用于扩大数值覆盖面，默认不启用 recorder。decoder 解释器与 `PYTHONPATH`
+只传入离线解码子进程；严格 timing 任务会在首次硬件派发前完成不访问硬件的运行前检查。
 
-每次 PCIe launch 后，runner 持有设备锁，直到连续两次间隔采样均为 `Active/0%` 才允许
+每次 PCIe 执行后，runner 持有设备锁，直到连续两次间隔采样均为 `Active/0%` 才允许
 复用；仅合法的短暂非零利用率可在总 deadline 内继续等待，单次 `Fault` 立即停止并保留隔离。
 本轮失败健康样本的温度、时钟、利用率、电压均为 `F`，不能据此推断过热、降频或电压异常。
 根因尚未证实，后续通过分片也不代表一次连续运行完成全部用例或长期稳定性已获验证。
@@ -81,7 +90,7 @@ TPU pipeline 当前采用保守语义：不运行 vectorization、software-pipel
 
 AddressAssign 为封闭 semantic op 集建模 read/write/read-write effect。GEMM 的 `accumulate` 是显式 ABI 位，同时决定 C 是 write 还是 read-write。循环 liveness 还按 allocation depth 建模回边：循环外分配且在可重复 `For`/`While` 内使用的 buffer 保守存活整个循环，嵌套循环逐层闭包；静态 0/1 次循环和 loop-local scratch 仍可顺序复用。contract verifier 在 target pass 前后执行，防止前端或 pass 引入另一编程模型、未知 extern、GPU barrier 或 vector residual IR。
 
-每个 typed semantic buffer 参数都以 `tl.region(BufferLoad, access_mask, logical_extents)` 进入 native codegen。非 copy op 要求 whole-buffer region；copy 才允许显式子区间。裸 `tir.tvm_access_ptr` 兼容入口已删除，因为它不足以保留 view/reshape 的 logical descriptor。descriptor 等价的 presentation alias 可作为唯一表示；rank/shape/dtype/scope 改变、重复 allocation owner、越界 region 或错误 mask 均 fail-closed。
+每个 typed semantic buffer 参数都以 `tl.region(BufferLoad, access_mask, logical_extents)` 进入 native codegen。非 copy op 要求 whole-buffer region；copy 才允许显式子区间。裸 `tir.tvm_access_ptr` 兼容入口已删除，因为它不足以保留 view/reshape 的 logical descriptor。descriptor 等价的 presentation alias 可作为唯一表示；rank/shape/dtype/scope 改变、重复 allocation owner、越界 region 或错误 mask 都会被拒绝。
 
 ### 2.3 当前 op 现状
 
@@ -99,11 +108,11 @@ AddressAssign 为封闭 semantic op 集建模 read/write/read-write effect。GEM
 | topk | BM 的 FP32/INT32/UINT32 双向、K-sized 输出及稳定重复键；SG 编译期不适用 | K=1/K=length、长度上限、BM PCIe；RV |
 | 组合 demo | TPU-Kernel：RMSNorm、Split-K RMSNorm、RoPE、SwiGLU、FlashAttention 均覆盖 FP16/BF16/FP32，并通过 BM CModel、SG CModel、SG PCIe；RV：四则与 matmul 覆盖同三种 dtype | 一般 shape/tail、动态参数、多核、高性能 schedule；RV 的 norm/activation/attention |
 
-FP8 的“手册/头文件声明、公开 frontend、TileLang codegen、CModel、PCIe”分别记录。canonical 矩阵为两芯片 CModel 各 42/42、SG PCIe 42/42；每种 E4M3/E5M2 格式各覆盖 21 个公开 case，包括 copy、zero fill、FP8↔FP32、dense/broadcast elementwise、scalar、RoPE、gather 与 NN/NT overwrite/accumulate GEMM。它只提升这些精确 selector。早先 scalar 两芯片 exit 139 已定位为 direct mixed-precision API 的非法 dtype tuple；合法 PPL/TileLang 路径均使用 cast 后的通用 add_C/mul_C，因此该崩溃不构成硬件负向证据。
+FP8 的“手册/头文件声明、公开 frontend、TileLang codegen、CModel、PCIe”分别记录。正式验收矩阵为两芯片 CModel 各 42/42、SG PCIe 42/42；每种 E4M3/E5M2 格式各覆盖 21 个公开 case，包括 copy、zero fill、FP8↔FP32、dense/broadcast elementwise、scalar、RoPE、gather 与 NN/NT overwrite/accumulate GEMM。它只提升这些精确 selector。早先 scalar 两芯片 exit 139 已定位为 direct mixed-precision API 的非法 dtype tuple；合法 PPL/TileLang 路径均使用 cast 后的通用 add_C/mul_C，因此该崩溃不构成硬件负向证据。
 
 RV 的 cross-dtype copy 也必须按方向管理：当前 FP16→BF16 只有 `rvt_cvt_f2f` 生成源码证据，数值层仍为 `unverified`；BF16→FP16 尚无精确 codegen 证据。两者不能因共用同一条代码路径而合并提升。
 
-同一实现基线的 SG2260E/TPU-Kernel PCIe 已通过 14 个完整分片覆盖非 FP8 146/146，并通过独立 FP8 矩阵 42/42，包含基础浮点 scalar、exp/sigmoid/rsqrt、gather/rope、三种 dtype 的 W broadcast、十二个 reduction 边界 width，以及两种 FP8 格式各 21 个精确 case。另有 51/51 demo 和 56/56 双后端核心回归。这些结果只授权契约中已列出的 dtype、shape、属性和 oracle；BM 板端、FP8 非零 fill/异常值与更大 shape、一般 FP32 GEMM compute，以及更宽 RV selector 仍未验证。
+同一实现基线的 SG2260E/TPU-Kernel PCIe 已通过 14 个完整分片覆盖非 FP8 146/146，并通过独立 FP8 矩阵 42/42，包含基础浮点 scalar、exp/sigmoid/rsqrt、gather/rope、三种 dtype 的 W broadcast、十二个 reduction 边界 width，以及两种 FP8 格式各 21 个精确 case。另有 51/51 demo 和 56/56 双后端核心回归。这些结果只授权契约中已列出的 dtype、shape、属性和参考结果；BM 板端、FP8 非零 fill/异常值与更大 shape、一般 FP32 GEMM compute，以及更广的 RV selector 仍未验证。
 
 ## 3. 差距排序原则
 
@@ -114,7 +123,7 @@ RV 的 cross-dtype copy 也必须按方向管理：当前 FP16→BF16 只有 `rv
 3. **验证成本与板端风险**：能否先在 source/CModel 证明，再以小步 PCIe 验证；
 4. **上游可维护性**：新实现是否减少 target 特判和重复契约，而不是继续增加分叉。
 
-因此先解决 op spec、tail 和依赖模型，再扩复杂算子；先建立通用组合能力，再写单个模型专用 kernel。
+因此先解决 op spec、tail 和依赖模型，再扩展复杂算子；先建立可复用的基础能力，再实现单个模型专用 kernel。
 
 ## 4. P0：编译器正确性与架构收敛
 
@@ -129,8 +138,8 @@ RV 的 cross-dtype copy 也必须按方向管理：当前 FP16→BF16 只有 `rv
 1. 定义 `TpuOpSpec`：semantic name、frontend alias、operand role/scope、effect、dtype/layout constraint、workspace、applicable programming model 与 instruction-selection key；
 2. 由该表生成/驱动 frontend guard、verifier allowlist、AddressAssign effect 和 codegen dispatch；
 3. chip-specific capability 作为 spec 的 predicate，不在指令选择实现内散落字符串判断；
-4. 合法性按完整 `chip × programming model × dtype × layout × attributes` selector 表达，保留 TPU-Kernel FP8 NT accumulation、TPU-Kernel 基础浮点 NT rejection 与 RV 基础浮点 NT source-only support 这样的精确分支；
-5. 为每个 spec 自动生成 positive/negative source test 与 contract selector 骨架。
+4. 合法性按完整的 `chip × programming model × dtype × layout × attributes` selector 表达，保留 TPU-Kernel FP8 NT accumulation、TPU-Kernel 基础浮点 NT rejection 与 RV 基础浮点 NT source-only support 这样的精确分支；
+5. 为每个 spec 自动生成 positive/negative source test，以及 contract 中对应 selector 的骨架。
 
 **验收**：删除任一 op 的指令选择注册后，编译在统一诊断处失败；effect 与指令选择 operand 数自动一致；机器契约可从 spec 检查引用闭包。
 
@@ -146,7 +155,7 @@ RV 的 cross-dtype copy 也必须按方向管理：当前 FP16→BF16 只有 `rv
 
 ### 4.3 tail、动态 shape 与 alias
 
-**现状**：已验证 case 均为静态、规则 tile；copy/gemm/reduction 在有限静态范围 fail-closed。当前所有 TPUv7/PPL `dim4` 单维必须是编译期整数且位于 `[1,65535]`，exp/sigmoid 另有 `H*W<=65535`，reduction 还校验 EU 对齐后的派生宽度。typed semantic ABI 已保留 logical region，并区分 descriptor 等价 presentation alias 与真正的 shape/layout/ownership 变化；运行时跨参数重叠仍只按各 op 的显式 alias 契约判断。
+**现状**：已验证 case 均为静态、规则 tile；copy/gemm/reduction 只接受有限的静态范围，超出范围时在编译期拒绝。当前所有 TPUv7/PPL `dim4` 单维必须是编译期整数且位于 `[1,65535]`，exp/sigmoid 另有 `H*W<=65535`，reduction 还校验 EU 对齐后的派生宽度。typed semantic ABI 已保留 logical region，并区分 descriptor 等价 presentation alias 与真正的 shape/layout/ownership 变化；运行时跨参数重叠仍只按各 op 的显式 alias 契约判断。
 
 **原因**：隐式越界 DMA 或错误 stride 在 PCIe 上可能卡住设备；没有统一 tail 语义就无法安全扩大 shape。
 
@@ -204,7 +213,7 @@ RV 的 cross-dtype copy 也必须按方向管理：当前 FP16→BF16 只有 `rv
 
 **原因**：sum/max 已在 TPU-Kernel CModel 稳定，但仍是 `tl.tpukernel.*`；RV、min、arg、跨 tile 与 FP32 accumulator 是 softmax/norm 的前置。
 
-**措施**：定义 `tl.tpu.reduce` 的 axis、init、accumulator dtype、workspace 和 tail 语义；TPU-Kernel复用现有 composite，RV 按 ISA 实现；先连续轴，再多轴/跨 tile。
+**措施**：定义 `tl.tpu.reduce` 的 axis、init、accumulator dtype、workspace 和 tail 语义；TPU-Kernel 复用现有 composite，RV 按 ISA 实现；先连续轴，再多轴/跨 tile。
 
 ### 5.4 数学函数与 activation
 
@@ -246,7 +255,7 @@ RV 的 cross-dtype copy 也必须按方向管理：当前 FP16→BF16 只有 `rv
 
 **原因**：生产 attention 需要 batch/head、mask、online reduction 与流水；当前 GEMM 契约仍以 local rank-2 tile 为核心。
 
-**措施**：先建立 batched descriptor 与 partition，把当前 reference FlashAttention 作为端到端 oracle；再加入稳定 online softmax、mask/causal/tail 和多核流水。专用快捷路径必须与 reference 在同一 workload manifest 下等价。
+**措施**：先建立 batched descriptor 与 partition，把当前 reference FlashAttention 作为端到端参考结果；再加入稳定 online softmax、mask/causal/tail 和多核流水。专用快捷路径必须与 reference 在同一 workload manifest 下等价。
 
 ### 6.4 gather/topk/sort
 
@@ -264,7 +273,7 @@ RV 的 cross-dtype copy 也必须按方向管理：当前 FP16→BF16 只有 `rv
 
 **原因**：当前 FP8 已形成两芯片各 42/42 的公开 CModel 矩阵，SG2260E/TPU-Kernel 又在真机直接验证两格式各 21 项；但 BM1690 PCIe、非零 fill、更多 cast、异常值域、可选 saturation 与 RV mapping 仍未形成生产闭环。
 
-**措施**：以现有 42/42 板端集合为最小回归基线，依次新增非零 fill、FP16/BF16↔FP8 cast、FP8 C、异常值与更广 shape；每个 selector 先 source/CModel，再以单例 canary 和 fail-stop 小批次上板。当前 scalar 只承诺非饱和 E4M3-NaN/E5M2-infinity overflow，不能把被 PPL 丢弃的 saturation flag 暴露给用户。RV 按 descriptor、round/saturate 与 accumulator 逐项实现，不能因 ISA 文档列出 FP8 就整体开放。
+**措施**：以现有 42/42 板端集合为最小回归基线，依次新增非零 fill、FP16/BF16↔FP8 cast、FP8 C、异常值与更广 shape；每个 selector 先通过 source/CModel，再以单例 canary 和首错停止的小批次上板。当前 scalar 只承诺非饱和 E4M3-NaN/E5M2-infinity overflow，不能把被 PPL 丢弃的 saturation flag 暴露给用户。RV 按 descriptor、round/saturate 与 accumulator 逐项实现，不能因 ISA 文档列出 FP8 就整体开放。
 
 ## 7. P3：上游化与生产工程
 
@@ -312,14 +321,14 @@ target 完全一致，同时增加直接 FFI 的缺失属性和身份冲突负�
 
 - 每次提交运行 source-only + 三种合法 target 组合的 CModel；
 - PCIe 按风险分 smoke/core/extended 三层，首错停止；
-- profiling 与普通数值矩阵都经 parent-death supervisor 启动 worker；外层 runner 被强杀的无孤儿进程性质由单测锁定；
+- profiling 与普通数值矩阵都由带父进程退出联动的 supervisor 启动子进程；单测保证外层 runner 被强制终止后不会留下孤儿进程；
 - contract 与 case registry 做双向一致性检查；
 - instruction profiling 与性能 benchmark 分开保存；
-- tracked 报告只汇总结论，raw artifact 继续 ignored。
+- 仓库跟踪的报告只汇总结论，raw artifact 继续由 Git 忽略。
 
 ### 7.4 profiling 依赖与性能判定
 
-**现状**：SG2260E PCIe 的核心 56、FP8 42、demo 51，共 149 个严格 profiling case 均完成数值校验、raw recorder 采集和离线 decode，并包含有效 ns 区间。`bigTpuProfile==0.3.5` 的解释器与 `PYTHONPATH` 仅进入 decoder 子进程；首次硬件派发前会验证 parser API。CModel 能采集 raw trace，但当前没有兼容的 PerfAI AutoRunner，因此按设计记录 `parser_status=unavailable`、`timed_instruction_count=0`，不伪造 timing。
+**现状**：SG2260E PCIe 的核心 56、FP8 42、demo 51，共 149 个严格 profiling case 均完成数值校验、raw recorder 采集和离线 decode，并包含有效 ns 区间。`bigTpuProfile==0.3.5` 的解释器与 `PYTHONPATH` 仅传入离线解码子进程；首次硬件派发前会验证 parser API。CModel 能采集 raw trace，但当前没有兼容的 PerfAI AutoRunner，因此按设计记录 `parser_status=unavailable`、`timed_instruction_count=0`，不伪造 timing。
 
 **原因**：若框架静默安装或把 decoder 缺失当成数值失败，会破坏离线构建、依赖可审计性和板端安全；单次 recorder 时长也不能代替稳定性能 benchmark。
 
@@ -333,7 +342,7 @@ TileLang-Ascend 的价值在于验证工程分层：计算单元选择、自动�
 
 组合 workload 的当前状态与下一验收目标如下：
 
-1. RMSNorm/ Split-K RMSNorm、RoPE、SwiGLU 已完成固定 shape 的 TPU-Kernel 三 dtype 跨环境正确性闭环；下一步标准化 axis、tail、workspace 和 partition；
+1. RMSNorm/Split-K RMSNorm、RoPE、SwiGLU 已完成固定 shape 的 TPU-Kernel 三 dtype 跨环境正确性闭环；下一步标准化 axis、tail、workspace 和 partition；
 2. FlashAttention 已完成固定 shape 的 reference 闭环；下一步拆出可复用 stable softmax，覆盖 mask/causal/tail；
 3. Batch GEMM 用于检验 descriptor 与多核 partition，当前尚未实现；
 4. production attention 在 reference 之上检验前述能力与依赖安全 pipeline；
@@ -353,10 +362,10 @@ TileLang-Ascend 的价值在于验证工程分层：计算单元选择、自动�
 
 ## 10. 支持判定原则
 
-- “支持”必须绑定精确 chip、programming model、dtype、shape/layout、variant 与验证 stage；
+- “支持”必须绑定精确的 chip、programming model、dtype、shape/layout、variant 与验证阶段；
 - 头文件或 ISA 声明只能证明底层候选能力；
 - CModel 是 PCIe 的必要前置，不证明板端并发、驱动和稳定性；
 - unsupported 与 unverified 必须分开：前者是当前实现明确拒绝，后者是尚无足够证据；
 - 首次板端异常立即终止受控进程组并跳过剩余测试；
 - 单次 instruction timing 用于映射审查，不用于性能排名；
-- 机器事实以 `research/tpu-op-contract/contract.json` 为准，叙述文档不得扩大其 scope。
+- 机器事实以 `research/tpu-op-contract/contract.json` 为准，叙述文档不得扩大其支持范围。

@@ -53,8 +53,8 @@ def _selection() -> Tuple[str, str, str, bool, Optional[int]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", choices=tuple(case.case_id for case in build_cases()),
-                        required=True)
+    parser.add_argument(
+        "--case", choices=tuple(case.case_id for case in build_cases()), required=True)
     args = parser.parse_args()
     chip, programming_model, runtime_mode, allow_pcie, device_id = _selection()
     case = case_by_id(args.case)

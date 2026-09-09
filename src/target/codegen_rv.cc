@@ -1,8 +1,20 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file distributed
- * with this work for additional information regarding copyright ownership.
- * The ASF licenses this file to you under the Apache License, Version 2.0.
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 /*! \file target/codegen_rv.cc
@@ -217,12 +229,13 @@ void CodeGenTileLangTPU::EmitRVElementwise(
     // view with zero W stride. This is a descriptor-only broadcast: no LMEM
     // expansion, extra instruction, or out-of-bounds read is introduced.
     PrintIndent();
-    stream << "rvt_tr(9, PRECISION(" << RVDTypeName(src1_dtype)
-           << "), FP8TYPE(" << RVDTypeName(src1_dtype) << "), " << src1
-           << ".addr, FREE_LAYOUT, (array4_t){.n=" << dst << ".shape.n, .c="
-           << dst << ".shape.c, .h=" << dst << ".shape.h, .w=" << dst
-           << ".shape.w}, (int[4]){" << src1 << ".stride.n, " << src1
-           << ".stride.c, " << src1 << ".stride.h, 0});\n";
+    stream << "rvt_tr(9, PRECISION(" << RVDTypeName(src1_dtype) << "), FP8TYPE("
+           << RVDTypeName(src1_dtype) << "), " << src1
+           << ".addr, FREE_LAYOUT, (array4_t){.n=" << dst
+           << ".shape.n, .c=" << dst << ".shape.c, .h=" << dst
+           << ".shape.h, .w=" << dst << ".shape.w}, (int[4]){" << src1
+           << ".stride.n, " << src1 << ".stride.c, " << src1
+           << ".stride.h, 0});\n";
   } else {
     EmitRVDescriptor(src1, 9, false, RVDTypeName(src1_dtype), true);
   }

@@ -5,6 +5,7 @@ from .utils import is_cuda_target, is_hip_target, is_cpu_target, is_tpu_target
 from tilelang import tvm as tvm
 from tilelang.contrib.nvcc import get_target_compute_version
 from tvm.target import Target
+import contextlib
 import ctypes
 import os
 import tempfile
@@ -22,6 +23,23 @@ from tilelang.engine.tpu_config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _new_temporary_source(suffix: str) -> str:
+    """Create a named source file without leaving an open file descriptor."""
+
+    descriptor, path = tempfile.mkstemp(suffix=suffix, text=True)
+    os.close(descriptor)
+    return path
+
+
+def _remove_generated_file(path: Optional[str]) -> None:
+    """Remove one generator-owned file if it still exists."""
+
+    if path is None:
+        return
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(path)
 
 
 def _cleanup_tpu_workspace(path: str, owner_pid: int) -> None:
@@ -57,6 +75,11 @@ class LibraryGenerator(object):
         # not supported yet.
         self._tpu_compiled_libpath: Optional[str] = None
         self._tpu_compiled_runtime_identity = None
+        # ``srcpath`` and ``libpath`` are public and may later be replaced by
+        # callers. Track the files created by ``compile_lib`` separately so
+        # cleanup never mistakes caller-owned paths for generator-owned files.
+        self._temporary_source_path: Optional[str] = None
+        self._temporary_library_path: Optional[str] = None
         if is_tpu_target(self.target):
             if tpu_target is None or tpu_runtime is None:
                 raise ValueError("LibraryGenerator requires target and runtime configuration "
@@ -140,20 +163,20 @@ class LibraryGenerator(object):
             # Keep CModel and PCIe from sharing a process-global vendor
             # runtime.  This happens before ctypes.CDLL, so an invalid mode
             # transition never initializes or touches a board runtime.
-            from .tpu import reserve_tpu_runtime_profile
+            from .tpu import reserve_tpu_runtime_identity
             tpu_device_id = int(device_id)
             tpu_sdk_identity = self._tpu_runtime_sdk_identity(lib_path)
-            reserve_tpu_runtime_profile(self.tpu_target, self.tpu_runtime, tpu_device_id,
-                                        tpu_sdk_identity)
+            reserve_tpu_runtime_identity(self.tpu_target, self.tpu_runtime, tpu_device_id,
+                                         tpu_sdk_identity)
         elif is_tpu_target(self.target) and runtime_mode == "cmodel":
             assert self.tpu_target is not None and self.tpu_runtime is not None
             # The vendor CModel runtime is process-global. Reserve its core
             # topology before dlopen rather than allowing BM1690 (8 cores) and
             # SG2260E (4 cores) to silently share one initialized runtime.
-            from .tpu import reserve_tpu_runtime_profile
+            from .tpu import reserve_tpu_runtime_identity
             tpu_device_id = 0
             tpu_sdk_identity = self._tpu_runtime_sdk_identity(lib_path)
-            reserve_tpu_runtime_profile(
+            reserve_tpu_runtime_identity(
                 self.tpu_target,
                 self.tpu_runtime,
                 device_id=tpu_device_id,
@@ -190,11 +213,11 @@ class LibraryGenerator(object):
     def compile_lib(self, timeout: float = None, with_tl: bool = True):
         target = self.target
         if is_cuda_target(target):
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
             compute_version = "".join(get_target_compute_version(target).split("."))
             if compute_version == "90":
                 compute_version = "90a"
-            libpath = src.name.replace(".cu", ".so")
+            srcpath = _new_temporary_source(".cu")
+            libpath = srcpath.replace(".cu", ".so")
 
             command = [
                 "nvcc",
@@ -206,29 +229,30 @@ class LibraryGenerator(object):
                 "'-fPIC'",
                 "-lineinfo",
                 "--shared",
-                src.name,
+                srcpath,
                 "-lcuda",
                 "-gencode",
                 f"arch=compute_{compute_version},code=sm_{compute_version}",
             ]
 
         elif is_hip_target(target):
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)
-            libpath = src.name.replace(".cpp", ".so")
+            srcpath = _new_temporary_source(".cpp")
+            libpath = srcpath.replace(".cpp", ".so")
 
             command = [
                 "hipcc",
                 "-std=c++17",
                 "-fPIC",
                 "--shared",
-                src.name,
+                srcpath,
             ]
         elif is_cpu_target(target):
             from tilelang.contrib.cc import get_cplus_compiler
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)
-            libpath = src.name.replace(".cpp", ".so")
+            compiler = get_cplus_compiler()
+            srcpath = _new_temporary_source(".cpp")
+            libpath = srcpath.replace(".cpp", ".so")
 
-            command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
+            command = [compiler, "-std=c++17", "-fPIC", "-shared", srcpath]
             with_tl = False
             command += [
                 "-I" + TILELANG_TEMPLATE_PATH,
@@ -243,10 +267,10 @@ class LibraryGenerator(object):
             ppl_layout = resolve_ppl_layout(ppl_root, self.tpu_target.chip)
             self._ppl_layout = ppl_layout
             if self.tpu_target.programming_model == "rv":
-                # RVT is a direct PPL ABI bridge: the generated PPL source
-                # includes rvt_api.h and users emit explicit rvt_* externs.
-                # A missing header is a chip/SDK capability error, rather
-                # than a silent fallback to the TPU-Kernel path.
+                # RV source includes rvt_api.h for both compiler-selected
+                # portable TPU operations and explicit low-level rvt_* calls.
+                # A missing header is a chip/SDK capability error, not a
+                # reason to fall back to the TPU-Kernel path.
                 ppl_layout.require_rvt_api()
 
             runtime_mode = self.tpu_runtime.runtime_mode
@@ -277,26 +301,42 @@ class LibraryGenerator(object):
         else:
             raise ValueError(f"Unsupported target: {target}")
 
-        if with_tl:
-            command += [
-                "-I" + TILELANG_TEMPLATE_PATH,
-                "-I" + CUTLASS_INCLUDE_DIR,
-            ]
-            command += ["-diag-suppress=20013"]
-        command += ["-o", libpath]
-
-        src.write(self.lib_code)
-        src.flush()
         try:
+            if with_tl:
+                command += [
+                    "-I" + TILELANG_TEMPLATE_PATH,
+                    "-I" + CUTLASS_INCLUDE_DIR,
+                ]
+                command += ["-diag-suppress=20013"]
+            command += ["-o", libpath]
+
+            with open(srcpath, "w", encoding="utf-8") as source_file:
+                source_file.write(self.lib_code)
             ret = subprocess.run(command, timeout=timeout)
+        except (KeyboardInterrupt, SystemExit):
+            _remove_generated_file(libpath)
+            _remove_generated_file(srcpath)
+            raise
         except Exception as e:
+            _remove_generated_file(libpath)
+            _remove_generated_file(srcpath)
             raise RuntimeError(f"Compile kernel failed because of {e}") from e
 
         if ret.returncode != 0:
+            _remove_generated_file(libpath)
+            _remove_generated_file(srcpath)
             raise RuntimeError(f"Compilation Failed! {command}")
 
-        self.srcpath = src.name
+        previous_source_path = self._temporary_source_path
+        previous_library_path = self._temporary_library_path
+        self.srcpath = srcpath
         self.libpath = libpath
+        self._temporary_source_path = srcpath
+        self._temporary_library_path = libpath
+        if previous_source_path != srcpath:
+            _remove_generated_file(previous_source_path)
+        if previous_library_path != libpath:
+            _remove_generated_file(previous_library_path)
 
     def remove_lib(self):
         if self.tpu_workspace_dir is not None:
@@ -310,9 +350,16 @@ class LibraryGenerator(object):
             if finalizer is not None and finalizer.alive:
                 finalizer()
             return
-        if self.libpath:
-            os.remove(self.libpath)
-        self.libpath = None
+        temporary_library_path = self._temporary_library_path
+        self._temporary_library_path = None
+        _remove_generated_file(temporary_library_path)
+        if self.libpath == temporary_library_path:
+            self.libpath = None
+        temporary_source_path = self._temporary_source_path
+        self._temporary_source_path = None
+        _remove_generated_file(temporary_source_path)
+        if self.srcpath == temporary_source_path:
+            self.srcpath = None
 
     def close(self):
         """Release generated files; safe to call repeatedly.
@@ -379,7 +426,6 @@ class LibraryGenerator(object):
             layout.require_profiling(runtime_mode)
         definitions = [
             *(f"-D{definition}" for definition in layout.compile_definitions),
-            "-DTILELANG_PPL_HELPER_HAS_GET_DTYPE",
         ]
         if programming_model == "rv":
             layout.require_rvt_api()
@@ -437,10 +483,10 @@ class LibraryGenerator(object):
         ]
         kernel_host_o = os.path.join(src_dir, "kernel_host.o")
         main_o = os.path.join(src_dir, "main.o")
-        self._run_tpu_command(
-            ["/usr/bin/c++", *host_common, "-c",
-             os.path.join(src_dir, "kernel.cpp"), "-o", kernel_host_o], "Compile TPU host wrapper",
-            timeout)
+        self._run_tpu_command([
+            "/usr/bin/c++", *host_common, "-c",
+            os.path.join(src_dir, "kernel.cpp"), "-o", kernel_host_o
+        ], "Compile TPU host wrapper", timeout)
         self._run_tpu_command(
             ["/usr/bin/c++", *host_common, "-c",
              os.path.join(src_dir, "main.cpp"), "-o", main_o], "Compile TPU host entry", timeout)
@@ -474,8 +520,8 @@ class LibraryGenerator(object):
         # TPUv7 defaults to eight emulator cores. SG2260E exposes four, and
         # launching the extra scalar-emulator workers makes them address
         # non-existent cores before the first kernel can complete.  Embed the
-        # value in main.so so cached/from-database processes do not depend on
-        # this compiler process having set TPU_RT_CORE_NUM already.
+        # value in main.so so the runtime process does not depend on an ambient
+        # TPU_RT_CORE_NUM value left by the compiler process.
         host_common = common + [
             f'-DTILELANG_PPL_KERNEL_PATH="{libkernel}"',
             f'-DTILELANG_TPU_CMODEL_CORE_NUM="{layout.physical_core_count}"',

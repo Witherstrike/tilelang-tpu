@@ -156,8 +156,6 @@ private:
                                                int expected_access_mask) const;
   const std::vector<int> &DescriptorShape4(const VarNode *data_var,
                                            const std::string &context) const;
-  size_t DescriptorRank(const VarNode *data_var,
-                        const std::string &context) const;
   // Global semantic operands carry Buffer::data variables, while generated
   // function arguments are positional handles.  Bridge them by Var identity;
   // Buffer names are presentation metadata and need not be unique in TIR.
@@ -165,12 +163,9 @@ private:
   // Every handle/Var that the compiler maps to a tensor-info descriptor.
   // Raw RVT externs accept register encodings, never these C struct values.
   std::unordered_set<const VarNode *> compiler_descriptor_vars_;
+  // Normalized N/C/H/W metadata for positional global descriptors. The
+  // source-level shape maps below are keyed by Var and cover local tensors too.
   std::unordered_map<std::string, std::vector<int>> buffer_shape;
-  // Full normalized N/C/H/W shape for local tensors.  buffer_shape is the
-  // projected C/W matrix view required by the current instruction ABI;
-  // portable core ops also consult this map so a non-trivial N or H dimension
-  // is never silently flattened into an incompatible descriptor.
-  std::unordered_map<std::string, std::vector<int>> buffer_shape4;
   std::unordered_map<std::string, std::vector<int>> buffer_stride;
   std::unordered_map<const VarNode *, int> buffer_addrs_;
   std::unordered_map<const VarNode *, DataType> descriptor_dtype_;

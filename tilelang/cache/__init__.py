@@ -25,7 +25,7 @@ def cached(
     runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
 ) -> JITKernel:
     """
-    Caches and reuses compiled kerne(ls (using KernelCache class).
+    Caches and reuses compiled kernels (using KernelCache class).
     """
     return _kernel_cache_instance.cached(
         func,

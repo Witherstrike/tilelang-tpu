@@ -59,20 +59,20 @@ TPU_CHIP_SPECS: Mapping[str, TPUChipSpec] = MappingProxyType({
 })
 
 
-def _normalise_chip_name(chip: str) -> str:
+def _normalize_chip_name(chip: str) -> str:
     if not isinstance(chip, str):
         raise TypeError(f"TPU chip must be a string, got {type(chip).__name__}")
-    normalised = chip.strip().lower()
-    if not normalised:
+    normalized = chip.strip().lower()
+    if not normalized:
         raise ValueError("TPU chip must not be empty")
-    return normalised
+    return normalized
 
 
 def get_tpu_chip_spec(chip: str) -> TPUChipSpec:
     """Return a supported chip capability record or fail before toolchain use."""
-    normalised = _normalise_chip_name(chip)
+    normalized = _normalize_chip_name(chip)
     try:
-        return TPU_CHIP_SPECS[normalised]
+        return TPU_CHIP_SPECS[normalized]
     except KeyError as exc:
         supported = ", ".join(TPU_CHIP_SPECS)
         raise ValueError(f"Unsupported TPU chip {chip!r}; supported chips: {supported}") from exc
@@ -168,7 +168,7 @@ def resolve_tpu_target(*, target: Any) -> TPUTargetSpec:
 def resolve_tpu_runtime(*, runtime_mode: Optional[TPURuntimeMode] = None) -> TPURuntimeConfig:
     """Resolve host execution without changing the compiled device program.
 
-    CModel is the fail-safe default: omitting a runtime choice must never
+    CModel is the safe default: omitting a runtime choice must never
     initialize a physical board. PCIe loading has an additional explicit gate
     in the adapter.
     """

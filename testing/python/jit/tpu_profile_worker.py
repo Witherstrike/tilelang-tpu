@@ -39,8 +39,7 @@ _MAX_CASES = {
 
 _BROADCAST_CASES = {
     f"elementwise-{operation}-{dtype}-broadcast": (operation, dtype)
-    for operation in ("add", "sub", "mul", "div")
-    for dtype in ("fp16", "bf16", "fp32")
+    for operation in ("add", "sub", "mul", "div") for dtype in ("fp16", "bf16", "fp32")
 }
 
 
@@ -83,8 +82,8 @@ def _profile_selection():
 
 def _emit_result(payload) -> None:
     print(
-        _RESULT_PREFIX + json.dumps(
-            payload, sort_keys=True, separators=(",", ":"), allow_nan=False),
+        _RESULT_PREFIX +
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False),
         flush=True,
     )
 
@@ -184,8 +183,13 @@ def _matmul(chip: str, programming_model: str, runtime_mode: str) -> None:
         raise RuntimeError(f"{programming_model} matmul mismatch; max abs difference={difference}")
 
 
-def _elementwise(operation: str, chip: str, programming_model: str, runtime_mode: str, *,
-                 dtype: str = "float32", variant: str = "dense") -> None:
+def _elementwise(operation: str,
+                 chip: str,
+                 programming_model: str,
+                 runtime_mode: str,
+                 *,
+                 dtype: str = "float32",
+                 variant: str = "dense") -> None:
     if dtype not in ("float16", "bfloat16", "float32"):
         raise ValueError(f"unsupported elementwise dtype {dtype!r}")
     if variant not in ("dense", "broadcast", "negative-infinity"):
@@ -239,8 +243,8 @@ def _elementwise(operation: str, chip: str, programming_model: str, runtime_mode
         "float32": torch.float32,
     }[dtype]
     if variant == "negative-infinity":
-        finite = torch.linspace(-8.0, 8.0, steps=shape[0] * shape[1],
-                                dtype=torch.float32).reshape(shape)
+        finite = torch.linspace(
+            -8.0, 8.0, steps=shape[0] * shape[1], dtype=torch.float32).reshape(shape)
         a = finite.clone()
         b = torch.flip(finite, dims=(1,)).clone()
         a[:, 0::4] = -float("inf")
@@ -369,14 +373,12 @@ def main() -> None:
             _matmul(chip, programming_model, runtime_mode)
         elif args.case in _MAX_CASES:
             dtype, variant = _MAX_CASES[args.case]
-            _elementwise("max", chip, programming_model, runtime_mode,
-                         dtype=dtype, variant=variant)
+            _elementwise("max", chip, programming_model, runtime_mode, dtype=dtype, variant=variant)
         elif args.case in _BROADCAST_CASES:
             operation, dtype_token = _BROADCAST_CASES[args.case]
-            dtype = {"fp16": "float16", "bf16": "bfloat16", "fp32": "float32"}[
-                dtype_token]
-            _elementwise(operation, chip, programming_model, runtime_mode,
-                         dtype=dtype, variant="broadcast")
+            dtype = {"fp16": "float16", "bf16": "bfloat16", "fp32": "float32"}[dtype_token]
+            _elementwise(
+                operation, chip, programming_model, runtime_mode, dtype=dtype, variant="broadcast")
         elif args.case.startswith("elementwise-"):
             _elementwise(args.case[len("elementwise-"):], chip, programming_model, runtime_mode)
         elif args.case in _COPY_CASES:
@@ -403,7 +405,9 @@ def main() -> None:
         "chip": chip,
         "programming_model": programming_model,
         "runtime_mode": runtime_mode,
-        "metrics": {"passed": True},
+        "metrics": {
+            "passed": True
+        },
     })
 
 

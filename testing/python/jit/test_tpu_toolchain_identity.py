@@ -122,8 +122,7 @@ def _fake_toolchain(tmp_path: Path):
     _write(runtime / "libcdm_daemon_emulator.so", b"daemon")
 
     cross_root = root / "third_party/toolchains_dir/cross"
-    cross_gcc = _write(
-        cross_root / "bin/riscv64-unknown-linux-gnu-gcc", b"gcc", executable=True)
+    cross_gcc = _write(cross_root / "bin/riscv64-unknown-linux-gnu-gcc", b"gcc", executable=True)
     _write(cross_root / "libexec/gcc/cc1", b"cc1")
     _write(cross_root / "sysroot/lib/libc.so", b"libc")
 
@@ -201,12 +200,10 @@ def _capture(fake, runtime_mode):
     )
 
 
-def test_capture_cmodel_identity_covers_loaded_libraries_and_both_chips(
-        tmp_path, monkeypatch):
+def test_capture_cmodel_identity_covers_loaded_libraries_and_both_chips(tmp_path, monkeypatch):
     fake = _fake_toolchain(tmp_path)
-    monkeypatch.setattr(
-        identity_module, "resolve_ppl_layout",
-        lambda _root, chip: fake.layouts[chip])
+    monkeypatch.setattr(identity_module, "resolve_ppl_layout",
+                        lambda _root, chip: fake.layouts[chip])
 
     first = _capture(fake, "cmodel")
     second = _capture(fake, "cmodel")
@@ -224,9 +221,8 @@ def test_capture_cmodel_identity_covers_loaded_libraries_and_both_chips(
 def test_capture_pcie_identity_covers_cross_toolchain_firmware_tpudnn_runtime_and_smi(
         tmp_path, monkeypatch):
     fake = _fake_toolchain(tmp_path)
-    monkeypatch.setattr(
-        identity_module, "resolve_ppl_layout",
-        lambda _root, chip: fake.layouts[chip])
+    monkeypatch.setattr(identity_module, "resolve_ppl_layout",
+                        lambda _root, chip: fake.layouts[chip])
 
     first = _capture(fake, "pcie")
     assert first["pcie"]["cross_toolchain_tree"]["file_count"] == 3
@@ -238,15 +234,14 @@ def test_capture_pcie_identity_covers_cross_toolchain_firmware_tpudnn_runtime_an
 
     (fake.cross_root / "sysroot/lib/libc.so").write_bytes(b"changed-libc")
     second = _capture(fake, "pcie")
-    assert (second["pcie"]["cross_toolchain_tree"]["sha256"] !=
-            first["pcie"]["cross_toolchain_tree"]["sha256"])
+    assert (second["pcie"]["cross_toolchain_tree"]["sha256"]
+            != first["pcie"]["cross_toolchain_tree"]["sha256"])
 
 
 def test_capture_rejects_a_component_changed_after_its_own_hash(tmp_path, monkeypatch):
     fake = _fake_toolchain(tmp_path)
-    monkeypatch.setattr(
-        identity_module, "resolve_ppl_layout",
-        lambda _root, chip: fake.layouts[chip])
+    monkeypatch.setattr(identity_module, "resolve_ppl_layout",
+                        lambda _root, chip: fake.layouts[chip])
     original = identity_module._capture_stability_snapshot
     calls = 0
 
@@ -257,8 +252,8 @@ def test_capture_rejects_a_component_changed_after_its_own_hash(tmp_path, monkey
             fake.tilelang.write_bytes(b"tilelang-changed-after-file-hash")
         return original(files, trees)
 
-    monkeypatch.setattr(
-        identity_module, "_capture_stability_snapshot", mutate_before_final_snapshot)
+    monkeypatch.setattr(identity_module, "_capture_stability_snapshot",
+                        mutate_before_final_snapshot)
 
     with pytest.raises(TPUToolchainIdentityError, match="complete identity capture"):
         _capture(fake, "cmodel")

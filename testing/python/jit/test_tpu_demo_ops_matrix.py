@@ -40,21 +40,37 @@ def _execution_args(**overrides):
 
 def test_validate_args_accepts_explicit_scoped_pcie_request():
     matrix.validate_args(_execution_args())
-    matrix.validate_args(
-        _execution_args(operations=None, case_ids=None, all_pcie_cases=True))
+    matrix.validate_args(_execution_args(operations=None, case_ids=None, all_pcie_cases=True))
 
 
 @pytest.mark.parametrize(
     ("overrides", "diagnostic"),
     (
-        ({"allow_pcie": False}, "--allow-pcie and --allow-pcie-profile"),
-        ({"allow_pcie_profile": False}, "--allow-pcie and --allow-pcie-profile"),
-        ({"chip": "bm1690"}, "explicit --chip sg2260e"),
-        ({"device_id": 1}, "only --device-id 0"),
-        ({"device_id": False}, "non-negative 32-bit"),
-        ({"operations": None, "case_ids": None}, "explicit --case/--op filter"),
-        ({"bm_cmodel_summary": None}, "--bm-cmodel-summary"),
-        ({"sg_cmodel_summary": None}, "--bm-cmodel-summary"),
+        ({
+            "allow_pcie": False
+        }, "--allow-pcie and --allow-pcie-profile"),
+        ({
+            "allow_pcie_profile": False
+        }, "--allow-pcie and --allow-pcie-profile"),
+        ({
+            "chip": "bm1690"
+        }, "explicit --chip sg2260e"),
+        ({
+            "device_id": 1
+        }, "only --device-id 0"),
+        ({
+            "device_id": False
+        }, "non-negative 32-bit"),
+        ({
+            "operations": None,
+            "case_ids": None
+        }, "explicit --case/--op filter"),
+        ({
+            "bm_cmodel_summary": None
+        }, "--bm-cmodel-summary"),
+        ({
+            "sg_cmodel_summary": None
+        }, "--bm-cmodel-summary"),
     ),
 )
 def test_validate_args_rejects_unscoped_or_unpromoted_pcie(overrides, diagnostic):
@@ -147,8 +163,7 @@ def test_validate_board_snapshot_accepts_exact_idle_single_card():
         (("card0", "chip0", "tpu_util"), "1%", "not idle"),
     ),
 )
-def test_validate_board_snapshot_rejects_ambiguous_or_nonidle_state(
-        path, value, diagnostic):
+def test_validate_board_snapshot_rejects_ambiguous_or_nonidle_state(path, value, diagnostic):
     payload = _board_payload()
     _set_path(payload, path, value)
 
@@ -176,15 +191,13 @@ def test_wait_for_idle_board_snapshot_accepts_one_transient_sample(monkeypatch):
     assert snapshot["idle_settle_seconds"] >= 0
     assert snapshot["idle_settle"]["status"] == "passed"
     assert snapshot["idle_settle"]["max_observed_util_percent"] == 9
-    assert [sample["consecutive_zero_samples"]
-            for sample in snapshot["idle_settle"]["samples"]] == [0, 1, 2]
-    assert [sample["payload"] for sample in snapshot["idle_settle"]["samples"]] == [
-        busy, _board_payload(), _board_payload()
-    ]
-    assert all(sample["probe_error_type"] is None
-               for sample in snapshot["idle_settle"]["samples"])
-    assert all(sample["validation_error_type"] is None
-               for sample in snapshot["idle_settle"]["samples"])
+    assert [sample["consecutive_zero_samples"] for sample in snapshot["idle_settle"]["samples"]
+           ] == [0, 1, 2]
+    assert [sample["payload"] for sample in snapshot["idle_settle"]["samples"]
+           ] == [busy, _board_payload(), _board_payload()]
+    assert all(sample["probe_error_type"] is None for sample in snapshot["idle_settle"]["samples"])
+    assert all(
+        sample["validation_error_type"] is None for sample in snapshot["idle_settle"]["samples"])
 
 
 def test_wait_for_idle_board_snapshot_resets_zero_streak(monkeypatch):
@@ -197,8 +210,8 @@ def test_wait_for_idle_board_snapshot_resets_zero_streak(monkeypatch):
         lambda _remaining: next(samples), 0, timeout_s=1.0, poll_interval_s=0.01)
 
     assert snapshot["idle_probe_count"] == 4
-    assert [sample["consecutive_zero_samples"]
-            for sample in snapshot["idle_settle"]["samples"]] == [1, 0, 1, 2]
+    assert [sample["consecutive_zero_samples"] for sample in snapshot["idle_settle"]["samples"]
+           ] == [1, 0, 1, 2]
 
 
 def test_wait_for_idle_board_snapshot_fails_closed_without_a_settle_budget():
@@ -247,6 +260,7 @@ def test_wait_for_idle_board_snapshot_records_persistent_busy_timeout(monkeypatc
 
 
 def test_wait_for_idle_board_snapshot_rejects_a_late_idle_probe(monkeypatch):
+
     class Clock:
         now = 0.0
 
@@ -261,8 +275,7 @@ def test_wait_for_idle_board_snapshot_rejects_a_late_idle_probe(monkeypatch):
         return _board_payload()
 
     with pytest.raises(matrix.BoardHealthError, match="returned after") as raised:
-        matrix._wait_for_idle_board_snapshot(
-            late_probe, 0, timeout_s=0.02, poll_interval_s=0.01)
+        matrix._wait_for_idle_board_snapshot(late_probe, 0, timeout_s=0.02, poll_interval_s=0.01)
 
     evidence = raised.value.evidence
     assert evidence["failure_reason"] == "idle-timeout"
@@ -281,8 +294,7 @@ def test_wait_for_idle_board_snapshot_rejects_invalid_active_snapshot_immediatel
         return fault
 
     with pytest.raises(matrix.BoardHealthError, match="exact Active") as raised:
-        matrix._wait_for_idle_board_snapshot(
-            probe, 0, timeout_s=1.0, poll_interval_s=0.01)
+        matrix._wait_for_idle_board_snapshot(probe, 0, timeout_s=1.0, poll_interval_s=0.01)
 
     evidence = raised.value.evidence
     assert probe_count == 1
@@ -309,8 +321,7 @@ def test_wait_for_idle_board_snapshot_records_probe_failure_immediately():
         raise OSError("supervised probe failed")
 
     with pytest.raises(matrix.BoardHealthError, match="supervised probe failed") as raised:
-        matrix._wait_for_idle_board_snapshot(
-            probe, 0, timeout_s=1.0, poll_interval_s=0.01)
+        matrix._wait_for_idle_board_snapshot(probe, 0, timeout_s=1.0, poll_interval_s=0.01)
 
     evidence = raised.value.evidence
     assert probe_count == 1
@@ -326,8 +337,7 @@ def test_wait_for_idle_board_snapshot_records_probe_failure_immediately():
     assert sample["observed_at"]
 
 
-def test_postflight_board_health_quarantines_persistent_busy_device(
-        monkeypatch, tmp_path):
+def test_postflight_board_health_quarantines_persistent_busy_device(monkeypatch, tmp_path):
     from tilelang.jit import TPUInstructionProfiler
     from tilelang.jit.adapter import tpu_profiling as profiling
 
@@ -356,8 +366,12 @@ def test_postflight_board_health_quarantines_persistent_busy_device(
         TPUInstructionProfiler,
         "run_supervised_pcie_probe",
         staticmethod(lambda *_args, **_kwargs: SimpleNamespace(
-            stdout=json.dumps(busy), stderr="", returncode=0, timed_out=False,
-            left_live_descendant=False, cleanup_complete=True)),
+            stdout=json.dumps(busy),
+            stderr="",
+            returncode=0,
+            timed_out=False,
+            left_live_descendant=False,
+            cleanup_complete=True)),
     )
 
     with pytest.raises(matrix.BoardHealthError, match="did not provide") as raised:
@@ -372,8 +386,7 @@ def test_postflight_board_health_quarantines_persistent_busy_device(
     assert raised.value.evidence["quarantine"]["marker"] == str(quarantine)
 
 
-def test_postflight_board_health_interrupt_preserves_evidence_and_quarantine(
-        monkeypatch, tmp_path):
+def test_postflight_board_health_interrupt_preserves_evidence_and_quarantine(monkeypatch, tmp_path):
     from tilelang.jit import TPUInstructionProfiler
     from tilelang.jit.adapter import tpu_profiling as profiling
 
@@ -401,8 +414,7 @@ def test_postflight_board_health_interrupt_preserves_evidence_and_quarantine(
     assert (tmp_path / "tilelang-tpu-device-0.session.json").is_file()
 
 
-def test_postflight_board_health_keeps_original_error_after_probe_quarantine(
-        monkeypatch, tmp_path):
+def test_postflight_board_health_keeps_original_error_after_probe_quarantine(monkeypatch, tmp_path):
     from tilelang.jit import TPUInstructionProfiler, TPUProfilingError
     from tilelang.jit.adapter import tpu_profiling as profiling
 
@@ -419,8 +431,8 @@ def test_postflight_board_health_keeps_original_error_after_probe_quarantine(
         )
         raise TPUProfilingError("probe group remains live")
 
-    monkeypatch.setattr(
-        TPUInstructionProfiler, "run_supervised_pcie_probe", staticmethod(failed_probe))
+    monkeypatch.setattr(TPUInstructionProfiler, "run_supervised_pcie_probe",
+                        staticmethod(failed_probe))
 
     with pytest.raises(matrix.BoardHealthError, match="probe group remains live") as raised:
         matrix.board_health(0, tool, quarantine_on_failure=True)
@@ -447,8 +459,12 @@ def test_preflight_board_health_failure_does_not_persist_quarantine(monkeypatch,
         TPUInstructionProfiler,
         "run_supervised_pcie_probe",
         staticmethod(lambda *_args, **_kwargs: SimpleNamespace(
-            stdout=json.dumps(fault), stderr="", returncode=0, timed_out=False,
-            left_live_descendant=False, cleanup_complete=True)),
+            stdout=json.dumps(fault),
+            stderr="",
+            returncode=0,
+            timed_out=False,
+            left_live_descendant=False,
+            cleanup_complete=True)),
     )
 
     with pytest.raises(matrix.BoardHealthError, match="exact Active"):
@@ -461,15 +477,24 @@ def test_preflight_board_health_failure_does_not_persist_quarantine(monkeypatch,
 @pytest.mark.parametrize(
     ("completed", "diagnostic"),
     (
-        (SimpleNamespace(stdout="{", stderr="", returncode=0, timed_out=False,
-                         left_live_descendant=False, cleanup_complete=True), "invalid JSON"),
-        (SimpleNamespace(stdout="", stderr="", returncode=None, timed_out=True,
-                         left_live_descendant=False, cleanup_complete=True),
-         "remaining deadline"),
+        (SimpleNamespace(
+            stdout="{",
+            stderr="",
+            returncode=0,
+            timed_out=False,
+            left_live_descendant=False,
+            cleanup_complete=True), "invalid JSON"),
+        (SimpleNamespace(
+            stdout="",
+            stderr="",
+            returncode=None,
+            timed_out=True,
+            left_live_descendant=False,
+            cleanup_complete=True), "remaining deadline"),
     ),
 )
-def test_preflight_board_health_rejects_malformed_or_timed_out_probe(
-        monkeypatch, tmp_path, completed, diagnostic):
+def test_preflight_board_health_rejects_malformed_or_timed_out_probe(monkeypatch, tmp_path,
+                                                                     completed, diagnostic):
     from tilelang.jit import TPUInstructionProfiler
     from tilelang.jit.adapter import tpu_profiling as profiling
 
@@ -491,8 +516,7 @@ def test_preflight_board_health_rejects_malformed_or_timed_out_probe(
     assert not (tmp_path / "tilelang-tpu-device-0.session.json").exists()
 
 
-def _numeric_payload(case, *, chip="sg2260e", programming_model="tpukernel",
-                     runtime_mode="cmodel"):
+def _numeric_payload(case, *, chip="sg2260e", programming_model="tpukernel", runtime_mode="cmodel"):
     return {
         "status": "passed",
         "operation": case.operation,
@@ -500,8 +524,13 @@ def _numeric_payload(case, *, chip="sg2260e", programming_model="tpukernel",
         "chip": chip,
         "programming_model": programming_model,
         "runtime_mode": runtime_mode,
-        "metrics": {"passed": True, "finite": True},
-        "parameters": {"variant": case.variant},
+        "metrics": {
+            "passed": True,
+            "finite": True
+        },
+        "parameters": {
+            "variant": case.variant
+        },
     }
 
 
@@ -555,8 +584,14 @@ def test_validate_numeric_identity_rejects_wrong_case_or_backend(field, wrong_va
     "metrics",
     (
         {},
-        {"passed": False, "finite": True},
-        {"passed": True, "finite": False},
+        {
+            "passed": False,
+            "finite": True
+        },
+        {
+            "passed": True,
+            "finite": False
+        },
     ),
 )
 def test_validate_numeric_identity_rejects_nonpassing_or_nonfinite_metrics(metrics):
@@ -594,12 +629,32 @@ def _toolchain_identity(runtime_mode):
         "schema_version": 1,
         "hash_algorithm": "sha256",
         "ppl_project_root": "/sdk/ppl-1.7",
-        "compiler_runtime": {"tilelang_library": {"sha256": "tilelang"}},
-        "ppl_common": {"chip_map": {"sha256": "chip-map"}},
-        "cmodel": {"runtime_tree": {"sha256": "cmodel-runtime"}},
+        "compiler_runtime": {
+            "tilelang_library": {
+                "sha256": "tilelang"
+            }
+        },
+        "ppl_common": {
+            "chip_map": {
+                "sha256": "chip-map"
+            }
+        },
+        "cmodel": {
+            "runtime_tree": {
+                "sha256": "cmodel-runtime"
+            }
+        },
         "chips": {
-            "bm1690": {"kernel_include_tree": {"sha256": "bm1690"}},
-            "sg2260e": {"kernel_include_tree": {"sha256": "sg2260e"}},
+            "bm1690": {
+                "kernel_include_tree": {
+                    "sha256": "bm1690"
+                }
+            },
+            "sg2260e": {
+                "kernel_include_tree": {
+                    "sha256": "sg2260e"
+                }
+            },
         },
         "runtime_mode": runtime_mode,
     }
@@ -610,17 +665,23 @@ def _toolchain_identity(runtime_mode):
 
 def _promotion_result(case, chip, programming_model):
     return {
-        "status": "passed",
-        "key": f"cmodel/{chip}/{programming_model}/{case.case_id}",
-        "chip": chip,
-        "programming_model": programming_model,
-        "raw_instruction_count": 1,
-        "numeric": _numeric_payload(
-            case,
-            chip=chip,
-            programming_model=programming_model,
-            runtime_mode="cmodel",
-        ),
+        "status":
+            "passed",
+        "key":
+            f"cmodel/{chip}/{programming_model}/{case.case_id}",
+        "chip":
+            chip,
+        "programming_model":
+            programming_model,
+        "raw_instruction_count":
+            1,
+        "numeric":
+            _numeric_payload(
+                case,
+                chip=chip,
+                programming_model=programming_model,
+                runtime_mode="cmodel",
+            ),
     }
 
 
@@ -826,8 +887,8 @@ def test_promotion_requires_bm_stage_to_finish_before_sg_stage(promotion):
          "SG2260E starts after it finishes"),
     ),
 )
-def test_promotion_rejects_reversed_stage_interval(
-        promotion, stage, started_at, finished_at, diagnostic):
+def test_promotion_rejects_reversed_stage_interval(promotion, stage, started_at, finished_at,
+                                                   diagnostic):
     payload = getattr(promotion, stage)
     payload["started_at"] = started_at
     payload["finished_at"] = finished_at
@@ -870,8 +931,7 @@ def test_promotion_rejects_inconsistent_summary_counts(promotion):
 
 
 def test_promotion_rejects_result_outside_declared_scope(promotion):
-    promotion.bm["results"].append(
-        _promotion_result(promotion.case, "sg2260e", "rv"))
+    promotion.bm["results"].append(_promotion_result(promotion.case, "sg2260e", "rv"))
     _write_json(promotion.bm_path, promotion.bm)
 
     with pytest.raises(RuntimeError, match="result outside target_scope"):
@@ -884,22 +944,29 @@ def test_pin_worker_environment_removes_shared_checkout_imports(tmp_path):
     external = tmp_path / "external-packages"
     tilelang_library = tmp_path / "native/tilelang/libtilelang_module.so"
     tvm_library = tmp_path / "native/tvm/libtvm.so"
-    for path in (repo, snapshot / "3rdparty/tvm/python", external,
-                 tilelang_library.parent, tvm_library.parent):
+    for path in (repo, snapshot / "3rdparty/tvm/python", external, tilelang_library.parent,
+                 tvm_library.parent):
         path.mkdir(parents=True)
     tilelang_library.write_bytes(b"tilelang")
     tvm_library.write_bytes(b"tvm")
     environment = {
-        "PYTHONPATH": os.pathsep.join(
-            (str(repo), str(repo / "3rdparty/tvm/python"), str(external))),
-        "LD_LIBRARY_PATH": str(external),
-        "PPL_PROJECT_ROOT": "/sdk/ppl-1.7",
-        "TILELANG_CACHE_DIR": str(tmp_path / "scratch/tilelang-cache"),
+        "PYTHONPATH":
+            os.pathsep.join((str(repo), str(repo / "3rdparty/tvm/python"), str(external))),
+        "LD_LIBRARY_PATH":
+            str(external),
+        "PPL_PROJECT_ROOT":
+            "/sdk/ppl-1.7",
+        "TILELANG_CACHE_DIR":
+            str(tmp_path / "scratch/tilelang-cache"),
     }
     toolchain = {
         "compiler_runtime": {
-            "tilelang_library": {"resolved_path": str(tilelang_library.resolve())},
-            "tvm_library": {"resolved_path": str(tvm_library.resolve())},
+            "tilelang_library": {
+                "resolved_path": str(tilelang_library.resolve())
+            },
+            "tvm_library": {
+                "resolved_path": str(tvm_library.resolve())
+            },
         },
     }
 
@@ -911,8 +978,10 @@ def test_pin_worker_environment_removes_shared_checkout_imports(tmp_path):
     )
 
     entries = pinned["PYTHONPATH"].split(os.pathsep)
-    assert entries[:2] == [str(snapshot.resolve()),
-                           str((snapshot / "3rdparty/tvm/python").resolve())]
+    assert entries[:2] == [
+        str(snapshot.resolve()),
+        str((snapshot / "3rdparty/tvm/python").resolve())
+    ]
     assert str(external.resolve()) in entries
     assert str(repo.resolve()) not in entries
     assert pinned["TVM_IMPORT_PYTHON_PATH"] == entries[1]
@@ -933,8 +1002,8 @@ def test_pin_worker_cache_uses_disposable_scratch_without_home(tmp_path):
     snapshot.chmod(0o555)
     scratch = tmp_path / "worker-scratch"
 
-    pinned = matrix.pin_worker_cache_environment(
-        {"TILELANG_CACHE_DIR": str(snapshot / ".cycache")}, scratch)
+    pinned = matrix.pin_worker_cache_environment({"TILELANG_CACHE_DIR": str(snapshot / ".cycache")},
+                                                 scratch)
 
     assert pinned["TMPDIR"] == str(scratch.resolve())
     assert pinned["TILELANG_CACHE_DIR"] == str(scratch.resolve() / "tilelang-cache")
@@ -946,7 +1015,13 @@ def test_pin_worker_cache_uses_disposable_scratch_without_home(tmp_path):
     "toolchain",
     (
         {},
-        {"compiler_runtime": {"tilelang_library": {"resolved_path": "relative.so"}}},
+        {
+            "compiler_runtime": {
+                "tilelang_library": {
+                    "resolved_path": "relative.so"
+                }
+            }
+        },
     ),
 )
 def test_pin_worker_environment_rejects_unusable_native_identity(tmp_path, toolchain):
@@ -973,8 +1048,7 @@ def test_worker_environment_separates_cmodel_and_board_runtime(monkeypatch, tmp_
     for path in (sdk_runtime, board_runtime, external, perfai):
         path.mkdir(parents=True)
     monkeypatch.setenv("PPL_PROJECT_ROOT", str(ppl))
-    monkeypatch.setenv(
-        "LD_LIBRARY_PATH", os.pathsep.join((str(sdk_runtime), str(external))))
+    monkeypatch.setenv("LD_LIBRARY_PATH", os.pathsep.join((str(sdk_runtime), str(external))))
     monkeypatch.setenv("TILELANG_TPU_PCIE_RUNTIME_PATH", str(board_runtime))
     monkeypatch.setenv("PPL_PERFAI_ROOT", str(perfai))
     monkeypatch.setenv("PATH", "/caller/toolchain:/volatile/bin")
@@ -995,8 +1069,7 @@ def test_worker_environment_separates_cmodel_and_board_runtime(monkeypatch, tmp_
     assert "/caller/toolchain" not in pcie["PATH"]
 
 
-def test_materialize_execution_snapshot_pins_parent_and_tvm_commits(
-        monkeypatch, tmp_path):
+def test_materialize_execution_snapshot_pins_parent_and_tvm_commits(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     (repo / "3rdparty/tvm").mkdir(parents=True)
     destination = tmp_path / "snapshot"
@@ -1027,8 +1100,7 @@ def test_materialize_execution_snapshot_pins_parent_and_tvm_commits(
         "read_only": True,
     }
     assert archives[0][0:2] == (repo, "parentcommit")
-    assert archives[0][3] == (
-        "VERSION", "tilelang", "tpu_demo", "testing/python/jit", "src")
+    assert archives[0][3] == ("VERSION", "tilelang", "tpu_demo", "testing/python/jit", "src")
     assert archives[1][0:2] == (repo / "3rdparty/tvm", "tvmcommit")
     assert archives[1][3] == ("python",)
     assert destination.stat().st_mode & 0o222 == 0
@@ -1054,8 +1126,7 @@ def test_execution_snapshot_is_read_only_and_scratch_remains_removable(tmp_path)
     assert not scratch.exists()
 
 
-def test_source_identity_guard_accepts_exact_snapshot_and_rejects_change(
-        monkeypatch, tmp_path):
+def test_source_identity_guard_accepts_exact_snapshot_and_rejects_change(monkeypatch, tmp_path):
     current = {
         "implementation_worktree_dirty": False,
         "git_commit": "abc",
@@ -1067,7 +1138,9 @@ def test_source_identity_guard_accepts_exact_snapshot_and_rejects_change(
     current["implementation_worktree_dirty"] = True
     with pytest.raises(RuntimeError, match="refusing the next PCIe launch"):
         matrix.assert_source_identity_unchanged(tmp_path, {
-            "git_commit": "abc", "source_state_sha256": "state"})
+            "git_commit": "abc",
+            "source_state_sha256": "state"
+        })
 
 
 def test_toolchain_identity_guard_requires_exact_content(monkeypatch):
@@ -1133,18 +1206,16 @@ def test_failed_board_postflight_is_not_retried(monkeypatch, tmp_path, interrupt
 
     monkeypatch.setattr(matrix, "git_source_identity", lambda _root: dict(source))
     monkeypatch.setattr(matrix, "toolchain_identity", lambda _env, _mode: dict(toolchain))
-    monkeypatch.setattr(
-        matrix, "pin_native_worker_libraries",
-        lambda environment, _identity: dict(environment))
-    monkeypatch.setattr(
-        matrix, "validate_pcie_promotion",
-        lambda *_args: {"git_commit": source["git_commit"]})
-    monkeypatch.setattr(
-        matrix, "materialize_execution_snapshot",
-        lambda *_args: {"kind": "git-archive", "read_only": True})
-    monkeypatch.setattr(
-        matrix, "pin_worker_environment",
-        lambda environment, **_kwargs: dict(environment))
+    monkeypatch.setattr(matrix, "pin_native_worker_libraries",
+                        lambda environment, _identity: dict(environment))
+    monkeypatch.setattr(matrix, "validate_pcie_promotion",
+                        lambda *_args: {"git_commit": source["git_commit"]})
+    monkeypatch.setattr(matrix, "materialize_execution_snapshot", lambda *_args: {
+        "kind": "git-archive",
+        "read_only": True
+    })
+    monkeypatch.setattr(matrix, "pin_worker_environment",
+                        lambda environment, **_kwargs: dict(environment))
     monkeypatch.setattr(matrix, "assert_source_identity_unchanged", lambda *_args: None)
     monkeypatch.setattr(matrix, "assert_toolchain_identity_unchanged", lambda *_args: None)
     monkeypatch.setattr(
@@ -1181,6 +1252,7 @@ def test_failed_board_postflight_is_not_retried(monkeypatch, tmp_path, interrupt
     )
 
     class FakeProfiler:
+
         def __init__(self, config):
             self.config = config
 
@@ -1191,9 +1263,10 @@ def test_failed_board_postflight_is_not_retried(monkeypatch, tmp_path, interrupt
     monkeypatch.setattr(tilelang_jit, "TPUInstructionProfiler", FakeProfiler)
 
     def invoke_matrix():
-        return matrix.run_matrix(
-            args, tmp_path, output, (("sg2260e", "tpukernel", case),),
-            {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(scratch)})
+        return matrix.run_matrix(args, tmp_path, output, (("sg2260e", "tpukernel", case),), {
+            "PPL_PROJECT_ROOT": "/sdk",
+            "TMPDIR": str(scratch)
+        })
 
     if interrupted:
         with pytest.raises(KeyboardInterrupt):
@@ -1213,9 +1286,8 @@ def test_failed_board_postflight_is_not_retried(monkeypatch, tmp_path, interrupt
     assert result["status"] == ("cancelled" if interrupted else "failed")
     assert result["execution_status"] == "passed"
     assert result["failed_phase"] == "board-postflight-settle"
-    assert result["error"] == (
-        "board postflight was interrupted" if interrupted else
-        "postflight board health failed")
+    assert result["error"] == ("board postflight was interrupted"
+                               if interrupted else "postflight board health failed")
     assert "board_after_failure" not in result
     assert result["artifact_dir"] == str(report.output_dir)
     assert result["raw_instruction_count"] == 1
@@ -1225,4 +1297,8 @@ def test_failed_board_postflight_is_not_retried(monkeypatch, tmp_path, interrupt
         assert "board_postflight_failure" not in result
     else:
         assert result["board_postflight_failure"] == {
-            "samples": [{"tpu_util": "9%"}], "settled": False}
+            "samples": [{
+                "tpu_util": "9%"
+            }],
+            "settled": False
+        }

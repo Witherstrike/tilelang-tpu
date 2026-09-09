@@ -1,232 +1,127 @@
 # TileLang-TPU
 
-TileLang-TPU is a TPU-oriented extension of TileLang for SOPHGO accelerators. It preserves the TileLang Python DSL while adding TPU lowering, TPU code generation, and JIT runtime integration, enabling TileLang kernels to be compiled and executed on TPU platforms.
+TileLang-TPU 为 TileLang 增加了 SOPHGO TPU 后端。用户仍然使用 TileLang Python DSL
+编写程序，编译器根据目标芯片和编程模型生成 TPU-Kernel 或 RV Tensor 代码，并通过
+CModel 或 PCIe 运行。
 
-The project provides TPU support for BM1690 and SG2260E. A complete TPU target
-selects both compile-time axes as
-`target="tpu -mcpu=<chip> -tpu-programming-model=<tpukernel|rv>"`; the separate
-`runtime_mode="cmodel|pcie"` selects how that program is hosted.
+## 当前支持范围
 
-## Highlights
+| 芯片 | 物理核数 | 编程模型 | CModel | PCIe |
+| --- | ---: | --- | --- | --- |
+| BM1690 | 8 | TPU-Kernel | 已验证 | 本项目尚未验证 |
+| SG2260E | 4 | TPU-Kernel | 已验证 | 已验证 |
+| SG2260E | 4 | RV Tensor | 已验证 | 已验证 |
 
-- TileLang frontend with TPU target support
-- TPU-specific DSL intrinsics such as `ppl_copy`, `ppl_gemm`, `ppl_reduce_sum`, `ppl_reduce_max`, `ppl_rsqrt`, and `ppl_rope_add`
-- End-to-end JIT flow from Python kernel definition to generated TPU host/device artifacts
-- BM1690 and SG2260E target selection with CModel and guarded PCIe build paths
-- Operator coverage aligned with kernels commonly used by Llama and DeepSeek workloads
+这里的“已验证”只覆盖能力契约中列出的算子、数据类型、形状和参数，不能直接推广到任意
+输入。精确范围见
+[`research/tpu-op-contract/contract.json`](./research/tpu-op-contract/contract.json)，
+测试结论见
+[`research/tpu-backend-design/test-report.md`](./research/tpu-backend-design/test-report.md)。
 
-## What This Project Does
+## 开始使用
 
-TileLang-TPU is a TileLang-to-TPU compiler and runtime path for SOPHGO accelerators.
+- 安装依赖、配置 PPL 1.7 和构建项目：
+  [`docs/get_started/Installation.md`](./docs/get_started/Installation.md)
+- 查看高层算子、单例运行和完整测试矩阵：
+  [`tpu_demo/README.md`](./tpu_demo/README.md)
+- 查看 TPU-Kernel 与 RV Tensor 的设计和指令映射：
+  [`research/tpu-backend-design/README.md`](./research/tpu-backend-design/README.md)
 
-- It reuses the TileLang frontend and extends it with TPU-specific lowering, codegen, and JIT support.
-- It uses the underlying TPU compilation tools also used in the PPL repository, but it is not built as a layer on top of the PPL software stack.
-- It focuses on turning TileLang programs into runnable TPU kernels, including host/device wrapper generation and execution flow integration.
-
-In short, this repository is about bringing TileLang's programming model to SOPHGO TPU targets rather than repackaging PPL itself.
-
-## Current Status
-
-- The current mainline JIT path supports BM1690 and PPL 1.7 SG2260E.
-- `tilelang.compile(..., target="tpu -mcpu=sg2260e -tpu-programming-model=tpukernel")`
-  is wired into the repository.
-- CModel loading and PCIe static build paths are present; PCIe board dispatch
-  remains deliberately opt-in. Only the scoped results recorded under
-  `research/` are claimed; this is not blanket PCIe validation.
-- TPU demos are available under [`tpu_demo/`](./tpu_demo/).
-- This project is under active development, and pull requests are welcome.
-
-## Requirements
-
-- Linux and Python 3
-- SOPHGO PPL 1.7 SDK
-- Access to supported hardware or a working `cmodel` setup
-
-## Key TPU Paths
-
-- [`tilelang/engine/`](./tilelang/engine/)
-- [`tilelang/language/`](./tilelang/language/)
-- [`tilelang/jit/adapter/`](./tilelang/jit/adapter/)
-- [`src/target/`](./src/target/)
-- [`src/tl_templates/tpu/`](./src/tl_templates/tpu/)
-- [`src/transform/`](./src/transform/)
-- [`tpu_demo/`](./tpu_demo/)
-
-## Quick Start
-
-### 1. Prepare the repository
+安装完成后，可以先运行一个 SG2260E RV Tensor CModel 用例：
 
 ```bash
-git submodule update --init --recursive
-```
-
-### 2. Build and install
-
-#### 2.1 Build via environment variable
-
-```bash
-./install_tpu.sh
-export PYTHONPATH=.
-```
-
-#### 2.2 Build via pip local project
-
-```bash
-pip install -e . -v
-```
-
-### 3. Run a TPU demo
-
-```bash
-# SG2260E RV Tensor CModel numerical example
-PPL_PROJECT_ROOT=/path/to/ppl-1.7 python3 -m tpu_demo.run \
+python -m tpu_demo.run \
   --case matmul.float16 \
   --chip sg2260e \
   --programming-model rv \
   --runtime-mode cmodel
 ```
 
-The public demo registry contains import-safe elementwise, matmul, RMSNorm,
-RMSNorm split-k, RoPE, SwiGLU, and FlashAttention examples. It is not a blanket
-hardware-support claim; the exact staged evidence and the only supported PCIe
-workflow are documented in [`tpu_demo/README.md`](./tpu_demo/README.md).
+## 目标选择
 
-## Programming Model
-
-TileLang-TPU keeps the familiar TileLang workflow and switches the backend to TPU:
+TPU 编译需要同时指定芯片和编程模型：
 
 ```python
 import tilelang
 
 kernel = tilelang.compile(
-    my_kernel,
+    program,
     out_idx=-1,
-    target=("tpu -mcpu=sg2260e "
-            "-tpu-programming-model=tpukernel"),
+    target="tpu -mcpu=sg2260e -tpu-programming-model=tpukernel",
     runtime_mode="cmodel",
 )
 ```
 
-Compilation and execution have separate identities. `TPUTargetSpec` is derived
-only from the complete TVM Target and contains `(chip, programming_model)`.
-`TPURuntimeConfig` contains only `runtime_mode`; it does not choose instructions
-or change device semantics. BM1690 has 8 physical cores and supports TPU-Kernel.
-SG2260E has 4 physical cores and supports TPU-Kernel and RV. Both chips share the
-TPUv7 LMEM geometry used by the current allocator, but their PPL architecture,
-core topology and programming-model capability remain explicit.
+三个选择项各有明确职责：
 
-A bare `target="tpu"`, a target missing either `-mcpu` or
-`-tpu-programming-model`, and an unsupported chip/model pair all fail before
-lowering. There is no second public selector for either compile-time axis.
+| 选择项 | 取值 | 作用 |
+| --- | --- | --- |
+| `-mcpu` | `bm1690`、`sg2260e` | 选择芯片架构、编译宏和核数 |
+| `-tpu-programming-model` | `tpukernel`、`rv` | 选择设备端指令接口 |
+| `runtime_mode` | `cmodel`、`pcie` | 选择模拟器或真实板卡运行时 |
 
-`target="auto"` never selects a TPU or falls back to a bare TPU target. CUDA/HIP
-keep priority; otherwise it uses the portable C backend. Environment variables
-may locate the PPL SDK and runtime, but they never replace either compile-time
-field in the explicit TPU Target, so a CPU-only process cannot silently become a
-TPU job.
+芯片和编程模型共同决定生成什么设备代码；`runtime_mode` 只决定如何运行这些代码。裸
+`target="tpu"`、缺少任一编译选项或使用 BM1690 + RV 的组合都会在编译前报错。
 
-Portable `T.ppl_copy/fill/gemm/add/subtract/mul/div/max` expressions are lowered
-to `tl.tpu.*` first, then selected as TPU-Kernel or RV Tensor instructions from
-the complete target. The current public demo registry exercises RV elementwise
-add/sub/mul/div and matmul for FP16, BF16, and FP32. Selecting
-`-tpu-programming-model=rv` also exposes a direct expert bridge to the PPL 1.7 RV
-Tensor ABI. `T.rvt_*` calls require explicit CR/TR/GR descriptor setup. The generic
-`T.rvt_call` escape hatch only supports APIs whose C arguments are representable
-by TIR; APIs taking C structs by value need dedicated helpers first. Raw
-`T.rvt_*` and high-level `T.ppl_*` calls also cannot share one kernel, because
-their descriptor and command-stream ownership models are different.
+源码生成部分按目标后端的常见结构组织：
 
-Runtime support remains scoped by exact dtype, shape, variant, target, and
-execution mode. See the machine-readable
-[`contract.json`](./research/tpu-op-contract/contract.json) and the high-level
-[`design and validation report`](./research/tpu-demo-ops/README.md); no result may
-be extrapolated to arbitrary shapes, tails, multi-core execution, or raw
-`T.rvt_*` programs.
-
-All TPU JIT entry points default to the fail-safe `cmodel` runtime when no
-runtime mode is supplied. PCIe
-loading is fail-closed because loading the runtime can touch the board even
-before a dispatch. Board execution is accepted only through the staged matrix
-runner after matching BM1690 and SG2260E CModel summaries have passed on the same
-clean source/toolchain identity:
-
-```bash
-python3 testing/python/jit/tpu_demo_ops_matrix.py \
-  --runtime-mode pcie --chip sg2260e --device-id 0 \
-  --allow-pcie --allow-pcie-profile --all-pcie-cases \
-  --bm-cmodel-summary <bm-summary.json> \
-  --sg-cmodel-summary <sg-summary.json> \
-  --output-dir <new-not-yet-existing-artifact-directory>
+```text
+TileLang 前端
+  -> TPU 语义检查与 Pass
+  -> codegen_tpu             TPU 目标源码生成器与编程模型分派
+       |- codegen_tpukernel  TPU-Kernel 指令选择
+       `- codegen_rv         RV Tensor 指令选择
+  -> CModel 或 PCIe 运行时
 ```
 
-The runner verifies the single-card topology and a content-addressed manifest
-of the selected compiler/PPL/runtime inputs, holds one device lock across the whole invocation, compiles from a
-read-only snapshot of the promoted Git commit, and rechecks source/toolchain
-identity before every launch. Timeout or incomplete process-group cleanup stops
-the matrix; a persistent session/quarantine marker keeps later runs fail-closed
-until an operator has inspected and recovered the board.
+## 算子接口
 
-TPU JIT compilation writes each kernel and its host wrapper to a private
-temporary workspace; it no longer depends on a process-global `PPL_KERNEL_PATH`
-or shared generated files under `src/tl_templates/tpu/`. TPU cache/database
-artifact loading is deliberately disabled until it can bundle that private
-kernel with a verified target/runtime manifest. Before any TPU `dlopen`,
-the runtime also reserves `(runtime, chip, core count, programming model,
-device, PPL SDK/runtime identity)` for the process; change any of those in a
-fresh process, not in a long-lived Python worker. Through the TileLang JIT
-loader, a TPU `main.so` may only be loaded by the `LibraryGenerator` instance
-that just compiled it; prebuilt TPU artifacts remain disabled until a bundled,
-validated manifest exists.
+当前前端提供以下 TPU 表达：
 
-Inside TPU kernels, the common building blocks are exposed as TileLang DSL intrinsics in [`tilelang/language/customize.py`](./tilelang/language/customize.py), including:
+- 两种编程模型均可映射的核心操作：`T.ppl_copy`、`T.ppl_fill`、`T.ppl_gemm`、
+  `T.ppl_add`、`T.ppl_subtract`、`T.ppl_mul`、`T.ppl_div`、`T.ppl_max`。
+- TPU-Kernel 专属操作：标量运算、`exp`、`sigmoid`、`rsqrt`、reduce、gather、
+  top-k 和 RoPE 等。
+- RV Tensor 低层接口：`T.rvt_*`，用于显式管理 CR/TR/GR 描述符的场景。
 
-- `T.ppl_copy`
-- `T.ppl_fill`
-- `T.ppl_gemm`
-- `T.ppl_add`, `T.ppl_subtract`, `T.ppl_mul`, `T.ppl_div`, `T.ppl_max`
-- `T.ppl_add_C`, `T.ppl_mul_C`
-- `T.ppl_exp`, `T.ppl_sigmoid`, `T.ppl_rsqrt`
-- `T.ppl_reduce_sum`
-- `T.ppl_reduce_max`
-- `T.ppl_gather`, `T.ppl_topk`
-- `T.ppl_rope_add`
+高层 `T.ppl_*` 调用会先变成稳定的 TPU 语义，再由目标选择具体指令。低层 `T.rvt_*`
+直接对应 PPL 1.7 RV Tensor ABI，不能与高层语义调用混在同一个 kernel 中。
 
-## Examples
+## 项目结构
 
-The current examples mainly cover operators commonly used in Llama and DeepSeek workloads, and more operators will be added over time.
+- [`tilelang/engine/`](./tilelang/engine/)：目标配置、编译流程和 TPU Pass
+- [`tilelang/language/`](./tilelang/language/)：TileLang TPU 前端接口
+- [`tilelang/jit/adapter/`](./tilelang/jit/adapter/)：PPL 1.7 工具链、JIT 和 profiling
+- [`src/target/`](./src/target/)：TPU 源码生成与运行时模块
+- [`src/transform/`](./src/transform/)：TPU 地址分配等变换
+- [`tpu_demo/`](./tpu_demo/)：高层算子示例
+- [`testing/python/jit/`](./testing/python/jit/)：编译器、算子和运行时测试
+- [`research/`](./research/)：设计、能力契约和实验报告
 
-Representative examples include:
+## 开发检查
 
-- Elementwise add/subtract/multiply/divide
-- Matmul
-- RMSNorm and split-k RMSNorm
-- RoPE
-- SwiGLU
-- FlashAttention
-
-## Repository Layout
-
-- [`tilelang/`](./tilelang/): TileLang frontend and TPU-facing Python entry points
-- [`src/target/`](./src/target/): TPU codegen and runtime modules
-- [`src/tl_templates/tpu/`](./src/tl_templates/tpu/): checked-in TPU code templates; JIT artifacts use private temporary workspaces
-- [`tilelang/jit/adapter/`](./tilelang/jit/adapter/): TPU JIT wrapper and library generation flow
-- [`tpu_demo/`](./tpu_demo/): import-safe high-level examples and their case registry
-- [`testing/python/jit/`](./testing/python/jit/): low-level probes and staged matrix runners
-
-## Development Notes
-
-- If you modify C++ code, rebuild the native components before rerunning demos:
+修改 C++ 后先重新构建：
 
 ```bash
-cmake --build <configured-build-directory> --parallel 10
+cmake --build build-tpu --parallel 10
 ```
 
-- Format the repository with:
+提交前运行格式化与 TPU 相关测试。下面四个文件要求 CUDA 或 HIP，TPU-only 环境应跳过：
 
 ```bash
 ./format.sh
+python -m pytest -q testing/python/jit \
+  testing/python/transform/test_tilelang_transform_address_assign.py \
+  --ignore=testing/python/jit/test_tilelang_jit_callback.py \
+  --ignore=testing/python/jit/test_tilelang_jit_gemm.py \
+  --ignore=testing/python/jit/test_tilelang_jit_gemm_ctypes.py \
+  --ignore=testing/python/jit/test_tilelang_jit_gemm_cython.py
 ```
 
-## Acknowledgements
+PCIe 测试必须使用 `testing/python/jit/tpu_demo_ops_matrix.py` 串行执行。该工具会检查
+CModel 前置结果、独占设备并在首个错误后停止；不要直接设置内部板卡放行环境变量。
 
-TileLang-TPU builds on open-source work from [TileLang](https://github.com/tile-ai/tilelang) and uses the TPU compilation ecosystem associated with [SOPHGO PPL](https://github.com/sophgo/PPL/).
+## 致谢
+
+本项目基于 [TileLang](https://github.com/tile-ai/tilelang)，并使用
+[SOPHGO PPL](https://github.com/sophgo/PPL) 提供的 TPU 编译与运行组件。

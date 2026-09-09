@@ -44,7 +44,8 @@ def jit(
     execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
     target: Union[str, Target] = "auto",
     verbose: bool = False,
-    **pass_config_kwargs: Optional[Dict[str, Any]],
+    runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
+    **pass_config_kwargs: Any,
 ) -> BaseKernelAdapter:
     """
     A decorator (or decorator factory) that JIT-compiles a given TileLang PrimFunc 
@@ -60,15 +61,16 @@ def jit(
     out_idx : Union[List[int], int], optional
         The index (or list of indices) of the function outputs. This can be used
         to specify which outputs from the compiled function will be returned.
-    execution_backend : Literal["dlpack", "ctypes"], optional
-        The wrapper type to use for the kernel adapter. Currently, only "dlpack"
-        and "ctypes" are supported.
+    execution_backend : Literal["dlpack", "ctypes", "cython"], optional
+        The wrapper type to use for the kernel adapter.
     target : Union[str, Target], optional
         The compilation target for TVM. If set to "auto", an appropriate target
         will be inferred automatically. Otherwise, must be one of the supported
         strings in AVAILABLE_TARGETS, a TPU target such as
         ``"tpu -mcpu=sg2260e -tpu-programming-model=rv"``, or a
         TVM Target instance.
+    runtime_mode : Literal["pcie", "cmodel"], optional
+        TPU execution environment. Leave unset for non-TPU targets.
 
     Returns
     -------
@@ -115,6 +117,7 @@ def jit(
             verbose=verbose,
             execution_backend=execution_backend,
             out_idx=out_idx,
+            runtime_mode=runtime_mode,
             **pass_config_kwargs,
         ).adapter
 
@@ -141,6 +144,10 @@ def compile(
 ) -> JITKernel:
     """
     Compile the given TileLang PrimFunc with TVM and build a JITKernel.
+
+    ``runtime_mode`` selects CModel or PCIe execution for TPU targets. It is
+    rejected for non-TPU targets; when omitted for a TPU target, CModel is
+    used. Compilation target selection remains entirely in ``target``.
     """
     return cached(
         func=func,

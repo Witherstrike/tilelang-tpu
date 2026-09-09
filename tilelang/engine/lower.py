@@ -347,7 +347,7 @@ def _validate_tpu_residual_ir(mod: tvm.IRModule, target: Target, tpu_config) -> 
             if any(not isinstance(region, tir.Call) or
                    getattr(region.op, "name", None) != "tl.region" for region in regions):
                 return
-            for position, region in zip(positions, regions):
+            for position, region in zip(positions, regions):  # noqa: B905
                 rank = len(region.args) - 2
                 if not 1 <= rank <= 4:
                     raise _tpu_contract_error(

@@ -51,20 +51,47 @@ def _toolchain_identity(runtime_mode):
         "runtime_mode": runtime_mode,
         "ppl_project_root": "/sdk/ppl-1.7",
         "compiler_runtime": {
-            "tilelang_library": {"resolved_path": "/native/libtilelang.so", "sha256": "tl"},
-            "tvm_library": {"resolved_path": "/native/libtvm.so", "sha256": "tvm"},
+            "tilelang_library": {
+                "resolved_path": "/native/libtilelang.so",
+                "sha256": "tl"
+            },
+            "tvm_library": {
+                "resolved_path": "/native/libtvm.so",
+                "sha256": "tvm"
+            },
         },
-        "ppl_common": {"chip_map": {"sha256": "chip-map"}},
-        "cmodel": {"runtime_tree": {"sha256": "cmodel-runtime"}},
+        "ppl_common": {
+            "chip_map": {
+                "sha256": "chip-map"
+            }
+        },
+        "cmodel": {
+            "runtime_tree": {
+                "sha256": "cmodel-runtime"
+            }
+        },
         "chips": {
-            "bm1690": {"kernel_include_tree": {"sha256": "bm"}},
-            "sg2260e": {"kernel_include_tree": {"sha256": "sg"}},
+            "bm1690": {
+                "kernel_include_tree": {
+                    "sha256": "bm"
+                }
+            },
+            "sg2260e": {
+                "kernel_include_tree": {
+                    "sha256": "sg"
+                }
+            },
         },
     }
     if runtime_mode == "pcie":
         identity["pcie"] = {
-            "installed_runtime_library": {"sha256": "runtime"},
-            "tpu_smi": {"path": "/sbin/tpu-smi", "sha256": "smi"},
+            "installed_runtime_library": {
+                "sha256": "runtime"
+            },
+            "tpu_smi": {
+                "path": "/sbin/tpu-smi",
+                "sha256": "smi"
+            },
         }
     return identity
 
@@ -105,23 +132,22 @@ def _patch_identity(monkeypatch, runtime_mode):
     toolchain = _toolchain_identity(runtime_mode)
     monkeypatch.setattr(matrix, "git_source_identity", lambda _root: dict(source))
     monkeypatch.setattr(
-        matrix, "toolchain_identity",
-        lambda _environment, requested: (
-            dict(toolchain) if requested == runtime_mode else _toolchain_identity(requested)),
+        matrix,
+        "toolchain_identity",
+        lambda _environment, requested:
+        (dict(toolchain) if requested == runtime_mode else _toolchain_identity(requested)),
     )
     monkeypatch.setattr(
-        matrix, "pin_native_worker_libraries",
+        matrix,
+        "pin_native_worker_libraries",
         lambda environment, _identity: dict(environment),
     )
-    monkeypatch.setattr(
-        matrix, "_worker_payload", lambda _path: {"fixture": "worker-payload"})
-    monkeypatch.setattr(
-        matrix, "_validate_worker_payload", lambda _payload, **_expected: None)
+    monkeypatch.setattr(matrix, "_worker_payload", lambda _path: {"fixture": "worker-payload"})
+    monkeypatch.setattr(matrix, "_validate_worker_payload", lambda _payload, **_expected: None)
     return source, toolchain
 
 
-def _fp8_worker_payload(*, chip="sg2260e", runtime_mode="cmodel",
-                        dtype="e4m3", case="copy"):
+def _fp8_worker_payload(*, chip="sg2260e", runtime_mode="cmodel", dtype="e4m3", case="copy"):
     return {
         "schema_version": 1,
         "status": "passed",
@@ -130,15 +156,16 @@ def _fp8_worker_payload(*, chip="sg2260e", runtime_mode="cmodel",
         "runtime_mode": runtime_mode,
         "dtype": dtype,
         "case": case,
-        "metrics": {"passed": True},
+        "metrics": {
+            "passed": True
+        },
     }
 
 
 def test_fp8_worker_payload_requires_one_exact_structured_result(tmp_path):
     payload = _fp8_worker_payload()
     stdout = tmp_path / "worker.stdout.log"
-    stdout.write_text(
-        matrix._WORKER_RESULT_PREFIX + json.dumps(payload) + "\n", encoding="utf-8")
+    stdout.write_text(matrix._WORKER_RESULT_PREFIX + json.dumps(payload) + "\n", encoding="utf-8")
     parsed = matrix._worker_payload(stdout)
     matrix._validate_worker_payload(
         parsed, chip="sg2260e", runtime_mode="cmodel", dtype="e4m3", case="copy")
@@ -161,7 +188,9 @@ def test_fp8_worker_payload_requires_one_exact_structured_result(tmp_path):
         ("runtime_mode", "pcie"),
         ("dtype", "e5m2"),
         ("case", "fill-zero"),
-        ("metrics", {"passed": False}),
+        ("metrics", {
+            "passed": False
+        }),
     ),
 )
 def test_fp8_worker_payload_rejects_misattributed_result(field, value):
@@ -173,12 +202,11 @@ def test_fp8_worker_payload_rejects_misattributed_result(field, value):
 
 
 def test_fp8_worker_failure_emits_one_structured_result(monkeypatch, capsys):
-    monkeypatch.setattr(
-        sys, "argv", ["tpu_fp8_ops_worker.py", "--dtype", "e4m3", "--case", "copy"])
+    monkeypatch.setattr(sys, "argv", ["tpu_fp8_ops_worker.py", "--dtype", "e4m3", "--case", "copy"])
     monkeypatch.setattr(worker, "_profile_selection", lambda: ("sg2260e", "cmodel"))
     monkeypatch.setattr(
-        worker, "_run_copy",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("numeric failure")))
+        worker, "_run_copy", lambda *_args, **_kwargs:
+        (_ for _ in ()).throw(RuntimeError("numeric failure")))
 
     with pytest.raises(RuntimeError, match="numeric failure"):
         worker.main()
@@ -283,16 +311,36 @@ def test_validate_args_accepts_only_explicit_promoted_pcie_scope():
 @pytest.mark.parametrize(
     ("overrides", "diagnostic"),
     (
-        ({"allow_pcie": False}, "both --allow-pcie"),
-        ({"allow_pcie_profile": False}, "both --allow-pcie"),
-        ({"device_id": 1}, "only --device-id 0"),
-        ({"device_id": False}, "only --device-id 0"),
-        ({"device_id": 0.0}, "only --device-id 0"),
-        ({"chips": ["bm1690"]}, "--chip sg2260e"),
-        ({"chips": ["sg2260e", "sg2260e"]}, "--chip sg2260e"),
-        ({"cases": None}, "explicit --case"),
-        ({"bm_cmodel_summary": None}, "--bm-cmodel-summary"),
-        ({"sg_cmodel_summary": None}, "--bm-cmodel-summary"),
+        ({
+            "allow_pcie": False
+        }, "both --allow-pcie"),
+        ({
+            "allow_pcie_profile": False
+        }, "both --allow-pcie"),
+        ({
+            "device_id": 1
+        }, "only --device-id 0"),
+        ({
+            "device_id": False
+        }, "only --device-id 0"),
+        ({
+            "device_id": 0.0
+        }, "only --device-id 0"),
+        ({
+            "chips": ["bm1690"]
+        }, "--chip sg2260e"),
+        ({
+            "chips": ["sg2260e", "sg2260e"]
+        }, "--chip sg2260e"),
+        ({
+            "cases": None
+        }, "explicit --case"),
+        ({
+            "bm_cmodel_summary": None
+        }, "--bm-cmodel-summary"),
+        ({
+            "sg_cmodel_summary": None
+        }, "--bm-cmodel-summary"),
     ),
 )
 def test_validate_args_rejects_unsafe_or_unpromoted_pcie(overrides, diagnostic):
@@ -302,10 +350,30 @@ def test_validate_args_rejects_unsafe_or_unpromoted_pcie(overrides, diagnostic):
 
 def test_cmodel_cli_rejects_every_pcie_control():
     controls = (
-        {"allow_pcie": True}, {"allow_pcie_profile": True}, {"device_id": 0},
-        {"require_decoded_timing": True}, {"pcie_decoder_pythonpath": [Path("decoder")]},
-        {"bm_cmodel_summary": Path("bm.json")}, {"sg_cmodel_summary": Path("sg.json")},
-        {"all_pcie_cases": True},
+        {
+            "allow_pcie": True
+        },
+        {
+            "allow_pcie_profile": True
+        },
+        {
+            "device_id": 0
+        },
+        {
+            "require_decoded_timing": True
+        },
+        {
+            "pcie_decoder_pythonpath": [Path("decoder")]
+        },
+        {
+            "bm_cmodel_summary": Path("bm.json")
+        },
+        {
+            "sg_cmodel_summary": Path("sg.json")
+        },
+        {
+            "all_pcie_cases": True
+        },
     )
     for control in controls:
         with pytest.raises(RuntimeError, match="invalid for CModel"):
@@ -334,11 +402,9 @@ def test_worker_environment_delegates_sanitization_and_owns_scratch(monkeypatch,
 
 def _promotion_summary(chip):
     if chip == "bm1690":
-        started_at, finished_at = (
-            "2026-09-08T00:00:00+00:00", "2026-09-08T00:01:00+00:00")
+        started_at, finished_at = ("2026-09-08T00:00:00+00:00", "2026-09-08T00:01:00+00:00")
     else:
-        started_at, finished_at = (
-            "2026-09-08T00:02:00+00:00", "2026-09-08T00:03:00+00:00")
+        started_at, finished_at = ("2026-09-08T00:02:00+00:00", "2026-09-08T00:03:00+00:00")
     return {
         "schema_version": matrix._SCHEMA_VERSION,
         "matrix_kind": matrix._MATRIX_KIND,
@@ -368,7 +434,8 @@ def _promotion_summary(chip):
         }],
         "cases": {
             f"{chip}/tpukernel/e4m3/copy": {
-                "status": "passed", "raw_instruction_count": 1,
+                "status": "passed",
+                "raw_instruction_count": 1,
                 "numeric": _fp8_worker_payload(chip=chip),
             },
         },
@@ -440,6 +507,7 @@ def test_pcie_preflight_snapshot_guards_and_board_checks_wrap_dispatch(monkeypat
     events = []
 
     class FakeProfiler:
+
         def __init__(self, config):
             self.config = config
 
@@ -458,12 +526,22 @@ def test_pcie_preflight_snapshot_guards_and_board_checks_wrap_dispatch(monkeypat
     output = tmp_path / "output"
     output.mkdir()
     status = matrix._run_matrix(
-        _args("pcie", require_decoded_timing=True), tmp_path, output,
-        {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(tmp_path / "scratch")})
+        _args("pcie", require_decoded_timing=True), tmp_path, output, {
+            "PPL_PROJECT_ROOT": "/sdk",
+            "TMPDIR": str(tmp_path / "scratch")
+        })
     assert status == 0
     assert events == [
-        "native-pin", "promotion", "snapshot", "pin", "decoder-preflight", "board-health",
-        "source-guard", "toolchain-guard", "dispatch", "board-health",
+        "native-pin",
+        "promotion",
+        "snapshot",
+        "pin",
+        "decoder-preflight",
+        "board-health",
+        "source-guard",
+        "toolchain-guard",
+        "dispatch",
+        "board-health",
     ]
     summary = json.loads((output / "summary.json").read_text())
     assert summary["status"] == "passed"
@@ -475,6 +553,7 @@ def test_failed_decoder_preflight_stops_before_board_or_dispatch(monkeypatch, tm
     events, dispatches = [], []
 
     class FakeProfiler:
+
         def __init__(self, config):
             self.config = config
 
@@ -491,8 +570,10 @@ def test_failed_decoder_preflight_stops_before_board_or_dispatch(monkeypatch, tm
     output = tmp_path / "output"
     output.mkdir()
     assert matrix._run_matrix(
-        _args("pcie", require_decoded_timing=True), tmp_path, output,
-        {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(tmp_path / "scratch")}) == 1
+        _args("pcie", require_decoded_timing=True), tmp_path, output, {
+            "PPL_PROJECT_ROOT": "/sdk",
+            "TMPDIR": str(tmp_path / "scratch")
+        }) == 1
     assert dispatches == []
     assert "board-health" not in events
     summary = json.loads((output / "summary.json").read_text())
@@ -501,8 +582,8 @@ def test_failed_decoder_preflight_stops_before_board_or_dispatch(monkeypatch, tm
 
 
 @pytest.mark.parametrize("interrupted", (False, True))
-def test_failed_board_postflight_is_not_retried_and_stops_matrix(
-        monkeypatch, tmp_path, interrupted):
+def test_failed_board_postflight_is_not_retried_and_stops_matrix(monkeypatch, tmp_path,
+                                                                 interrupted):
     events = []
 
     class BoardHealthError(RuntimeError):
@@ -512,6 +593,7 @@ def test_failed_board_postflight_is_not_retried_and_stops_matrix(
             self.evidence = {"samples": [{"tpu_util": "9%"}], "settled": False}
 
     class FakeProfiler:
+
         def __init__(self, config):
             self.config = config
 
@@ -536,10 +618,13 @@ def test_failed_board_postflight_is_not_retried_and_stops_matrix(
     monkeypatch.setattr(matrix, "board_health", health)
     output = tmp_path / "output"
     output.mkdir()
+
     def invoke_matrix():
         return matrix._run_matrix(
-            _args("pcie"), tmp_path, output,
-            {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(tmp_path / "scratch")})
+            _args("pcie"), tmp_path, output, {
+                "PPL_PROJECT_ROOT": "/sdk",
+                "TMPDIR": str(tmp_path / "scratch")
+            })
 
     if interrupted:
         with pytest.raises(KeyboardInterrupt):
@@ -555,8 +640,8 @@ def test_failed_board_postflight_is_not_retried_and_stops_matrix(
     assert failed["status"] == ("cancelled" if interrupted else "failed")
     assert failed["execution_status"] == "passed"
     assert failed["failed_phase"] == "board-postflight-settle"
-    assert failed["error"] == (
-        "board postflight was interrupted" if interrupted else "board not idle")
+    assert failed["error"] == ("board postflight was interrupted"
+                               if interrupted else "board not idle")
     assert "board_after_failure" not in failed
     assert failed["artifact_dir"] == "profile"
     assert failed["raw_instruction_count"] == 1
@@ -565,13 +650,18 @@ def test_failed_board_postflight_is_not_retried_and_stops_matrix(
         assert "board_postflight_failure" not in failed
     else:
         assert failed["board_postflight_failure"] == {
-            "samples": [{"tpu_util": "9%"}], "settled": False}
+            "samples": [{
+                "tpu_util": "9%"
+            }],
+            "settled": False
+        }
 
 
 def test_identity_guard_failure_stops_before_first_pcie_dispatch(monkeypatch, tmp_path):
     events, dispatches = [], []
 
     class FakeProfiler:
+
         def __init__(self, config):
             self.config = config
 
@@ -589,8 +679,10 @@ def test_identity_guard_failure_stops_before_first_pcie_dispatch(monkeypatch, tm
     output = tmp_path / "output"
     output.mkdir()
     assert matrix._run_matrix(
-        _args("pcie"), tmp_path, output,
-        {"PPL_PROJECT_ROOT": "/sdk", "TMPDIR": str(tmp_path / "scratch")}) == 1
+        _args("pcie"), tmp_path, output, {
+            "PPL_PROJECT_ROOT": "/sdk",
+            "TMPDIR": str(tmp_path / "scratch")
+        }) == 1
     assert dispatches == []
     summary = json.loads((output / "summary.json").read_text())
     assert summary["stopped_after"] == "sg2260e/tpukernel/e4m3/copy"
@@ -601,6 +693,7 @@ def test_runner_stops_after_first_cmodel_failure(monkeypatch, tmp_path):
     dispatches = []
 
     class FakeProfiler:
+
         def __init__(self, config):
             self.config = config
 
@@ -613,8 +706,7 @@ def test_runner_stops_after_first_cmodel_failure(monkeypatch, tmp_path):
     output = tmp_path / "output"
     output.mkdir()
     assert matrix._run_matrix(
-        _args(cases=["copy", "fill-zero"]), tmp_path, output,
-        {"PPL_PROJECT_ROOT": "/sdk"}) == 1
+        _args(cases=["copy", "fill-zero"]), tmp_path, output, {"PPL_PROJECT_ROOT": "/sdk"}) == 1
     assert len(dispatches) == 1
     summary = json.loads((output / "summary.json").read_text())
     assert summary["completed_case_count"] == 1
@@ -626,6 +718,7 @@ def test_cmodel_worker_receives_content_identified_native_libraries(monkeypatch,
     seen = []
 
     class FakeProfiler:
+
         def __init__(self, config):
             self.config = config
 
@@ -647,14 +740,15 @@ def test_cmodel_worker_receives_content_identified_native_libraries(monkeypatch,
     monkeypatch.setattr(matrix, "pin_native_worker_libraries", pin)
     output = tmp_path / "output"
     output.mkdir()
-    assert matrix._run_matrix(
-        _args(), tmp_path, output, {"PPL_PROJECT_ROOT": "/sdk"}) == 0
+    assert matrix._run_matrix(_args(), tmp_path, output, {"PPL_PROJECT_ROOT": "/sdk"}) == 0
     assert seen[0]["TILELANG_LIBRARY_PATH"] == "/captured/tilelang"
     assert seen[0]["TVM_LIBRARY_PATH"] == "/captured/tvm"
 
 
 def test_final_toolchain_capture_failure_cannot_leave_passing_summary(monkeypatch, tmp_path):
+
     class FakeProfiler:
+
         def __init__(self, config):
             self.config = config
 
@@ -673,30 +767,28 @@ def test_final_toolchain_capture_failure_cannot_leave_passing_summary(monkeypatc
 
     monkeypatch.setattr(matrix, "toolchain_identity", capture)
     monkeypatch.setattr(
-        matrix, "pin_native_worker_libraries",
+        matrix,
+        "pin_native_worker_libraries",
         lambda environment, _identity: dict(environment),
     )
-    monkeypatch.setattr(
-        matrix, "_worker_payload", lambda _path: {"fixture": "worker-payload"})
-    monkeypatch.setattr(
-        matrix, "_validate_worker_payload", lambda _payload, **_expected: None)
+    monkeypatch.setattr(matrix, "_worker_payload", lambda _path: {"fixture": "worker-payload"})
+    monkeypatch.setattr(matrix, "_validate_worker_payload", lambda _payload, **_expected: None)
     output = tmp_path / "output"
     output.mkdir()
-    assert matrix._run_matrix(
-        _args(), tmp_path, output, {"PPL_PROJECT_ROOT": "/sdk"}) == 1
+    assert matrix._run_matrix(_args(), tmp_path, output, {"PPL_PROJECT_ROOT": "/sdk"}) == 1
     summary = json.loads((output / "summary.json").read_text())
     assert summary["status"] == "failed"
     assert summary["complete"] is False
     assert summary["failed_phase"] == "final-identity-check"
 
 
-def test_main_holds_one_exclusive_device_session_and_cleans_only_scratch(
-        monkeypatch, tmp_path):
+def test_main_holds_one_exclusive_device_session_and_cleans_only_scratch(monkeypatch, tmp_path):
     events = []
     output = tmp_path / "new-output"
     args = _args("pcie", output_dir=output)
 
     class Session:
+
         def __enter__(self):
             events.append("lock-enter")
 
@@ -704,6 +796,7 @@ def test_main_holds_one_exclusive_device_session_and_cleans_only_scratch(
             events.append("lock-exit")
 
     class FakeProfiler:
+
         @staticmethod
         def exclusive_pcie_device(device_id):
             assert device_id == 0
@@ -725,7 +818,8 @@ def test_main_holds_one_exclusive_device_session_and_cleans_only_scratch(
 
     monkeypatch.setattr(matrix, "_parse_args", lambda: args)
     monkeypatch.setattr(
-        matrix, "worker_environment",
+        matrix,
+        "worker_environment",
         lambda _root, _mode, _device: {},
     )
     monkeypatch.setattr(matrix, "_run_matrix", run)

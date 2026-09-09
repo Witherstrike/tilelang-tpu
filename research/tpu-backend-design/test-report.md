@@ -2,9 +2,9 @@
 
 ## 1. 证据口径
 
-本报告以 `e5774525e3a6e11d0d6010e979203c55181a8872` 为实现基线，正式工件位于
-[本机验收目录](../artifacts/2026-09-09/final-e5774525/)。选定的 39 份 summary 均记录同一
-revision、`implementation_worktree_dirty=false`、`complete=true`、`status=passed`，且
+本报告以 `e5774525e3a6e11d0d6010e979203c55181a8872` 为实现基线，本地证据根目录为
+`research/artifacts/2026-09-09/final-e5774525/`。选定的 39 份 summary 均记录同一
+Git 提交、`implementation_worktree_dirty=false`、`complete=true`、`status=passed`，且
 失败数为 0。它们包括 8 份 CModel、2 份完整 PCIe 矩阵、14 份 TPU-Kernel PCIe 分片和
 15 份 demo PCIe 分片。
 
@@ -12,24 +12,27 @@ BM1690 CModel 使用四份原始矩阵，SG2260E CModel 只使用四份 `*-cmode
 PCIe 使用完整 core/FP8 矩阵和第 2 节列明的通过分片。原始并发 CModel 运行、失败矩阵及
 分片的通过前缀、所有 recovery canary 均仅作诊断，不计入正式结果。
 
-每个数值 case 在独立 worker 中编译、加载、执行，并与精确或 PyTorch oracle 比较。
+每个数值 case 在独立子进程中编译、加载、执行，并与精确结果或 PyTorch 参考结果比较。
 PCIe summary 绑定同一实现的两芯片 CModel 前置证据和实际工具链/runtime 身份。矩阵首错
 停止；恢复后的重跑保留独立目录，不覆盖失败记录。
 
-`research/artifacts/**` 被 Git 忽略，本文链接用于本机复核，不是随仓库发布的原始工件。
+`research/artifacts/**` 被 Git 忽略，本文记录的路径仅供本机复核；原始工件不随仓库发布。下表中的证据路径均相对于上述根目录。
 
-收尾阶段又独立执行了当前分支相对 SG2260E 起始分支新增或修改的全部测试文件，结果为
-682 passed、12 skipped；原生目标增量构建通过。机器可读契约的普通校验与本地工件严格校验
-均通过，覆盖 4 个 target 条目、16 类 op、74 项 capability 和 81 条 evidence。
+远程提交前又执行了 TPU-only 测试：`testing/python/jit` 跳过 4 个需要 CUDA/HIP 的文件，
+再加 AddressAssign 测试，共 693 passed、12 skipped；全新构建和原生目标增量构建均通过。
+当前工作树上的 BM1690 TPU-Kernel、SG2260E TPU-Kernel 和 SG2260E RV Tensor 三个最小
+CModel 用例也全部通过。机器可读契约的普通校验与本地工件严格校验均通过，覆盖 4 个 target
+条目、16 类 op、74 项 capability 和 81 条 evidence。这些收尾检查用于发现代码整理造成的回归，
+不会扩大下文绑定 `e5774525` 的完整矩阵结论。
 
 ## 2. 正式验收结果
 
 | 矩阵 | BM1690 CModel | SG2260E CModel | SG2260E PCIe |
 | --- | ---: | ---: | ---: |
-| 双后端核心映射 | [28/28](../artifacts/2026-09-09/final-e5774525/core-bm1690-cmodel/summary.json) | [56/56](../artifacts/2026-09-09/final-e5774525/core-sg2260e-cmodel-retry1/summary.json) | [56/56](../artifacts/2026-09-09/final-e5774525/core-sg2260e-pcie/summary.json) |
-| FP8 TPU-Kernel | [42/42](../artifacts/2026-09-09/final-e5774525/fp8-bm1690-cmodel/summary.json) | [42/42](../artifacts/2026-09-09/final-e5774525/fp8-sg2260e-cmodel-retry1/summary.json) | [42/42](../artifacts/2026-09-09/final-e5774525/fp8-sg2260e-pcie/summary.json) |
-| 完整 TPU-Kernel op | [152/152](../artifacts/2026-09-09/final-e5774525/tpukernel-bm1690-cmodel/summary.json) | [146/146](../artifacts/2026-09-09/final-e5774525/tpukernel-sg2260e-cmodel-retry1/summary.json) | [146/146](../artifacts/2026-09-09/final-e5774525/tpukernel-sg2260e-pcie-shards/) |
-| 高层 demo | [36/36](../artifacts/2026-09-09/final-e5774525/demo-bm1690-cmodel/summary.json) | [51/51](../artifacts/2026-09-09/final-e5774525/demo-sg2260e-cmodel-retry1/summary.json) | [51/51](../artifacts/2026-09-09/final-e5774525/demo-sg2260e-pcie-shards/) |
+| 双后端核心映射 | 28/28（`core-bm1690-cmodel/summary.json`） | 56/56（`core-sg2260e-cmodel-retry1/summary.json`） | 56/56（`core-sg2260e-pcie/summary.json`） |
+| FP8 TPU-Kernel | 42/42（`fp8-bm1690-cmodel/summary.json`） | 42/42（`fp8-sg2260e-cmodel-retry1/summary.json`） | 42/42（`fp8-sg2260e-pcie/summary.json`） |
+| 完整 TPU-Kernel op | 152/152（`tpukernel-bm1690-cmodel/summary.json`） | 146/146（`tpukernel-sg2260e-cmodel-retry1/summary.json`） | 146/146（`tpukernel-sg2260e-pcie-shards/`） |
+| 高层 demo | 36/36（`demo-bm1690-cmodel/summary.json`） | 51/51（`demo-sg2260e-cmodel-retry1/summary.json`） | 51/51（`demo-sg2260e-pcie-shards/`） |
 | **分阶段合计** | **258/258** | **295/295** | **295/295** |
 
 正式集合的 `scheduled_case_count` 与 `passed_case_count` 求和均为 848，其中 CModel
@@ -99,7 +102,7 @@ broadcast、max 与 max-broadcast、add/mul scalar、gather、RoPE，以及 NN/N
 与 accumulate GEMM。两格式合计 42 项。
 
 BM1690 CModel、SG2260E CModel 和 SG2260E PCIe 均为 42/42。该结论只覆盖 summary 中的
-固定 shape、受控输入域和 selector；不外推到非零 FP8 fill、FP16/BF16 与 FP8 间的所有组合、
+固定 shape、受控输入域和已列支持条件；不外推到非零 FP8 fill、FP16/BF16 与 FP8 间的所有组合、
 FP8 C、NaN/Inf 或更大 shape。
 
 ## 4. 高层算子覆盖
@@ -117,7 +120,7 @@ matmul 3。每组都完整覆盖 FP16、BF16、FP32。
 三个阶段的最大绝对误差均为 0.015625，最大平均绝对误差均约为 0.00260836，后者来自
 BF16 elementwise-div。上述数值由本轮正式 summary 重新汇总，不沿用旧基线的误差统计。
 FP32 matmul 和 FlashAttention 表示 FP32 逻辑 I/O；矩阵计算显式使用 BF16 输入和 FP32
-累加，不能据此声称原生 FP32 GEMM 已验证。完整算法、oracle 与容差见
+累加，不能据此声称原生 FP32 GEMM 已验证。完整算法、参考结果与容差见
 [高层算子报告](../tpu-demo-ops/README.md)。
 
 ## 5. Profiling 证据
@@ -151,11 +154,11 @@ SG2260E PCIe 的 profiling case 每项各有一个非空 raw trace 目录，并�
 板端矩阵在完整 device session lock 内执行空闲检查。命令返回后，`tpu-smi` 仍可能短暂
 报告非零利用率。runner 在 10 秒单调时钟 deadline 内轮询，要求两个间隔至少 0.25 秒的
 连续 `Active/0%` 样本；再次出现非零利用率会重置计数。单次 `Fault`、拓扑错误、无效
-JSON 或 probe 错误立即失败。postflight 无法证明空闲时，runner 保留 session/quarantine
+JSON 或 probe 错误立即失败。运行后检查无法证明空闲时，runner 保留 session/quarantine
 状态并停止剩余 case，不自动清除隔离或继续运行。
 
 当前实现保留失败采样的原始 payload、时刻和错误信息。正式集合的 295 次 PCIe 执行均通过
-postflight；这是各次受控执行的通过记录，不是连续 295 次无中断运行的证明。
+运行后检查；这是各次受控执行的通过记录，不是连续 295 次无中断运行的证明。
 
 本轮完整 TPU-Kernel、完整 demo 和部分 TPU-Kernel 分片曾在数值检查之后出现健康检查
 失败。已保留的 `Fault` 样本中，温度、时钟、利用率、电压均为 `F`。这些字段不可用于推断
@@ -163,7 +166,7 @@ postflight；这是各次受控执行的通过记录，不是连续 295 次无�
 失败完整矩阵、失败分片及 recovery canary 都只用于诊断；即使其中某次数值和解码已通过，
 也不提升为正式通过 case。
 
-恢复后的完整通过分片按第 2 节重新组成验收集合。它们证明已列 selector 能在受控条件下
+恢复后的完整通过分片按第 2 节重新组成验收集合。它们证明已列支持条件能在受控条件下
 执行，不证明故障已消失或可以放宽单次 Fault 停止策略。后续复测仍须先确认设备健康、按既有
 恢复流程处理隔离，并保留首次异常证据；长期稳定性需要独立的重复运行实验。
 
@@ -179,9 +182,9 @@ postflight；这是各次受控执行的通过记录，不是连续 295 次无�
 
 1. **BM1690 PCIe**：本机没有 BM1690 板卡，SG2260E 结果不得外推。
 2. **RV 复合算子**：补齐 reduction 与 math 语义后，依次验证 RMSNorm、split-k、RoPE、
-   SwiGLU、FlashAttention；在此之前保持 fail-closed。
+   SwiGLU、FlashAttention；在此之前保持禁用。
 3. **边界输入和 shape**：覆盖 tail、动态 shape、NaN/Inf、除零、更多 broadcast/alias 和更大
-   GEMM/reduction；现有固定 selector 不能代表整个 dtype 空间。
+   GEMM/reduction；现有固定 case 不能代表整个 dtype 空间。
 4. **FP8 扩围**：验证非零 fill、更多跨 dtype cast、FP8 C、异常值和 shape 边界。
 5. **四核执行**：增加 SG2260E 四核分片、同步与依赖安全测试。当前矩阵证明数值正确性，
    不证明多核扩展效率。

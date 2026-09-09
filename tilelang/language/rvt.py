@@ -3,11 +3,12 @@
 """Low-level bindings for the PPL 1.7 RISC-V Tensor (RVT) ABI.
 
 The bindings deliberately mirror ``rvt_api.h`` instead of attempting to turn
-TileLang buffers into RVT CR/TR/GR descriptors automatically.  Use them with
+TileLang buffers into RVT CR/TR/GR descriptors automatically. Use them with
 ``-tpu-programming-model=rv`` and configure descriptors/registers according to
-the PPL RVT ABI. Existing TPUKernel-only TileLang externs require
-``-tpu-programming-model=tpukernel``; portable ``tl.tpu.*`` operations are
-selected by the target-aware emitter.
+the PPL RVT ABI. Existing TPU-Kernel-only TileLang externs require
+``-tpu-programming-model=tpukernel``. Public ``T.ppl_*`` helpers produce
+portable TPU operations that the target-aware source generator maps to the
+selected programming model.
 """
 
 import re
@@ -23,8 +24,8 @@ def rvt_call(intrinsic: str, *args):
     This generic entry point covers the direct subset of PPL 1.7 RVT whose C
     ABI arguments can be represented by TIR scalar expressions. TileLang
     Buffer data pointers are compiler-owned tensor descriptors and cannot be
-    passed through this raw escape hatch; use ``tl.tpu.*`` operations when
-    buffers need descriptor construction. It
+    passed through this raw escape hatch; use the public ``T.ppl_*`` helpers
+    when buffers need descriptor construction. It
     intentionally does not claim support for header APIs that take C structs
     by value (for example ``array4_t``); those require dedicated descriptor
     builder helpers before they can be called correctly from TileLang.

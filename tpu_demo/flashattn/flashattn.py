@@ -20,37 +20,45 @@ from typing import Optional
 import tilelang.language as T
 import torch
 
-from tpu_demo.common import (comparison, compile_and_launch, result_payload, tolerance,
-                             torch_dtype, validate_dimensions, validate_exact_tiling,
-                             validate_selection)
+from tpu_demo.common import (comparison, compile_and_launch, result_payload, tolerance, torch_dtype,
+                             validate_dimensions, validate_exact_tiling, validate_selection)
 
 
-def build_flashattn(*, batch: int = 1, heads: int = 1, sequence: int = 32,
-                    head_dim: int = 16, block_m: int = 16, block_n: int = 16,
-                    dtype: str = "float16", is_causal: bool = False):
+def build_flashattn(*,
+                    batch: int = 1,
+                    heads: int = 1,
+                    sequence: int = 32,
+                    head_dim: int = 16,
+                    block_m: int = 16,
+                    block_n: int = 16,
+                    dtype: str = "float16",
+                    is_causal: bool = False):
     torch_dtype(dtype)
     validate_dimensions(
-        "flashattn", batch=batch, heads=heads, sequence=sequence, head_dim=head_dim,
-        block_m=block_m, block_n=block_n)
+        "flashattn",
+        batch=batch,
+        heads=heads,
+        sequence=sequence,
+        head_dim=head_dim,
+        block_m=block_m,
+        block_n=block_n)
     if not isinstance(is_causal, bool):
         raise TypeError(f"flashattn requires boolean is_causal, got {is_causal!r}")
     if is_causal:
         raise NotImplementedError(
             "causal attention needs a validated diagonal-tile mask; shortening the K loop "
             "alone is incorrect and is intentionally not exposed")
-    validate_exact_tiling(
-        "flashattn", ("sequence/block_m", sequence, block_m),
-        ("sequence/block_n", sequence, block_n))
+    validate_exact_tiling("flashattn", ("sequence/block_m", sequence, block_m),
+                          ("sequence/block_n", sequence, block_n))
     compute_dtype = "bfloat16" if dtype == "float32" else dtype
     scale = 1.0 / math.sqrt(head_dim)
 
     @T.prim_func
-    def kernel(Q: T.Tensor((batch, sequence, heads, head_dim), dtype),
-               K: T.Tensor((batch, sequence, heads, head_dim), dtype),
-               V: T.Tensor((batch, sequence, heads, head_dim), dtype),
-               Output: T.Tensor((batch, sequence, heads, head_dim), dtype)):
-        with T.Kernel(T.ceildiv(sequence, block_m), heads, batch,
-                      is_cpu=True) as (bx, by, bz):
+    def kernel(Q: T.Tensor((batch, sequence, heads, head_dim), dtype), K: T.Tensor(
+        (batch, sequence, heads, head_dim), dtype), V: T.Tensor(
+            (batch, sequence, heads, head_dim), dtype), Output: T.Tensor(
+                (batch, sequence, heads, head_dim), dtype)):
+        with T.Kernel(T.ceildiv(sequence, block_m), heads, batch, is_cpu=True) as (bx, by, bz):
             q_compute = T.alloc_shared((block_m, head_dim), compute_dtype)
             k_compute = T.alloc_shared((block_n, head_dim), compute_dtype)
             v_compute = T.alloc_shared((block_n, head_dim), compute_dtype)
@@ -75,32 +83,31 @@ def build_flashattn(*, batch: int = 1, heads: int = 1, sequence: int = 32,
             score_work1 = T.alloc_shared((block_m, block_n), "float32")
 
             if dtype == "float32":
-                T.ppl_copy(Q[bz:bz + 1, bx * block_m:(bx + 1) * block_m,
-                             by:by + 1, 0:head_dim], q_input)
+                T.ppl_copy(Q[bz:bz + 1, bx * block_m:(bx + 1) * block_m, by:by + 1, 0:head_dim],
+                           q_input)
                 T.ppl_copy(q_input, q_compute)
             else:
-                T.ppl_copy(Q[bz:bz + 1, bx * block_m:(bx + 1) * block_m,
-                             by:by + 1, 0:head_dim], q_compute)
+                T.ppl_copy(Q[bz:bz + 1, bx * block_m:(bx + 1) * block_m, by:by + 1, 0:head_dim],
+                           q_compute)
             T.ppl_fill(accumulator, T.float32(0))
             T.ppl_fill(row_sum, T.float32(0))
             T.ppl_fill(row_max, -T.infinity("float32"))
 
             for ko in T.serial(T.ceildiv(sequence, block_n)):
                 if dtype == "float32":
-                    T.ppl_copy(K[bz:bz + 1, ko * block_n:(ko + 1) * block_n,
-                                 by:by + 1, 0:head_dim], k_input)
-                    T.ppl_copy(V[bz:bz + 1, ko * block_n:(ko + 1) * block_n,
-                                 by:by + 1, 0:head_dim], v_input)
+                    T.ppl_copy(K[bz:bz + 1, ko * block_n:(ko + 1) * block_n, by:by + 1, 0:head_dim],
+                               k_input)
+                    T.ppl_copy(V[bz:bz + 1, ko * block_n:(ko + 1) * block_n, by:by + 1, 0:head_dim],
+                               v_input)
                     T.ppl_copy(k_input, k_compute)
                     T.ppl_copy(v_input, v_compute)
                 else:
-                    T.ppl_copy(K[bz:bz + 1, ko * block_n:(ko + 1) * block_n,
-                                 by:by + 1, 0:head_dim], k_compute)
-                    T.ppl_copy(V[bz:bz + 1, ko * block_n:(ko + 1) * block_n,
-                                 by:by + 1, 0:head_dim], v_compute)
+                    T.ppl_copy(K[bz:bz + 1, ko * block_n:(ko + 1) * block_n, by:by + 1, 0:head_dim],
+                               k_compute)
+                    T.ppl_copy(V[bz:bz + 1, ko * block_n:(ko + 1) * block_n, by:by + 1, 0:head_dim],
+                               v_compute)
 
-                T.ppl_gemm(q_compute, k_compute, scores,
-                           transpose_B=True, accumulate=False)
+                T.ppl_gemm(q_compute, k_compute, scores, transpose_B=True, accumulate=False)
                 T.ppl_copy(row_max, previous_max)
                 T.ppl_reduce_max(scores, current_max, dim=1)
                 T.ppl_max(row_max, previous_max, current_max)
@@ -121,20 +128,19 @@ def build_flashattn(*, batch: int = 1, heads: int = 1, sequence: int = 32,
 
             T.ppl_div(normalized, accumulator, row_sum)
             if dtype == "float32":
-                T.ppl_copy(normalized,
-                           Output[bz:bz + 1, bx * block_m:(bx + 1) * block_m,
-                                  by:by + 1, 0:head_dim])
+                T.ppl_copy(
+                    normalized, Output[bz:bz + 1, bx * block_m:(bx + 1) * block_m, by:by + 1,
+                                       0:head_dim])
             else:
                 T.ppl_copy(normalized, output_local)
-                T.ppl_copy(output_local,
-                           Output[bz:bz + 1, bx * block_m:(bx + 1) * block_m,
-                                  by:by + 1, 0:head_dim])
+                T.ppl_copy(
+                    output_local, Output[bz:bz + 1, bx * block_m:(bx + 1) * block_m, by:by + 1,
+                                         0:head_dim])
 
     return kernel
 
 
-def _reference(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-               dtype: str) -> torch.Tensor:
+def _reference(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, dtype: str) -> torch.Tensor:
     if dtype == "float32":
         q_compute = q.to(torch.bfloat16).float()
         k_compute = k.to(torch.bfloat16).float()
@@ -172,8 +178,8 @@ def _validation_inputs(dtype: str, variant: str, seed: int):
         channel_scale = torch.linspace(-0.5, 0.5, head_dim).reshape(1, 1, 1, head_dim)
         q = (0.5 * query_scale).expand(tensor_shape).to(host_dtype).contiguous()
         k = (0.5 * key_scale).expand(tensor_shape).to(host_dtype).contiguous()
-        v = (0.5 * key_scale + 0.25 * channel_scale).expand(
-            tensor_shape).to(host_dtype).contiguous()
+        v = (0.5 * key_scale +
+             0.25 * channel_scale).expand(tensor_shape).to(host_dtype).contiguous()
     else:
         # Bounded random logits cover both K tiles. Distinct positive V tiles
         # expose a dropped numerator tile, stale denominator, and no-op output.
@@ -185,31 +191,54 @@ def _validation_inputs(dtype: str, variant: str, seed: int):
     return q, k, v
 
 
-def run(*, dtype: str, chip: str, programming_model: str, runtime_mode: str,
-        variant: str = "balanced", allow_pcie: bool = False,
-        device_id: Optional[int] = None, seed: int = 0) -> dict:
+def run(*,
+        dtype: str,
+        chip: str,
+        programming_model: str,
+        runtime_mode: str,
+        variant: str = "balanced",
+        allow_pcie: bool = False,
+        device_id: Optional[int] = None,
+        seed: int = 0) -> dict:
     torch_dtype(dtype)
     validate_selection(
-        chip=chip, programming_model=programming_model, runtime_mode=runtime_mode,
-        supports_rv=False, allow_pcie=allow_pcie, device_id=device_id)
+        chip=chip,
+        programming_model=programming_model,
+        runtime_mode=runtime_mode,
+        supports_rv=False,
+        allow_pcie=allow_pcie,
+        device_id=device_id)
     batch, sequence, heads, head_dim = 1, 32, 1, 16
     tensors = _validation_inputs(dtype, variant, seed)
     q, k, v = tensors
     output = torch.zeros_like(q)
     timing = compile_and_launch(
-        build_flashattn(batch=batch, heads=heads, sequence=sequence,
-                        head_dim=head_dim, dtype=dtype),
-        (*tensors, output), chip=chip, programming_model=programming_model,
+        build_flashattn(
+            batch=batch, heads=heads, sequence=sequence, head_dim=head_dim, dtype=dtype),
+        (*tensors, output),
+        chip=chip,
+        programming_model=programming_model,
         runtime_mode=runtime_mode)
     expected = _reference(*tensors, dtype)
     atol, rtol = tolerance(dtype, "flashattn")
     metrics = comparison(output, expected, atol=atol, rtol=rtol)
     return result_payload(
-        operation="flashattn", dtype=dtype, chip=chip,
-        programming_model=programming_model, runtime_mode=runtime_mode,
-        metrics=metrics, timing=timing,
-        parameters={"batch": batch, "heads": heads, "sequence": sequence,
-                    "head_dim": head_dim, "block_m": 16, "block_n": 16,
-                    "is_causal": False, "fp32_compute_dtype": (
-                        "bfloat16" if dtype == "float32" else None),
-                    "variant": variant, "seed": seed})
+        operation="flashattn",
+        dtype=dtype,
+        chip=chip,
+        programming_model=programming_model,
+        runtime_mode=runtime_mode,
+        metrics=metrics,
+        timing=timing,
+        parameters={
+            "batch": batch,
+            "heads": heads,
+            "sequence": sequence,
+            "head_dim": head_dim,
+            "block_m": 16,
+            "block_n": 16,
+            "is_causal": False,
+            "fp32_compute_dtype": ("bfloat16" if dtype == "float32" else None),
+            "variant": variant,
+            "seed": seed
+        })
