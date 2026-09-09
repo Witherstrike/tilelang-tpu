@@ -153,9 +153,10 @@ FP8 div 明确不支持；非零 fill、其他 cast、FP8 output GEMM 以及 exp
 
 FP8 scalar 采用 PPL 1.7 的 canonical same-format 路径：FP32 常量先 `tpu_cast(..., RM_HALF_TO_EVEN)` 到目标格式，再调用通用 `tpu_bdc_fp_add_C/fp_mul_C`。moderate 输入与公开生产路径均通过。历史 direct `tpu_bdc_fp8_*_C` exit 139 是 FP8 dst/src + FP32 `C_dtype` 的非法参数探针，不是硬件负向证据。边界实验证实当前为非饱和语义：E4M3 overflow 产生 NaN，E5M2 产生 infinity；可选 saturation 仍不得暴露。
 
-机器可读的逐 selector 事实位于 `research/tpu-op-contract/contract.json`。当前干净实现基线
-`6b6772be62803338ce52cc0e57b82c47752c738d` 的八份 CModel summary 均位于
-[canonical artifact 目录](../artifacts/2026-09-08/final-6b6772be/)，合计 553/553 次 launch：核心矩阵为 BM1690
+机器可读的逐 selector 事实位于 `research/tpu-op-contract/contract.json`。当前验收实现基线
+`e5774525e3a6e11d0d6010e979203c55181a8872` 的八份 CModel summary 均位于
+[正式工件目录](../artifacts/2026-09-09/final-e5774525/)，合计 553/553 次 launch。SG2260E 只取四份
+`*-cmodel-retry1`，BM1690 取四份原始矩阵：核心矩阵为 BM1690
 28/28、SG2260E 56/56，FP8 为 42/42 + 42/42，demo 为 36/36 + 51/51，完整
 TPU-Kernel 为 152/152 + 146/146。各 summary 均自记同一 revision 并确认
 `implementation_worktree_dirty=false`。这些矩阵之间存在有意的 selector 重叠，553 是回归
@@ -193,33 +194,38 @@ extent）或 `While`，凡在循环外分配、循环内使用的 local buffer�
 profiling 复用 PPL 的运行记录协议，而非把 `ppl_compile.py --profiling` 原样套到 TileLang 生成的 C：
 
 - CModel：`FILE_DUMP_CMD` 收集 raw 命令；有 PerfAI 时再解码；
-- PCIe：TPUDNN recorder 包围一次 launch并保留 raw 文件；仅当调用方显式提供兼容的 `bigTpuProfile/PerfAI` 时，才在独立解释器和 `PYTHONPATH` 中离线投影为稳定 JSON。该 decoder 环境不注入编译或数值 worker。
+- PCIe：TPUDNN recorder 包围一次 launch 并保留 raw 文件；仅当调用方显式提供兼容的 `bigTpuProfile/PerfAI` 时，才在独立解释器和 `PYTHONPATH` 中离线投影为稳定 JSON。该 decoder 环境不注入编译或数值 worker。
 
 生产代码不会联网或自动安装 decoder。严格 timing 矩阵在任何板端派发前先做无硬件 preflight，确认结构化 parser API 可用，并把实际包版本与 API 身份写入 summary。当前隔离环境验证的身份为 `bigTpuProfile 0.3.5` 和 `bigTpuProfile.bmprofile_perfAI.ProfileParser.parse`；这仍是显式外部依赖，不是基础 runtime 保证。
 
 数值验证与 profiling 分开判定。当前 [SG2260E PCIe core
-56/56](../artifacts/2026-09-08/final-6b6772be/core-sg2260e-pcie/summary.json)、[FP8
-42/42](../artifacts/2026-09-08/final-6b6772be/fp8-sg2260e-pcie/summary.json) 和 [demo
-51/51](../artifacts/2026-09-08/final-6b6772be/demo-sg2260e-pcie/summary.json) 共 149 个
+56/56](../artifacts/2026-09-09/final-e5774525/core-sg2260e-pcie/summary.json)、[FP8
+42/42](../artifacts/2026-09-09/final-e5774525/fp8-sg2260e-pcie/summary.json) 和 [demo
+51/51](../artifacts/2026-09-09/final-e5774525/demo-sg2260e-pcie-shards/) 共 149 个
 case，均通过 numeric、非空 raw recorder 与 decoded timing 三重门禁；对应 149 组 recorder
 目录和 3568 条合法 ns 事件。每组目录恰含 `global.profile` 与四个 SG2260E 核的
 `cdmlib0_*.profile`，因此 summary 的 `raw_trace_file_count=1` 指一组目录，不是一个物理文件。
 decoder 身份为 `bigTpuProfile 0.3.5` 和
 `bigTpuProfile.bmprofile_perfAI.ProfileParser.parse`。
 
-[完整 TPU-Kernel PCIe 矩阵](../artifacts/2026-09-08/final-6b6772be/tpukernel-sg2260e-pcie/summary.json)
-另有 146/146 次 numeric launch，不启用 profiling，不能与 149 个 profiling case 当作同一种
-验收强度。demo 的 51 项由 TPU-Kernel 36 项和 RV 15 项组成：RV 只包含三种 dtype 的四则与
+[完整 TPU-Kernel PCIe 矩阵](../artifacts/2026-09-09/final-e5774525/tpukernel-sg2260e-pcie-shards/)
+由 14 个完整通过分片覆盖 146/146 次数值执行，不启用 profiling；demo 的 51/51 项则由
+15 个完整通过分片覆盖。两类分片分别按 case 去重汇总，失败矩阵和 canary 不计入验收。
+数值矩阵与 149 个 profiling case 的验收条件不同。demo 的 51 项由 TPU-Kernel 36 项和
+RV 15 项组成；RV 只包含三种 dtype 的四则与
 matmul；RMSNorm、Split-K、RoPE、SwiGLU、FlashAttention 的 RV composite 仍未实现。
 
 PCIe preflight/postflight 在同一 device session lock 内执行有界静默检查：仅
 `Active + 合法非零利用率` 可以继续轮询，拓扑、状态、JSON、probe 或进程组异常立即失败；
-10 秒总 deadline 内必须取得两次间隔 0.25 秒的连续 `0%`。dispatch 后若仍不能证明静默，
-session/quarantine marker 持久保留，后续 launch fail-closed。最早在 `137c85d5` 上的首个
-TPU-Kernel FP32 add 已通过数值、五个 raw 文件和 16 条 decoded timing，但旧单点 postflight
-看到 `Active/9%` 后停止；后来人工看到 0% 不属于该失败 summary，故它只作诊断证据。
-`6b6772be` 的 295/295 次 PCIe launch 全部通过新静默门禁，说明短暂的尾部利用率既不会被
-误判为故障，也不会凭一次瞬时 0% 提前放行。
+10 秒总 deadline 内必须取得两次间隔 0.25 秒的连续 `Active/0%`。dispatch 后若仍不能证明
+静默，session/quarantine marker 持久保留，后续 launch 停止。单次 `Fault` 也立即触发隔离，
+不因数值或 decoder 已通过而放行。
+
+`e5774525` 的正式结果为 CModel 553/553、SG2260E PCIe 295/295，合计 848/848。该集合
+覆盖已修复循环回边 liveness 的实现，但不代表一次连续运行完成全部 PCIe 测试。完整矩阵和
+部分分片曾因健康检查失败而中止；失败样本的温度、时钟、利用率和电压均显示 `F`，根因尚未
+证实。后续完整通过分片只证明其各自的数值与门禁结果，不能消除历史故障或证明长期稳定性。
+正式集合、分片选择及故障边界见 [测试报告](test-report.md)。
 
 PCIe timing 来自每 case 一次带 recorder 的设备指令事件，只用于审查映射和定位问题，不是
 去除 recorder 开销、重复采样后的端到端 benchmark。本机无 BM1690 板卡，因而 BM1690 PCIe

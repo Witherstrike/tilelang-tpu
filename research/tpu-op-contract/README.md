@@ -43,22 +43,22 @@ native 层把 dtype、原始 rank、shape、scope 和 storage identity 与 compi
 
 ## 3. 当前 canonical 回归
 
-当前契约绑定完整 revision `6b6772be62803338ce52cc0e57b82c47752c738d`。canonical 根目录为 [`research/artifacts/2026-09-08/final-6b6772be`](../artifacts/2026-09-08/final-6b6772be/)，12 份 summary 均满足：`complete=true`、全部 case `passed`、runner 记录同一 revision、`implementation_worktree_dirty=false`，且源码身份范围为 tracked 与 untracked 文件（排除 `research/**`）。
+当前契约绑定完整 revision `e5774525e3a6e11d0d6010e979203c55181a8872` 和 source state `c49cf3594f2ce5d215e54d331a10ca0bbbf92bd6667fba3e172b2b3621f7f5c4`。canonical 根目录为 [`research/artifacts/2026-09-09/final-e5774525`](../artifacts/2026-09-09/final-e5774525/)。正式集合共 39 份 summary；它们均满足 `complete=true`、全部 case `passed`、`implementation_worktree_dirty=false`，且源码身份范围为 tracked 与 untracked 文件（排除 `research/**`）。
 
 ### 3.1 CModel：553/553
 
 | summary | target 分布 | 结果 |
 | --- | --- | ---: |
-| [core BM1690](../artifacts/2026-09-08/final-6b6772be/core-bm1690-cmodel/summary.json) | TPU-Kernel 28 | 28/28 |
-| [core SG2260E](../artifacts/2026-09-08/final-6b6772be/core-sg2260e-cmodel/summary.json) | TPU-Kernel 28 + RV 28 | 56/56 |
-| [FP8 BM1690](../artifacts/2026-09-08/final-6b6772be/fp8-bm1690-cmodel/summary.json) | TPU-Kernel 42 | 42/42 |
-| [FP8 SG2260E](../artifacts/2026-09-08/final-6b6772be/fp8-sg2260e-cmodel/summary.json) | TPU-Kernel 42 | 42/42 |
-| [TPU-Kernel BM1690](../artifacts/2026-09-08/final-6b6772be/tpukernel-bm1690-cmodel/summary.json) | TPU-Kernel 152 | 152/152 |
-| [TPU-Kernel SG2260E](../artifacts/2026-09-08/final-6b6772be/tpukernel-sg2260e-cmodel/summary.json) | TPU-Kernel 146 | 146/146 |
-| [demo BM1690](../artifacts/2026-09-08/final-6b6772be/demo-bm1690-cmodel/summary.json) | TPU-Kernel 36 | 36/36 |
-| [demo SG2260E](../artifacts/2026-09-08/final-6b6772be/demo-sg2260e-cmodel/summary.json) | TPU-Kernel 36 + RV 15 | 51/51 |
+| [core BM1690](../artifacts/2026-09-09/final-e5774525/core-bm1690-cmodel/summary.json) | TPU-Kernel 28 | 28/28 |
+| [core SG2260E](../artifacts/2026-09-09/final-e5774525/core-sg2260e-cmodel-retry1/summary.json) | TPU-Kernel 28 + RV 28 | 56/56 |
+| [FP8 BM1690](../artifacts/2026-09-09/final-e5774525/fp8-bm1690-cmodel/summary.json) | TPU-Kernel 42 | 42/42 |
+| [FP8 SG2260E](../artifacts/2026-09-09/final-e5774525/fp8-sg2260e-cmodel-retry1/summary.json) | TPU-Kernel 42 | 42/42 |
+| [TPU-Kernel BM1690](../artifacts/2026-09-09/final-e5774525/tpukernel-bm1690-cmodel/summary.json) | TPU-Kernel 152 | 152/152 |
+| [TPU-Kernel SG2260E](../artifacts/2026-09-09/final-e5774525/tpukernel-sg2260e-cmodel-retry1/summary.json) | TPU-Kernel 146 | 146/146 |
+| [demo BM1690](../artifacts/2026-09-09/final-e5774525/demo-bm1690-cmodel/summary.json) | TPU-Kernel 36 | 36/36 |
+| [demo SG2260E](../artifacts/2026-09-09/final-e5774525/demo-sg2260e-cmodel-retry1/summary.json) | TPU-Kernel 36 + RV 15 | 51/51 |
 
-core 矩阵直接覆盖 copy、fill、FP16/BF16/FP32 四则与 broadcast、max 以及 GEMM。FP8 矩阵在两芯片各覆盖 E4M3/E5M2 的 21 项，共 42 项；包括同格式 copy、零 fill、FP32 双向 cast、dense/W-broadcast add/sub/mul/max、scalar add/mul、gather、rope，以及 NN/NT overwrite/accumulate GEMM。
+core 矩阵直接覆盖 copy、FP16/BF16/FP32 四则与 broadcast、max 以及 GEMM；matmul 内的 `T.ppl_fill(C_acc, 0)` 同时覆盖零 fill。FP8 矩阵在两芯片各覆盖 E4M3/E5M2 的 21 项，共 42 项；包括同格式 copy、零 fill、FP32 双向 cast、dense/W-broadcast add/sub/mul/max、scalar add/mul、gather、rope，以及 NN/NT overwrite/accumulate GEMM。
 
 BM1690 与 SG2260E 的 TPU-Kernel 基础差异是 topk：BM 的 152 项包含 FP32/INT32/UINT32 升降序 topk，SG 的运行库明确拒绝该原语，因此在 codegen fail-closed，不进入 CModel/PCIe。
 
@@ -66,18 +66,20 @@ BM1690 与 SG2260E 的 TPU-Kernel 基础差异是 topk：BM 的 152 项包含 FP
 
 | summary | target 分布 | 结果 |
 | --- | --- | ---: |
-| [core SG2260E](../artifacts/2026-09-08/final-6b6772be/core-sg2260e-pcie/summary.json) | TPU-Kernel 28 + RV 28 | 56/56 |
-| [FP8 SG2260E](../artifacts/2026-09-08/final-6b6772be/fp8-sg2260e-pcie/summary.json) | TPU-Kernel 42 | 42/42 |
-| [TPU-Kernel SG2260E](../artifacts/2026-09-08/final-6b6772be/tpukernel-sg2260e-pcie/summary.json) | TPU-Kernel 146 | 146/146 |
-| [demo SG2260E](../artifacts/2026-09-08/final-6b6772be/demo-sg2260e-pcie/summary.json) | TPU-Kernel 36 + RV 15 | 51/51 |
+| [core SG2260E](../artifacts/2026-09-09/final-e5774525/core-sg2260e-pcie/summary.json) | TPU-Kernel 28 + RV 28 | 56/56 |
+| [FP8 SG2260E](../artifacts/2026-09-09/final-e5774525/fp8-sg2260e-pcie/summary.json) | TPU-Kernel 42 | 42/42 |
+| [TPU-Kernel SG2260E：14 个分片](../artifacts/2026-09-09/final-e5774525/tpukernel-sg2260e-pcie-shards/) | TPU-Kernel 146 | 146/146 |
+| [demo SG2260E：15 个分片](../artifacts/2026-09-09/final-e5774525/demo-sg2260e-pcie-shards/) | TPU-Kernel 36 + RV 15 | 51/51 |
 
-因此 12 份 canonical summary 的实际独立 launch 总数是 `553 + 295 = 848`。它是验收执行次数，不是互斥 capability 数；core、TPU-Kernel 专项和 demo 之间存在 selector 重叠，不能重复解释为新增能力。
+39 份 canonical summary 的实际 launch 总数是 `553 + 295 = 848`。两个分片集合均经过精确并集校验，没有重复、遗漏或额外 case。848 是验收执行次数，不是互斥 capability 数；core、TPU-Kernel 专项和 demo 之间存在 selector 重叠，不能重复解释为新增能力。
+
+早先并发启动的 SG2260E CModel 结果不满足顺序晋级要求；PCIe 的失败整批、失败分片和恢复 canary 也不构成完整闭集。这些工件保留用于诊断，但不参与 848 的计数，也不被 `evidence[]` 中带 `runtime_expectation` 的条目引用。
 
 FP8 的 42 个 SG2260E PCIe case 已全部实证，包含两种格式的 dense 与 W-broadcast max。该结论只覆盖 summary 中的有限、可精确判定输入与固定 shape；不得外推到 NaN、infinity、signed-zero tie、动态 shape、BM1690 PCIe 或 RV FP8。
 
 ### 3.3 demo 与后端边界
 
-demo summary 是 mixed-backend 工件：每条 `results[]` 自带 `chip/programming_model/runtime/status/key`。TPU-Kernel 36 项覆盖 elementwise、matmul、rmsnorm、rmsnorm-splitk、rope、swiglu、flashattn；RV 15 项只覆盖 elementwise 与 matmul 的直接 selector。
+demo summary 是 mixed-backend 工件：运行时由 summary 顶层字段和 `numeric.runtime_mode` 共同给出；每条 `results[]` 直接记录 `chip/programming_model/status/key`。TPU-Kernel 36 项覆盖 elementwise、matmul、rmsnorm、rmsnorm-splitk、rope、swiglu、flashattn；RV 15 项只覆盖 elementwise 与 matmul 的直接 selector。
 
 这些 demo 只能给已验证的 selector/stage 提供证据。TPU-Kernel composite 通过不能提升 RV 的 rmsnorm、split-k、rope、swiglu 或 flashattn；demo 中 FP32 用户输出若内部使用 BF16 计算，也不能据此提升“FP32 A/B 直接 GEMM”能力。
 
@@ -87,7 +89,7 @@ demo summary 是 mixed-backend 工件：每条 `results[]` 自带 `chip/programm
 - runtime 不一致、非 `passed` 状态、重复 key 或重复 canonical case；
 - case 总数、target 分布、精确 required case 集与契约 expectation 不一致。
 
-旧的单 backend `cases{}` 和 `results[]` summary 仍按同样的闭集规则校验。
+其余使用 `cases{}` 或 `results[]` collection 的 summary 也按同样的闭集规则校验；`cases{}` 本身不表示单后端，例如 SG core 同时包含 TPU-Kernel 与 RV。
 
 ### 3.4 profiling 的证据含义
 
@@ -95,7 +97,7 @@ profiling 与数值通过是两个正交维度：
 
 - CModel core/FP8/demo 保留 raw trace，但当前 decoder 不可用，`timed_instruction_count=0`；它们只能证明指令选择和数值结果。
 - SG2260E PCIe core、FP8、demo 分别得到 824、150、2594 个有效 ns interval；共 149 个 profiling case、3568 个 interval，parser 均为 `ready`，decoder 为 `bigTpuProfile 0.3.5`。
-- TPU-Kernel 146 项 PCIe summary 是数值回归，没有 decoded timing；不能因为同一 target 的其他矩阵启用了 profiling 而补写 timing。
+- TPU-Kernel 146 项的 14 份 PCIe 分片是数值回归，没有 decoded timing；不能因为同一 target 的其他矩阵启用了 profiling 而补写 timing。
 
 单次 timing 用于核对实际指令与定位退化，不是稳定 benchmark。PCIe runner 对每个 case 使用独立进程组、超时与 TERM→KILL 有界清理；每次执行后要求板卡连续两次报告 0% utilization，首错即停止并跳过余项。
 

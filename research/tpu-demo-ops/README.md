@@ -7,10 +7,10 @@ split-k、RoPE、SwiGLU 和 FlashAttention。公开数据类型为 FP16、BF16�
 
 当前 canonical 基线为：
 
-- revision：`6b6772be62803338ce52cc0e57b82c47752c738d`；
-- source state：`2c22969b21ce5aa66d44cdea6585bfbd6dc897f3c947248c809dc21bc2231170`；
-- evidence root：`research/artifacts/2026-09-08/final-6b6772be/`；
-- 3 份高层 summary 均记录 `implementation_worktree_dirty=false`、
+- revision：`e5774525e3a6e11d0d6010e979203c55181a8872`；
+- source state：`c49cf3594f2ce5d215e54d331a10ca0bbbf92bd6667fba3e172b2b3621f7f5c4`；
+- evidence root：`research/artifacts/2026-09-09/final-e5774525/`；
+- 2 份 CModel summary 与 15 份 PCIe 分片 summary 均记录 `implementation_worktree_dirty=false`、
   `complete=true`、`status=passed`。
 
 结果为 BM1690 CModel 36/36、SG2260E CModel 51/51、SG2260E PCIe
@@ -107,12 +107,8 @@ predicate 或 masked DMA，因而非整 tile shape 不能靠向上取整后越�
 | RoPE | 5e-3 / 5e-3 | 2e-2 / 2e-2 | 1e-5 / 1e-5 |
 | FlashAttention | 2e-2 / 2e-2 | 2e-2 / 2e-2 | 2e-2 / 2e-2 |
 
-本轮最大绝对误差如下：
-
-- BM1690 CModel：`flashattn.bfloat16.weighted-keys`，0.015625；
-- SG2260E CModel 与 PCIe：`rv/elementwise-div.bfloat16`，0.015625；
-- 最大平均绝对误差均出现在 `tpukernel/flashattn.float16.weighted-keys`，
-  为 0.012373005971312523。
+本轮三阶段的最大绝对误差均为 0.015625，出现在 BF16 RoPE 或 BF16 elementwise div。
+最大平均绝对误差均为 0.002608358860015869，出现在 BF16 elementwise div。
 
 所有值均在固定容差内；没有通过放宽容差处理失败。
 
@@ -120,11 +116,12 @@ predicate 或 masked DMA，因而非整 tile shape 不能靠向上取整后越�
 
 | 阶段 | 调度范围 | 结果 | canonical evidence |
 | --- | --- | ---: | --- |
-| BM1690 CModel | TPU-Kernel 36 | 36/36 | [summary](../artifacts/2026-09-08/final-6b6772be/demo-bm1690-cmodel/summary.json) |
-| SG2260E CModel | TPU-Kernel 36 + RV 15 | 51/51 | [summary](../artifacts/2026-09-08/final-6b6772be/demo-sg2260e-cmodel/summary.json) |
-| SG2260E PCIe | 与 SG CModel 相同的 51 项 | 51/51 | [summary](../artifacts/2026-09-08/final-6b6772be/demo-sg2260e-pcie/summary.json) |
+| BM1690 CModel | TPU-Kernel 36 | 36/36 | [summary](../artifacts/2026-09-09/final-e5774525/demo-bm1690-cmodel/summary.json) |
+| SG2260E CModel | TPU-Kernel 36 + RV 15 | 51/51 | [summary](../artifacts/2026-09-09/final-e5774525/demo-sg2260e-cmodel-retry1/summary.json) |
+| SG2260E PCIe | 与 SG CModel 相同的 51 项 | 51/51 | [15 个分片](../artifacts/2026-09-09/final-e5774525/demo-sg2260e-pcie-shards/) |
 
-三份 summary 的 scheduled、completed、passed 分别相等，failed 与 cancelled 均为 0。
+两份 CModel summary 和 15 份 PCIe 分片的 scheduled、completed、passed 分别相等，
+failed 与 cancelled 均为 0；15 个分片的 case 并集与 51 项清单严格相等，无重复或遗漏。
 PCIe 每项保留一个非空 raw trace 目录，51 项共解码 2594 个合法 ns 事件，其中 BDC 2168、
 GDMA 426；decoder 为 `bigTpuProfile 0.3.5` 的结构化 `ProfileParser.parse` 接口。
 CModel 保存了非空 raw 命令，但没有可用 duration，因此 `timed_instruction_count=0` 只表示
@@ -137,7 +134,8 @@ warm-up、重复采样、稳态统计或 recorder 开销校正，不能作为后
 
 PCIe 只在 BM1690 与 SG2260E 的同 revision CModel summary 完整通过后晋级。每个 case 在
 fresh worker 中编译一次、执行一次；任一编译、加载、deadline、数值、raw、decoder 或板卡
-健康错误都会终止受控进程组并停止剩余矩阵。
+健康错误都会保存失败并停止剩余矩阵。仍存活的受控进程组会被有界清理；只有无法证明进程组
+已回收或板卡健康/静默的失败才持久隔离设备。
 
 板卡空闲判断持有完整 device session lock，并在一个 monotonic 总 deadline 内轮询。只有
 `Active` 且连续两个、间隔采样的 `0%` 才视为稳定空闲；`0 -> 非零` 会重置连续计数，
@@ -145,15 +143,13 @@ Fault、拓扑不符、无效 JSON 和 probe 失败立即拒绝。发射后的 s
 当前 session 会保持 fail-closed 并写入 quarantine；已完成的数值与 profiling 证据仍保存在
 失败 case 中，失败阶段标为 board postflight。
 
-旧 revision `137c85d5bbf9036063904ba7c7e48c16db0302ce` 的首次 SG2260E PCIe
-TPU-Kernel FP32 add 已通过数值，产生 5 个非空 raw 文件并解码出 16 个 ns 事件；旧逻辑却在
-紧接发射的一次采样看到 `9%` 后停止。它位于
-`research/artifacts/2026-09-08/final-137c85d5/core-sg2260e-pcie/`，仅作为问题定位证据，
-不计入 canonical 通过数。
-
-`6b6772be` 修复后的 canonical core 首例真实观察到 `10% -> 10% -> 0% -> 0%`，在同一锁和
-总 deadline 内正确等待到连续两个零样本后通过。高层 PCIe 的 51 个 postflight 也全部完成
-稳定空闲判定。
+本轮整批 demo 在前 11 项通过后，于 `tpukernel/elementwise-div.float32` 的 postflight
+读到一次 `Fault`；该 case 的数值误差为 `3.576e-7`，但温度、时钟、利用率和电压字段同时为
+`F`。runner 按约定停止、保留完整 probe payload 并隔离设备，没有把数值通过改写成板端通过。
+受控进程退出且板卡连续恢复为 `Active/0%` 后，先执行该精确 case 的 canary，再将正式矩阵拆成
+15 个串行分片。分片并集 51/51 全部通过严格数值、raw、decoder 与 postflight 门禁。现有证据
+只说明管理遥测曾短暂不可用，不能确定驱动、固件或监控工具中的具体根因；失败整批与 canary
+仅作诊断，不计入 canonical 结果。
 
 ## 8. 当前边界与下一步
 

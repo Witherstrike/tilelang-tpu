@@ -61,7 +61,7 @@ TileLang TPU lowering + AddressAssign
 
 | 前端 | 统一 TIR | TPU-Kernel | RVT | 当前约束 |
 | --- | --- | --- | --- | --- |
-| `ppl_copy` | `tl.tpu.copy` | S2L/L2S/S2S/L2L GDMA/BDC；本地 cast | `rvt_dma_ld/st/cp`，本地浮点转换用 `rvt_cvt_f2f` | 两端静态 region 的规范化 N/C/H/W extent 必须相同。SG2260E/RV 的 FP16/FP32 G2L→L2L→L2S 与独立 S2S 已在 `(4,32)` 精确 CModel 验证。跨 dtype 仅本地；TPU-Kernel 拒绝 FP16↔BF16。RV 转换类型闭集包含 FP16/BF16/FP32，但当前只有 FP16→BF16 精确 codegen 证据，两向均无数值证据。 |
+| `ppl_copy` | `tl.tpu.copy` | S2L/L2S/S2S/L2L GDMA/BDC；本地 cast | `rvt_dma_ld/st/cp`，本地浮点转换用 `rvt_cvt_f2f` | 两端静态 region 的规范化 N/C/H/W extent 必须相同。SG2260E/RV 的 FP16/FP32 G2L→L2L→L2S 与独立 S2S 已在 `(4,32)` 精确 CModel/PCIe 验证。跨 dtype 仅本地；TPU-Kernel 拒绝 FP16↔BF16。RV 转换类型闭集包含 FP16/BF16/FP32，但当前只有 FP16→BF16 精确 codegen 证据，两向均无数值证据。 |
 | `ppl_fill` | `tl.tpu.fill` | `tpu_bdc_set_C` | typed CR + `rvt_cp` | RV 当前只开放零填充，用于累加器初始化。 |
 | `ppl_gemm` | `tl.tpu.gemm` | `tpu_bdc_fp_mm` / right-transpose 变体；另有已验证的同格式 FP8 A/B + FP32 C 路径 | `rvt_fmm2[a]_{nn,nt}` | RV 当前只映射 FP16/BF16；local N=H=1；无 `transpose_A`；M/N/K 在 `[1,65535]`。`accumulate` 显式表达读写 C；NT accumulate 的 `rvt_fmm2a_nt` 已有精确源码选择回归但尚无数值证据。TPU-Kernel 的 FP8 NT accumulate 是独立 selector，不能外推给 RV。 |
 | `ppl_add/subtract/mul/div/max` | `tl.tpu.{add,sub,mul,div,max}` | 四则为 `tpu_bdc_fp_*`，max 为 `tpu_bdc_max`；add/sub/mul/max 另有已验证候选 FP8 路径 | `rvt_fadd/fsub/fmul/fdiv/fmax` | RV 当前限同 dtype FP16/BF16/FP32；local N=H=1；右操作数可作 W 维广播。RV broadcast 用逻辑 `(M,W)`、W stride=0 的 FREE_LAYOUT descriptor，避免把 `(M,1)` 错当成由 peer 自动扩展。`div` 配置 RV rsqrt 迭代并以容差验证。TPU-Kernel FP8 div 与全部 RV FP8 映射仍未开放。 |
@@ -93,7 +93,15 @@ CModel runtime 当作板端 runtime。一次 JIT 加载会绑定 `TPUTargetSpec`
 
 PPL 的 `--profiling` 会改变 PPL 自身的 host/codegen 流程；TileLang 已自行生成 device source 与 host wrapper，不能简单转发该参数。实现复用的是 PPL/TPUDNN 的记录协议：`TPUInstructionProfiler` 在独立 worker 中 fresh-compile、加载、单次 dispatch、收集 raw trace，并将可用的 PerfAI/`bigTpuProfile` 输出投影为稳定 JSON。CModel 记录命令文本；PCIe recorder 可提供逐条命令 duration。
 
-PCIe 默认拒绝加载。测试必须显式同时确认 `--allow-pcie` 与 `--allow-pcie-profile`、给出 device id，并由父死亡信号、私有进程组与统一 deadline 监管。SIGTERM、SIGKILL、最终 reap 和 pipe drain 均有硬时限；任一 worker 超时、失败，或成功退出后仍遗留同进程组后代，矩阵立即清理并停止，不继续向可能处于异常状态的板卡发射命令。矩阵默认验收数值正确，以及 `cdm_profile_data_dev*` 中至少存在一份命名为 `global.profile` 或 `cdmlibN_N.profile` 的 raw 文件，并要求目录内所有这类文件非空；只有增加 `--require-decoded-timing` 才把 decoder ready、非空 timing 与所有区间的严格合法性作为硬门禁。每次矩阵只删除自己创建的 JIT scratch，保留 raw/decoded 报告。profiling 的 host 墙钟时间包含记录开销，不能当作无扰动 kernel 性能。
+PCIe 默认拒绝加载。profiling 矩阵必须显式确认 `--allow-pcie` 与
+`--allow-pcie-profile`；纯数值 TPU-Kernel 矩阵使用独立的 `--allow-pcie-load` 确认。两类路径都
+要求唯一 device id，并由父死亡信号、私有进程组与统一 deadline 监管。SIGTERM、SIGKILL、最终
+reap 和 pipe drain 均有硬时限；任一 worker 超时、失败，或成功退出后仍遗留同进程组后代，矩阵
+立即清理并停止，不继续向状态未知的板卡发射命令。profiling 数值/raw 验收还要求
+`cdm_profile_data_dev*` 中存在规范命名且非空的 `global.profile` 或 `cdmlibN_N.profile`；增加
+`--require-decoded-timing` 后，decoder ready、非空 timing 与全部区间合法也成为硬门禁。每次
+矩阵只删除自己创建的 JIT scratch，并保留 raw/decoded 报告。带 recorder 的 host 墙钟时间不能
+当作无扰动 kernel 性能。
 
 ## 6. 已知限制与后续路线
 
