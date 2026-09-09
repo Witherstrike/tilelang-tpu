@@ -82,8 +82,9 @@ def test_library_generator_receives_tpu_config():
     assert generator.mode == "pcie"
 
 
-def test_rv_library_generator_dispatches_to_sg2260e_cmodel(monkeypatch, tmp_path):
-    config = TPUCompileConfig("sg2260e", "rv", "cmodel")
+@pytest.mark.parametrize("runtime", ["cmodel", "pcie"])
+def test_rv_library_generator_dispatches_to_sg2260e_runtime(monkeypatch, tmp_path, runtime):
+    config = TPUCompileConfig("sg2260e", "rv", runtime)
     generator = LibraryGenerator(TPU_TARGET, tpu_config=config)
     captured = {}
 
@@ -92,7 +93,7 @@ def test_rv_library_generator_dispatches_to_sg2260e_cmodel(monkeypatch, tmp_path
                         lambda root, chip: (root, chip))
     monkeypatch.setattr(
         generator,
-        "tpu_compile_cmodel",
+        "tpu_compile_" + runtime,
         lambda timeout, layout: captured.update(timeout=timeout, layout=layout),
     )
 
@@ -114,3 +115,46 @@ def test_rv_library_generator_preserves_structured_pipeline_calls(tmp_path):
     generator._prepare_cmodel_kernel_source(str(source))
 
     assert source.read_text(encoding="utf-8") == original
+
+
+def test_tpu_target_has_standard_attributes():
+    target = tvm.target.Target({"kind": "tpu", "host": "llvm", "keys": ["cpu"]})
+    assert target.kind.name == "tpu"
+    assert target.host.kind.name == "llvm"
+
+
+def test_rv_pcie_links_cross_compiled_checker_and_selected_runtime(monkeypatch, tmp_path):
+    compiler = tmp_path / "riscv-gcc"
+    compiler.touch()
+    firmware = tmp_path / "libfirmware_core.a"
+    firmware.touch()
+    checker = tmp_path / "checker"
+    (checker / "src").mkdir(parents=True)
+    (checker / "include").mkdir()
+    (checker / "src" / "check.c").touch()
+    layout = SimpleNamespace(
+        toolchain_dir=tmp_path, firmware_archive=firmware, release="1.7",
+        kernel_common_include=tmp_path / "kernel", compile_definitions=("__sg2260e__",),
+        include_dirs=(tmp_path,), backend_lib=tmp_path / "backend",
+        runtime_lib=tmp_path / "runtime", ppl_helper_source=tmp_path / "ppl_helper.c")
+    monkeypatch.setenv("PPL_RISCV_CC", str(compiler))
+    monkeypatch.setenv("PPL_PCIE_RUNTIME_LIB", str(tmp_path / "hardware-runtime"))
+    monkeypatch.setattr(libgen_module, "get_tpu_template_dir", lambda: str(tmp_path))
+    generator = LibraryGenerator(TPU_TARGET, tpu_config=TPUCompileConfig("sg2260e", "rv", "pcie"))
+    commands = []
+    monkeypatch.setattr(generator, "_run_tpu_command", lambda cmd, *args: commands.append(cmd))
+    # tpu_compile_pcie publishes the firmware path for the runtime wrapper.
+    monkeypatch.setenv("PPL_KERNEL_PATH", "")
+    generator.tpu_compile_pcie(17, layout)
+    check = next(cmd for cmd in commands if str(checker / "src" / "check.c") in cmd)
+    assert check[0] == str(compiler)
+    assert "-D__sg2260e__" in check and "-DUSING_CMODEL" not in check
+    device_link = next(cmd for cmd in commands if "-Wl,-soname,libkernel.so" in cmd)
+    assert str(tmp_path / "ppl_checker_pcie_0.o") in device_link
+    assert str(firmware) in device_link
+    assert commands[-1][0] == "g++"
+    assert f"-L{tmp_path / 'hardware-runtime'}" in commands[-1]
+    assert "-ltpuv7_emulator" not in commands[-1]
+    compiler.unlink()
+    with pytest.raises(FileNotFoundError, match="cross compiler is missing"):
+        generator.tpu_compile_pcie(17, layout)

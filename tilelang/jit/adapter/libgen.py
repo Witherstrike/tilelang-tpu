@@ -105,9 +105,6 @@ class LibraryGenerator(object):
             if self.tpu_config.device_mode == "rv":
                 if self.tpu_config.chip != "sg2260e":
                     raise ValueError("RV LibraryGenerator currently supports SG2260E only")
-                if self.mode != "cmodel":
-                    raise NotImplementedError(
-                        "SG2260E RV runtime integration currently supports cmodel only")
 
             if self.mode=="pcie":
                 self.tpu_compile_pcie(timeout=timeout, layout=ppl_layout)
@@ -201,14 +198,31 @@ class LibraryGenerator(object):
         return definitions, includes
 
     def tpu_compile_pcie(self, timeout, layout: PPLLayout):
-        cross_compile = str(layout.toolchain_dir / "bin/riscv64-unknown-linux-gnu-")
-        cross_gcc = cross_compile + "gcc"
+        # Match PPL's CROSS_TOOLCHAINS convention; deployments need not put
+        # the Xuantie compiler inside the SDK distribution.
+        toolchain = os.environ.get("CROSS_TOOLCHAINS")
+        compiler_root = (os.path.join(toolchain,
+            "Xuantie-900-gcc-linux-5.10.4-glibc-x86_64-V2.6.1")
+            if toolchain else str(layout.toolchain_dir))
+        cross_gcc = os.environ.get("PPL_RISCV_CC", os.path.join(
+            compiler_root, "bin", "riscv64-unknown-linux-gnu-gcc"))
         if not os.path.isfile(cross_gcc):
-            raise FileNotFoundError(f"PPL PCIe cross compiler is missing: {cross_gcc}")
+            raise FileNotFoundError(
+                f"PPL PCIe cross compiler is missing: {cross_gcc}; "
+                "set PPL_RISCV_CC or CROSS_TOOLCHAINS to the Xuantie toolchain")
+        if not layout.firmware_archive.is_file():
+            raise FileNotFoundError(f"PPL PCIe firmware is missing: {layout.firmware_archive}")
 
         src_dir = get_tpu_template_dir()
         definitions, includes = self._ppl_compile_flags(layout, src_dir)
         common = definitions + ["-Dlibkernel_EXPORTS"] + includes + ["-O3", "-DNDEBUG", "-fPIC"]
+        checker_root = layout.kernel_common_include.parent / "checker"
+        checker_sources = []
+        if self.tpu_config.device_mode == "rv" and layout.release == "1.7":
+            checker_sources = sorted((checker_root / "src").glob("*.c"))
+            if not checker_sources:
+                raise FileNotFoundError(f"PPL checker sources are missing: {checker_root}")
+            common.append(f"-I{checker_root / 'include'}")
         kernel_o = os.path.join(src_dir, "kernel.o")
         helper_o = os.path.join(src_dir, "ppl_helper.o")
         libkernel = os.path.join(src_dir, "libkernel.so")
@@ -220,14 +234,22 @@ class LibraryGenerator(object):
         self._run_tpu_command(
             [cross_gcc, *common, "-c", str(layout.ppl_helper_source), "-o", helper_o],
             "Compile PPL helper", timeout)
+        checker_objects = []
+        for index, source in enumerate(checker_sources):
+            obj = os.path.join(src_dir, f"ppl_checker_pcie_{index}.o")
+            self._run_tpu_command(
+                [cross_gcc, *common, "-c", str(source), "-o", obj],
+                f"Compile PCIe checker {source.name}", timeout)
+            checker_objects.append(obj)
         self._run_tpu_command(
             [cross_gcc, "-shared", "-fPIC", "-Wl,--no-undefined",
-             "-Wl,-soname,libkernel.so", "-o", libkernel, kernel_o, helper_o,
+             "-Wl,-soname,libkernel.so", "-o", libkernel, kernel_o, helper_o, *checker_objects,
              f"-Wl,-rpath,{rpath}", "-Wl,--whole-archive", str(layout.firmware_archive),
              "-Wl,--no-whole-archive", "-lm"],
             "Link PCIe libkernel.so", timeout)
 
         host_common = definitions + includes + ["-O3", "-DNDEBUG", "-std=c++17", "-fPIC"]
+        pcie_runtime = os.environ.get("PPL_PCIE_RUNTIME_LIB", str(layout.runtime_lib))
         kernel_host_o = os.path.join(src_dir, "kernel_host.o")
         main_o = os.path.join(src_dir, "main.o")
         self._run_tpu_command(
@@ -239,8 +261,8 @@ class LibraryGenerator(object):
         self._run_tpu_command(
             ["g++", "-shared", "-fPIC", "-Wl,--no-undefined", "-o",
              os.path.join(src_dir, "main.so"), kernel_host_o, main_o,
-             f"-L{layout.runtime_lib}", "-L/opt/tpuv7/tpuv7-current/lib",
-             f"-Wl,-rpath,{layout.runtime_lib}", "-ltpuv7_rt", "-lpthread"],
+             f"-L{pcie_runtime}",
+             f"-Wl,-rpath,{pcie_runtime}", "-ltpuv7_rt", "-lpthread"],
             "Link PCIe main.so", timeout)
         os.environ["PPL_KERNEL_PATH"] = libkernel
 

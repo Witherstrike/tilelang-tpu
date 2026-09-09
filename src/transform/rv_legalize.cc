@@ -170,6 +170,25 @@ class RVLegalizer : public StmtExprMutator {
 public:
   explicit RVLegalizer(BufferMap buffers) : buffers_(std::move(buffers)) {}
 
+  Stmt VisitStmt_(const LetStmtNode *op) final {
+    arith::Analyzer analyzer;
+    PrimExpr simplified = analyzer.Simplify(op->value);
+    if (simplified.as<IntImmNode>() || simplified.as<FloatImmNode>()) {
+      Map<Var, PrimExpr> replacement;
+      replacement.Set(op->var, simplified);
+      return VisitStmt(Substitute(op->body, replacement));
+    }
+    const auto *value = op->value.as<CallNode>();
+    if (value && value->op.same_as(builtin::tvm_access_ptr())) {
+      // T.macro introduces named pointer lets. Preserve their structured
+      // access expression, including alias chains and non-PPL uses.
+      Map<Var, PrimExpr> replacement;
+      replacement.Set(op->var, op->value);
+      return VisitStmt(Substitute(op->body, replacement));
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+
   Stmt VisitStmt_(const EvaluateNode *op) final {
     const auto *call = op->value.as<CallNode>();
     if (!call || !call->op.same_as(builtin::call_extern()) || call->args.empty())
@@ -195,7 +214,8 @@ public:
     std::unordered_map<std::string, Array<PrimExpr>> operand_shapes;
     for (const OperandSchema &operand : schema_it->second) {
       ICHECK_LT(static_cast<size_t>(operand.argument), call->args.size());
-      const auto *access = call->args[operand.argument].as<CallNode>();
+      PrimExpr operand_value = call->args[operand.argument];
+      const auto *access = operand_value.as<CallNode>();
       ICHECK(access) << name << " operand " << operand.role
                      << " must be represented by tvm_access_ptr";
       Buffer buffer;
@@ -213,7 +233,7 @@ public:
         ICHECK_GE(access->args.size(), 4U)
             << name << " operand " << operand.role
             << " has malformed tvm_access_ptr; expected dtype, data, offset, extent";
-        Var data = GetVarFromAccessPtr(call->args[operand.argument]);
+        Var data = GetVarFromAccessPtr(operand_value);
         ICHECK(buffers_.count(data)) << "Cannot resolve RV operand buffer " << data;
         buffer = buffers_[data];
         PrimExpr offset = access->args[2];
@@ -277,7 +297,7 @@ public:
           Integer(buffer->dtype.code()), Integer(buffer->dtype.bits()),
           Integer(buffer->dtype.lanes()),
           Integer(static_cast<int>(AccessForRole(operand.role))),
-          call->args[operand.argument]};
+          operand_value};
       for (const PrimExpr &dim : shape4)
         view_args.push_back(dim);
       for (const PrimExpr &stride : stride4)

@@ -18,18 +18,23 @@ text.
 
 | Operation | Supported RV form |
 |---|---|
-| copy | global/local load and store, including FREE-layout offset/stride views |
-| add | local FP16 tensor add |
+| copy | global/local DMA, global/global copy, local/local copy or dtype conversion; FREE-layout views |
+| add/subtract/mul/div, add_C/mul_C | local FP16/FP32 arithmetic; tensor RHS broadcasting |
 | fill | FP16/FP32 destination with scalar CR conversion |
 | GEMM | FP16 inputs, FP32 read-write accumulator; NN, NT, and TT `fmm2a` variants |
-| reciprocal square root | FP16, constant iteration count (corpus default 3) |
+| reciprocal square root | FP16/FP32, constant iteration count 1–8 (default 3) |
 | gather | global FP16 table/output, UINT32 index, validated `param_h` |
+| exp2 / sigmoid | local FP32 arithmetic decomposition; exp2 computes natural exp, as in the public API |
+| reduce_sum / reduce_max | local 2D FP16/FP32, dim=1; column-wise RV decomposition |
+| rope_add | local 2D FP16/FP32, even last dimension, non-aliasing output |
+| topk | global contiguous FP32/INT32/UINT32, INT32/UINT32 indices, constant K/length; stable RV selection |
 
-TN GEMM has no SG2260E `fmm2` variant and fails explicitly. Exp and sigmoid
-are outside the available special-function corpus and fail explicitly.
-Reduction fails explicitly because PPL 1.7's generated reduction C asserts and
-the SG2260E RV header has no reduction API. Top-k remains blocked by the PPL
-1.7 RV verifier. Unsupported operations never fall back to atomic APIs.
+TN GEMM has no SG2260E `fmm2` variant and fails explicitly. The original PPL
+reduction/top-k blockers remain, but TileLang now decomposes these operations
+into available RV instructions instead of calling the blocked lowering.
+Unsupported dtype/shape forms still fail without atomic fallback. The new
+decompositions have compilation coverage, not device numerical sign-off.
+See [the all-API handoff](sg2260e_rv_all_apis_handoff.md) for boundaries and tests.
 
 ## Local memory
 
@@ -48,8 +53,10 @@ statement range, so static reuse can overwrite an operand still in flight.
 
 The cmodel build uses the SG2260E (`tpub_7_1_e`) headers, `ppl_helper.c`, all
 PPL checker C sources, `libtpuv7_emulator.so`, TPUv7 runtime, and emulator
-daemon. RV support is intentionally limited to `chip=sg2260e` and
-`runtime_mode=cmodel`; RV PCIe remains a later step.
+daemon. RV supports `chip=sg2260e` with `runtime_mode=cmodel` or `pcie`.
+PCIe cross-compiles the kernel, helper and checker, links SG2260E firmware,
+and links the host wrapper against the deployment's TPUv7 runtime. PCIe
+execution still requires validation on a device host.
 
 Build and run the normal gates:
 
@@ -83,6 +90,8 @@ export TILELANG_RUN_TPU_CMODEL_TESTS=1
   -k 'gemm_accumulation_cmodel_numerics and pipeline'
 ```
 
-Observed SG2260E cmodel results are exact for pipeline copy/add and within
+Historical results from the preceding development iteration (not rerun or
+extended to the new operators in this continuation): SG2260E cmodel results
+were exact for pipeline copy/add and within
 `5.96e-8` for serial and pipeline two-K-tile FP32 GEMM accumulation (test
 tolerance `1e-6`).

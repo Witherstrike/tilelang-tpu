@@ -652,11 +652,39 @@ PrimFunc InferAddress(PrimFunc f) {
   ICHECK(success) << chip.name << " local memory allocation failed. buffers="
                   << alloc_ops.size() << ", lmem=" << bank_num * bank_size
                   << " bytes";
+  bool rv_topk = false;
+  if (f->GetAttr<String>("tir.tpu.device_mode").value_or("") == "rv") {
+    PostOrderVisit(f->body, [&](const ObjectRef &node) {
+      const auto *call = node.as<CallNode>();
+      if (!call || !call->op.same_as(builtin::call_extern()) || call->args.empty()) return;
+      const auto *name = call->args[0].as<StringImmNode>();
+      rv_topk |= name && name->value == "ppl.topk";
+    });
+  }
+  // The RV selection implementation keeps seven scalar tiles in local
+  // memory. Reserve them here so capacity checking includes compiler scratch.
+  int64_t topk_scratch = AlignUp(memUsedWithBC, chip.tensor_align_bytes);
+  if (rv_topk)
+    ICHECK_LE(topk_scratch + 7 * chip.tensor_align_bytes, bank_num * bank_size)
+        << "SG2260E RV top-k scratch exceeds local-memory capacity";
 
   if (success) {
     // std::unordered_map<String, PrimExpr> result;
     auto fn = f.CopyOnWrite();
     auto fn_attr = fn->attrs.CopyOnWrite();
+    if (rv_topk) {
+      fn_attr->dict.Set("tir.tpu.rv.topk_scratch", IntImm(DataType::Int(64), topk_scratch));
+      const std::string prefix = "tir.tpu.lmem.__rv_topk_scratch.";
+      int64_t live_end = 1;
+      for (const auto &entry : live_ranges)
+        live_end = std::max(live_end, static_cast<int64_t>(entry.second.end));
+      fn_attr->dict.Set(prefix + "address", IntImm(DataType::Int(64), topk_scratch));
+      fn_attr->dict.Set(prefix + "size", IntImm(DataType::Int(64), 7 * chip.tensor_align_bytes));
+      fn_attr->dict.Set(prefix + "live_start", IntImm(DataType::Int(64), 0));
+      fn_attr->dict.Set(prefix + "live_end", IntImm(DataType::Int(64), live_end));
+      fn_attr->dict.Set(prefix + "conflicts", String(""));
+      memUsedWithBC = topk_scratch + 7 * chip.tensor_align_bytes;
+    }
     fn_attr->dict.Set("tir.tpu.lmem_chip", String(chip.name));
     fn_attr->dict.Set("tir.tpu.lmem_bank_num",
                       IntImm(DataType::Int(64), chip.bank_num));

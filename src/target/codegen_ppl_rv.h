@@ -49,6 +49,7 @@ private:
   void VisitStmt_(const AttrStmtNode *op) final;
   void VisitStmt_(const LetStmtNode *op) final;
   void VisitStmt_(const EvaluateNode *op) final;
+  void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
   void EmitTensorView(const TensorView &view);
   TensorView ParseTensorView(const CallNode *call) const;
   const TensorView &GetTensorView(const PrimExpr &expr,
@@ -57,6 +58,15 @@ private:
                                   const std::string &operation) const;
   void ValidateSameTensor(const TensorView &lhs, const TensorView &rhs,
                           const std::string &operation) const;
+  void EmitScalar(const ScalarView &value, const TensorView &dst);
+  void EmitConstant(int reg, double value, const TensorView &type);
+  void EmitLocalSlice(const TensorView &view, int reg, const std::string &offset,
+                      int width, int step = 1);
+  void EmitExp(const TensorView &dst, const TensorView &src,
+               const TensorView &work0, const TensorView &work1);
+  int scratch_tr_{8};
+  int scratch_cr_{1};
+  std::unordered_map<int, std::string> register_addresses_;
 
   std::unordered_map<const VarNode *, TensorView> tensor_views_;
   std::unordered_map<const VarNode *, ScalarView> scalar_views_;

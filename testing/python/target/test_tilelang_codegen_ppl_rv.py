@@ -322,12 +322,12 @@ def atomic_kernel_inner(A: T.Buffer((1,), "float16")):
     assert "atomic_kernel_inner" in source
 
 
-def test_topk_fails_at_the_documented_ppl_boundary():
+def test_topk_rejects_incomplete_operands():
     source = SOURCE.replace('"ppl.add"', '"ppl.topk"')
     mod = tvm.tir.transform.LowerOpaqueBlock()(_module(source))
     mod = tilelang.transform.AddressAssign()(mod)
     mod = tilelang.transform.RVLegalizeAndAllocateRegisters("sg2260e")(mod)
-    with pytest.raises(tvm.error.TVMError, match="PPL 1.7 SG2260E RV lowering"):
+    with pytest.raises(tvm.error.TVMError, match="expects values, indices, src, K"):
         tvm.get_global_func("target.build.tilelang_ppl_rv")(mod)
 
 
@@ -522,13 +522,13 @@ def _unsupported_source(operation, operand_count):
 @pytest.mark.parametrize(
     ("operation", "operand_count", "diagnostic"),
     [
-        ("ppl.exp", 5, "does not implement ppl.rv.exp"),
-        ("ppl.sigmoid", 6, "does not implement ppl.rv.sigmoid"),
-        ("ppl.reduce_sum", 3, "unavailable in PPL 1.7 SG2260E RV"),
-        ("ppl.topk", 3, "PPL 1.7 SG2260E RV lowering"),
+        ("ppl.exp", 5, "exp requires FP32 local tensors"),
+        ("ppl.sigmoid", 6, "exp requires FP32 local tensors"),
+        ("ppl.reduce_sum", 3, "expects src, dst, tmp"),
+        ("ppl.topk", 3, "expects values, indices, src, K"),
     ],
 )
-def test_gate2_unsupported_ops_fail_without_atomic_fallback(operation,
+def test_invalid_composite_operands_fail_without_atomic_fallback(operation,
                                                             operand_count,
                                                             diagnostic):
     source = _unsupported_source(operation, operand_count)

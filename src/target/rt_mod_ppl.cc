@@ -18,9 +18,34 @@
  */
 
 #include "codegen_ppl.h"
+#include <tvm/target/target_kind.h>
 
 namespace tvm {
 namespace codegen {
+
+// A CPU-only TVM build may not contain the downstream TPU target patch.
+// Register the source backend here without overriding patched TVM builds.
+static const bool tpu_target_registered = []() {
+  if (!TargetKind::Get("tpu").defined()) {
+    TargetKindRegEntry::RegisterOrGet("tpu")
+        .set_name()
+        .set_default_device_type(kDLCPU)
+        .add_attr_option<Array<String>>("keys")
+        .add_attr_option<String>("tag")
+        .add_attr_option<String>("device")
+        .add_attr_option<String>("model")
+        .add_attr_option<Array<String>>("libs")
+        .add_attr_option<Target>("host")
+        .add_attr_option<Integer>("from_device")
+        .add_attr_option<Integer>("target_device_type")
+        .set_default_keys({"cpu"})
+        .add_attr_option<String>("mcpu")
+        .add_attr_option<String>("march")
+        .add_attr_option<Integer>("workspace-byte-alignment")
+        .add_attr_option<Integer>("constants-byte-alignment");
+  }
+  return true;
+}();
 
 // return source code.
 std::string BuildTileLangPPL(IRModule mod) {

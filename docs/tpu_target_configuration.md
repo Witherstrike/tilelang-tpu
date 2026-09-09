@@ -30,7 +30,8 @@ The legacy `mode="cmodel"`/`mode="pcie"` argument remains an alias for
 
 SG2260E RV now has a structured TIR legalization/register-allocation pass. It
 runs after address assignment and records explicit GR/TR/CR and operand-view
-layout information; see `sg2260e_rv_legalization.md`. A dedicated RV C emitter
-is still the next backend step. The atomic `tpu_*` emitter is not a substitute
-for that path, and a working SG2260E atomic baseline can continue to select
-`device_mode="atomic"`.
+layout information; see `sg2260e_rv_legalization.md`. The dedicated RV C emitter
+supports both runtime selections. See [the all-API handoff](sg2260e_rv_all_apis_handoff.md)
+for supported forms, deployment variables and outstanding device verification.
+The atomic `tpu_*` emitter remains separate; existing atomic kernels can
+continue to select `device_mode="atomic"`.
