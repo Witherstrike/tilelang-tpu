@@ -778,18 +778,21 @@ class TLTPUSourceWrapper(object):
             
             arg_declarations.append(f'  char* {arg_name} = static_cast<char*>(args[{i}]);')
             arg_declarations.append(f'  size_t {arg_name}_size = {data_size};')
-            device_declarations.append(f'  void *dev_{arg_name};')
-            malloc_statements.append(f'  tpuRtMalloc((void **)(&dev_{arg_name}), {arg_name}_size, 0);')
-            memcpy_s2d_statements.append(f'  tpuRtMemcpyS2D(dev_{arg_name}, {arg_name}, {arg_name}_size);')
+            device_declarations.append(f'  void *dev_{arg_name} = nullptr;')
+            malloc_statements.append(f'  TPU_CHECK(tpuRtMalloc((void **)(&dev_{arg_name}), {arg_name}_size, 0));')
+            memcpy_s2d_statements.append(f'  TPU_CHECK(tpuRtMemcpyS2D(dev_{arg_name}, {arg_name}, {arg_name}_size));')
             
             if i in self.output_indices:
-                memcpy_d2s_statements.append(f'  tpuRtMemcpyD2S({arg_name}, dev_{arg_name}, {arg_name}_size);')
+                memcpy_d2s_statements.append(f'  TPU_CHECK(tpuRtMemcpyD2S({arg_name}, dev_{arg_name}, {arg_name}_size));')
             
-            free_statements.append(f'  tpuRtFree(&dev_{arg_name}, 0);')
+            free_statements.append(
+                f'  if (dev_{arg_name}) {{\n'
+                f'    int status = checked(tpuRtFree(&dev_{arg_name}, 0), \"tpuRtFree({arg_name})\");\n'
+                f'    if (!cleanup_status) cleanup_status = status;\n'
+                f'  }}')
             kernel_call_args.append(f'(unsigned long long)dev_{arg_name}')
         
-        kernel_call = f'  int rst = {function_name}({", ".join(kernel_call_args)});'
-        pure_kernel_call = f'  rst = {function_name}({", ".join(kernel_call_args)});'
+        kernel_call = f'  rst = {function_name}({", ".join(kernel_call_args)});'
         
         # 格式化内容
         formatted_content = template_content.format(
@@ -799,8 +802,7 @@ class TLTPUSourceWrapper(object):
             memcpy_s2d_statements="\n".join(memcpy_s2d_statements),
             memcpy_d2s_statements="\n".join(memcpy_d2s_statements),
             free_statements="\n".join(free_statements),
-            kernel_call=kernel_call,
-            pure_kernel_call=pure_kernel_call
+            kernel_call=kernel_call
         )
         
         if output_file is None:

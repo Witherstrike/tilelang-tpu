@@ -245,7 +245,7 @@ class LibraryGenerator(object):
             [cross_gcc, "-shared", "-fPIC", "-Wl,--no-undefined",
              "-Wl,-soname,libkernel.so", "-o", libkernel, kernel_o, helper_o, *checker_objects,
              f"-Wl,-rpath,{rpath}", "-Wl,--whole-archive", str(layout.firmware_archive),
-             "-Wl,--no-whole-archive", "-lm"],
+             "-Wl,--no-whole-archive", "-ldl", "-lm"],
             "Link PCIe libkernel.so", timeout)
 
         host_common = definitions + includes + ["-O3", "-DNDEBUG", "-std=c++17", "-fPIC"]

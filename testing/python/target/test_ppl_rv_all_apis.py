@@ -5,6 +5,7 @@ twice in one process. See docs/sg2260e_rv_all_apis_handoff.md.
 """
 import argparse
 import ctypes
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -187,6 +188,13 @@ def lower_case(op, pipeline=False):
         start = tvm.tir.AttrStmt(marker, "tpu_parallel_start", 0, tvm.tir.Evaluate(0))
         end = tvm.tir.AttrStmt(marker, "tpu_parallel_end", 0, tvm.tir.Evaluate(0))
         mod = tvm.IRModule({"main_kernel_inner": func.with_body(tvm.tir.SeqStmt([start, func.body, end]))})
+    evidence = os.environ.get("TILELANG_TPU_TEST_ARTIFACTS")
+    if evidence:
+        path = Path(evidence)
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "source.py").write_text(source)
+        (path / "original.tir").write_text(original.script())
+        (path / "legalized.tir").write_text(mod.script())
     code = tvm.get_global_func("target.build.tilelang_ppl_rv")(mod)
     return original, code, inputs, outputs, indices
 
@@ -259,13 +267,29 @@ def run_device(op, runtime, pipeline=False, compile_only=False):
     if compile_only:
         print(f"COMPILED {runtime} {op} pipeline={pipeline}: {generator.libpath}", flush=True)
         return
+    print(f"BUILT {runtime} {op}; loading runtime", flush=True)
     library = ctypes.CDLL(generator.libpath)
     library.tilelang_tpu_run.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
     library.tilelang_tpu_run.restype = ctypes.c_int
     actual = [np.full_like(x, 42) for x in expected]
     arrays = inputs + actual
     args = (ctypes.c_void_p * len(arrays))(*(x.ctypes.data for x in arrays))
-    assert library.tilelang_tpu_run(args) == 0
+    print(f"RUN {runtime} {op} pipeline={pipeline}", flush=True)
+    status = library.tilelang_tpu_run(args)
+    evidence = os.environ.get("TILELANG_TPU_TEST_ARTIFACTS")
+    if evidence:
+        np.savez(Path(evidence) / "arrays.npz",
+                 **{f"input_{i}": x for i, x in enumerate(inputs)},
+                 **{f"expected_{i}": x for i, x in enumerate(expected)},
+                 **{f"actual_{i}": x for i, x in enumerate(actual)})
+    assert status == 0, f"tilelang_tpu_run returned {status}"
+    for i, (got, want) in enumerate(zip(actual, expected)):
+        finite = np.isfinite(got) & np.isfinite(want)
+        delta = np.abs(got[finite].astype(np.float64) - want[finite].astype(np.float64))
+        relative = delta / np.maximum(np.abs(want[finite].astype(np.float64)), np.finfo(np.float64).tiny)
+        print(json.dumps(dict(output=i, shape=list(want.shape), dtype=str(want.dtype),
+                              max_abs=float(delta.max(initial=0)),
+                              max_rel=float(relative.max(initial=0)))), flush=True)
     for got, want in zip(actual, expected):
         if np.issubdtype(want.dtype, np.integer):
             np.testing.assert_array_equal(got, want)
@@ -298,3 +322,15 @@ if __name__ == "__main__":
             raise SystemExit("Failed cases: " + ", ".join(failed))
     else:
         run_device(args.case, args.runtime, args.pipeline, args.compile_only)
+
+
+@pytest.mark.parametrize("op", ["exp2", "topk", "topk_int32"])
+def test_signed_descriptors_use_sdk_subtype(op):
+    # PPL 1.7 int32 copy/fill emits is_int=0, subtype=1. Setting bit 63
+    # instead corrupts the emulator's element-width interpretation.
+    import re
+    code = lower_case(op)[1]
+    descriptors = re.findall(r"RVT_(?:CFGTR|CFGGR|CR)\(\d+, (\d+), TEEW_E32, (\d+),", code)
+    assert descriptors
+    assert all(high_bit == "0" for high_bit, _ in descriptors)
+    assert any(subtype == "1" for _, subtype in descriptors)

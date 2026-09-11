@@ -323,11 +323,11 @@ void CodeGenTileLangPPLRV::EmitTensorView(const TensorView &view) {
   configured_registers_[register_key] = payload;
   PrintIndent();
   stream << (global ? "RVT_CFGGR(" : "RVT_CFGTR(") << view.register_number
-         // PPL 1.7's SG2260E gather golden configures uint32 indices with
-         // is_int=0; preserve that generated descriptor encoding exactly.
+         // PPL 1.7 encodes signed integers in subtype, not the high is_int
+         // bit (confirmed against generated int32 copy and uint32 gather).
+         << ", 0, " << ElementWidth(view.dtype_code, view.dtype_bits)
          << ", " << (view.dtype_code == DataType::kInt)
-         << ", " << ElementWidth(view.dtype_code, view.dtype_bits)
-         << ", 0, " << LayoutName(view.layout) << ", ";
+         << ", " << LayoutName(view.layout) << ", ";
   stream << address;
   stream << ");\n";
   PrintIndent();
@@ -445,9 +445,9 @@ void CodeGenTileLangPPLRV::EmitScalar(const ScalarView &value, const TensorView 
                                                           : "DT_INT32"))
            << ", RM_HALF_TO_EVEN);\n";
     PrintIndent();
-    stream << "RVT_CR(" << value.register_number << ", " << (dst.dtype_code == DataType::kInt) << ", "
+    stream << "RVT_CR(" << value.register_number << ", 0, "
            << ElementWidth(dst.dtype_code, dst.dtype_bits)
-           << ", 0, " << temporary << ".u32);\n";
+           << ", " << (dst.dtype_code == DataType::kInt) << ", " << temporary << ".u32);\n";
     PrintIndent();
     stream << "}\n";
 }
@@ -468,9 +468,8 @@ void CodeGenTileLangPPLRV::EmitLocalSlice(const TensorView &view, int reg,
   int channels = AsInt(view.shape[1], "C");
   int bytes = view.dtype_bits / 8;
   int pitch = ((AsInt(view.shape[3], "W") * bytes + 63) / 64) * 64 / bytes;
-  stream << "RVT_CFGTR(" << reg << ", " << (view.dtype_code == DataType::kInt)
-         << ", " << ElementWidth(view.dtype_code, view.dtype_bits)
-         << ", 0, FREE_LAYOUT, " << register_addresses_.at(view.register_number)
+  stream << "RVT_CFGTR(" << reg << ", 0, " << ElementWidth(view.dtype_code, view.dtype_bits)
+         << ", " << (view.dtype_code == DataType::kInt) << ", FREE_LAYOUT, " << register_addresses_.at(view.register_number)
          << " + (" << offset << ") * " << bytes << ");\n"
          << "RVT_CFGTR_SHAPE(" << reg << ", 1, " << channels << ", 1, " << width << ");\n"
          << "RVT_TR_STRIDE(" << reg << ", FREE_LAYOUT, "
@@ -500,16 +499,20 @@ void CodeGenTileLangPPLRV::EmitExp(const TensorView &dst, const TensorView &src,
   stream << "rvt_fmax(" << d << ", " << x << ", " << c << ");\n";
   EmitConstant(c, 89, dst);
   stream << "rvt_fmin(" << d << ", " << d << ", " << c << ");\n";
-  // Restore NaNs after clamping, including in-place exp.
-  stream << "rvt_fcmpeq(" << d << ", " << r << ", " << r << ", " << d << ", " << r << ");\n";
+  // Restore NaNs after clamping using FP32 bit classification; the SDK's
+  // floating self-comparison does not reliably detect unordered operands.
+  TensorView integer = work0;
+  integer.dtype_code = DataType::kInt;
+  EmitTensorView(integer);
+  stream << "RVT_CR(" << c << ", 0, TEEW_E32, 1, 0x7fffffff);\n"
+         << "rvt_and(" << n << ", " << r << ", " << c << ");\n"
+         << "RVT_CR(" << c << ", 0, TEEW_E32, 1, 0x7f800000);\n"
+         << "rvt_cmpgt(" << d << ", " << n << ", " << c << ", " << r << ", " << d << ");\n";
   EmitConstant(c, 0.5, dst);
   stream << "rvt_fmul(" << d << ", " << d << ", " << c << ");\n";
   EmitConstant(c, 1.4426950408889634, dst);
   stream << "rvt_fmul(" << r << ", " << d << ", " << c << ");\n"
          << "rvt_cfg_round_mode(0);\n";
-  TensorView integer = work0;
-  integer.dtype_code = DataType::kInt;
-  EmitTensorView(integer);
   stream << "rvt_cvt_f2i(" << n << ", " << r << ");\n"
          << "rvt_cvt_i2f(" << r << ", " << n << ");\n";
   EmitConstant(c, 0.6931471805599453, dst);
@@ -864,13 +867,13 @@ void CodeGenTileLangPPLRV::VisitStmt_(const EvaluateNode *op) {
     stream << "{\n";
     for (int i = 0; i < 7; ++i) {
       bool value = i == 0 || i == 1 || i == 5;
-      stream << "RVT_CFGTR(" << a+i << ", " << (value ? src.dtype_code == DataType::kInt : true)
-             << ", TEEW_E32, 0, HW_ALIGN_LAYOUT, " << scratch->second + i*64 << ");\n"
+      stream << "RVT_CFGTR(" << a+i << ", 0, TEEW_E32, " << (value ? src.dtype_code == DataType::kInt : true)
+             << ", HW_ALIGN_LAYOUT, " << scratch->second + i*64 << ");\n"
              << "RVT_CFGTR_SHAPE(" << a+i << ", 1, 1, 1, 1);\n";
     }
     auto global_scalar = [&](const TensorView &v, const std::string &offset) {
-      stream << "RVT_CFGGR(" << v.register_number << ", " << (v.dtype_code == DataType::kInt)
-             << ", TEEW_E32, 0, CONTINUOUS_LAYOUT, " << register_addresses_.at(v.register_number)
+      stream << "RVT_CFGGR(" << v.register_number << ", 0, TEEW_E32, " << (v.dtype_code == DataType::kInt)
+             << ", CONTINUOUS_LAYOUT, " << register_addresses_.at(v.register_number)
              << " + (" << offset << ") * 4);\nRVT_CFGGR_REG_SHAPE(" << v.register_number << ", 1, 1, 1, 1);\n";
       configured_registers_.erase((2 << 16) | v.register_number);
     };
@@ -880,7 +883,7 @@ void CodeGenTileLangPPLRV::VisitStmt_(const EvaluateNode *op) {
            << "rvt_cp(" << bi << ", " << minus_one << ");\n"
            << "rvt_cp(" << b << ", " << zero << ");\n"
            << "for (int rv_j=0; rv_j<" << length << "; ++rv_j) {\n"
-           << "RVT_CR(" << jreg << ", 1, TEEW_E32, 0, rv_j);\n";
+           << "RVT_CR(" << jreg << ", 0, TEEW_E32, 1, rv_j);\n";
     global_scalar(src, "rv_j");
     stream << "rvt_dma_ld(" << a << ", " << src.register_number << ");\n"
            << "rvt_cp(" << eligible << ", " << one << ");\n"
@@ -893,11 +896,20 @@ void CodeGenTileLangPPLRV::VisitStmt_(const EvaluateNode *op) {
     stream << cmp << "(" << ti << ", " << a << ", " << b << ", " << jreg << ", " << bi << ");\n"
            << cmp << "(" << tv << ", " << a << ", " << b << ", " << a << ", " << b << ");\n";
     if (src.dtype_code == DataType::kFloat) {
-      // Finite values precede NaNs in either direction; ties keep first index.
-      stream << "rvt_fcmpeq(" << ti << ", " << b << ", " << b << ", " << ti << ", " << jreg << ");\n"
-             << "rvt_fcmpeq(" << tv << ", " << b << ", " << b << ", " << tv << ", " << a << ");\n"
-             << "rvt_fcmpeq(" << ti << ", " << a << ", " << a << ", " << ti << ", " << bi << ");\n"
-             << "rvt_fcmpeq(" << tv << ", " << a << ", " << a << ", " << tv << ", " << b << ");\n";
+      // Classify NaNs from FP32 bits. RV floating self-comparison does not
+      // provide IEEE unordered detection on this SDK. Reuse the exclusion
+      // scratch after its last use, and restore the loop-index CR afterwards.
+      auto nan_select = [&](int value, int index_value, int tensor_value) {
+        stream << "RVT_CR(" << jreg << ", 0, TEEW_E32, 1, 0x7fffffff);\n"
+               << "rvt_and(" << previous << ", " << value << ", " << jreg << ");\n"
+               << "RVT_CR(" << jreg << ", 0, TEEW_E32, 1, 0x7f800000);\n"
+               << "rvt_cmpgt(" << previous << ", " << previous << ", " << jreg << ", " << one << ", " << zero << ");\n"
+               << "RVT_CR(" << jreg << ", 0, TEEW_E32, 1, rv_j);\n"
+               << "rvt_cmpeq(" << ti << ", " << previous << ", " << one << ", " << index_value << ", " << ti << ");\n"
+               << "rvt_cmpeq(" << tv << ", " << previous << ", " << one << ", " << tensor_value << ", " << tv << ");\n";
+      };
+      nan_select(b, jreg, a);
+      nan_select(a, bi, b);
     }
     stream << "rvt_cmpeq(" << ti << ", " << bi << ", " << minus_one << ", " << jreg << ", " << ti << ");\n"
            << "rvt_cmpeq(" << tv << ", " << bi << ", " << minus_one << ", " << a << ", " << tv << ");\n"
