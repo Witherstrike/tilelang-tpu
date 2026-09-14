@@ -77,6 +77,7 @@ def _is_valid_raw_rvt_symbol(name: str) -> bool:
 # contract test; accepting an arbitrary name from either namespace would let a
 # typo fall through to CodeGenC's generic extern emitter.
 _PORTABLE_TPU_EXTERNS = frozenset({
+    "tl.tpu.embedding",
     "tl.tpu.add_scalar",
     "tl.tpu.mul_scalar",
     "tl.tpu.rsqrt",
@@ -105,6 +106,7 @@ _TPUKERNEL_EXTERNS = frozenset({
 # closed prevents an arbitrary nested ``tl.region`` from becoming a residual
 # BufferLoad escape hatch merely because it appears under a known extern.
 _TPU_SEMANTIC_REGION_ARGS = {
+    "tl.tpu.embedding": (1, 2, 3),
     "tl.tpu.copy": (1, 2),
     "tl.tpu.fill": (1,),
     "tl.tpu.gemm": (1, 2, 3),

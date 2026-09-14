@@ -539,7 +539,7 @@ private:
       for (size_t i = 1; i <= 5; ++i) {
         mark_arg(i, BufferAccessKind::kConservative);
       }
-    } else if (op_name == "tl.tpukernel.gather") {
+    } else if (op_name == "tl.tpukernel.gather" || op_name == "tl.tpu.embedding") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);

@@ -1085,7 +1085,7 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
                  << dtype << ");\n";
     this->PrintIndent();
     this->stream << "}\n";
-  } else if (op_name == "tl.tpukernel.gather") {
+  } else if (op_name == "tl.tpukernel.gather" || op_name == "tl.tpu.embedding") {
     ICHECK_EQ(op->args.size(), 5U)
         << op_name << " expects output, param, index, and param_h";
     std::array<SemanticTensorOperand, 3> operands{};
@@ -1140,6 +1140,31 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     const std::string &dst = tensors[0];
     const std::string &param = tensors[1];
     const std::string &index = tensors[2];
+    if (op_name == "tl.tpu.embedding") {
+      ICHECK(dtype_ == DataType::Float(16) || dtype_ == DataType::Float(32) ||
+             dtype_ == DataType::BFloat(16))
+          << op_name << " requires FP16, BF16, or FP32 payloads";
+    }
+    if (target_programming_model_ == "rv") {
+      // Row-major global tables: reinterpret logical C rows as DMA H rows.
+      stream << "{\n";
+      for (size_t i = 0; i < tensors.size(); ++i) {
+        const auto &t = tensors[i];
+        stream << "__tilelang_tpu_tensor_info emb" << i << " = " << t << ";\n";
+        stream << "emb" << i << ".shape = (dim4){1,1," << t
+               << ".shape.c," << t << ".shape.w};\n";
+        // Whole global descriptors intentionally carry zero stride with
+        // default_stride=true. FREE_LAYOUT needs explicit contiguous strides.
+        stream << "emb" << i << ".stride = (dim4){" << t << ".shape.c*"
+               << t << ".shape.w," << t << ".shape.c*" << t << ".shape.w,"
+               << t << ".shape.w,1};\n";
+        EmitRVDescriptor("emb" + std::to_string(i), 32 + i, true,
+                         i == 2 ? "DT_UINT32" : dtype, false);
+      }
+      stream << "rvt_dma_hgather(32, 33, 34, 0);\n}\n";
+      return true;
+    }
+
     this->PrintIndent();
     this->stream << "{\n";
     this->PrintIndent();

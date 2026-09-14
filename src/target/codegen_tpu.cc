@@ -706,7 +706,7 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           op_name == "tl.tpu.reduce_sum" ||
           op_name == "tl.tpu.reduce_max" ||
           op_name == "tl.tpu.exp" ||
-          op_name == "tl.tpu.sigmoid";
+          op_name == "tl.tpu.sigmoid" || op_name == "tl.tpu.embedding";
       ICHECK(is_supported_portable_op)
           << "Unknown backend-neutral TPU operation " << op_name;
       ICHECK_EQ(rvt_direct_call_count_, 0)

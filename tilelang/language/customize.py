@@ -964,3 +964,14 @@ def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
     odd_inpptr2 = _tpu_tensor_region(odd_inp2, "r")
     return T.call_extern("handle", "tl.tpukernel.rope_add", outptr, even_inpptr1, even_inpptr2,
                          odd_inpptr1, odd_inpptr2)
+
+
+def ppl_embedding(out, weight, indices):
+    """Global row lookup: weight=(V,D), indices=(N,1) uint32, out=(N,D).
+
+    Indices must lie in [0,V). The caller validates token IDs before launch.
+    No padding index, negative indexing, or training gradient is implied.
+    """
+    call = ppl_gather(out, weight, indices, int(weight.shape[0]))
+    _require_dtype("ppl_embedding weight", weight, _TPU_BASE_FLOAT_DTYPES)
+    return T.call_extern("handle", "tl.tpu.embedding", *call.args[1:])

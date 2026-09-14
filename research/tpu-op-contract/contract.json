@@ -7,6 +7,7 @@
   "scope": {
     "description": "Current TileLang TPU frontend/internal operation contract for BM1690 TPU-Kernel and SG2260E TPU-Kernel/RV, with evidence scoped by dtype, variant, target, and execution mode.",
     "included_operations": [
+      "embedding",
       "copy",
       "fill",
       "gemm",
@@ -35,7 +36,7 @@
   "invariants": [
     {
       "id": "semantic-buffer.region-abi",
-      "applies_to_operations": ["copy", "fill", "gemm", "add", "sub", "mul", "div", "max", "scalar", "exp", "sigmoid", "rsqrt", "reduce", "gather", "topk", "rope"],
+      "applies_to_operations": ["embedding", "copy", "fill", "gemm", "add", "sub", "mul", "div", "max", "scalar", "exp", "sigmoid", "rsqrt", "reduce", "gather", "topk", "rope"],
       "category": "memory",
       "expression": "every buffer operand crosses the typed TPU semantic ABI as tl.region(BufferLoad, access_mask, logical_extents); non-copy operations require a zero-min whole-buffer region whose dtype, source rank, normalized shape, scope, and storage identity match a compiler-owned descriptor; copy validates its explicitly selected subregion",
       "status": "enforced",
@@ -129,6 +130,139 @@
     }
   ],
   "operations": [
+    {
+      "id": "embedding",
+      "frontend_symbols": [
+        "T.ppl_embedding"
+      ],
+      "internal_symbols": [
+        "tl.tpu.embedding"
+      ],
+      "backend_applicability": [
+        "tpukernel",
+        "rv"
+      ],
+      "semantics": "Global row embedding lookup with uint32 valid token IDs. Public API derives table height from weight shape. RV emits DMA H-gather with explicit contiguous global strides.",
+      "parameters": [
+        {
+          "name": "out",
+          "kind": "buffer",
+          "direction": "out",
+          "required": true,
+          "dtype_role": "payload",
+          "memory_scope": "global",
+          "description": "Gather output."
+        },
+        {
+          "name": "weight",
+          "kind": "buffer",
+          "direction": "in",
+          "required": true,
+          "dtype_role": "payload",
+          "memory_scope": "global",
+          "description": "Source parameter table."
+        },
+        {
+          "name": "indices",
+          "kind": "buffer",
+          "direction": "in",
+          "required": true,
+          "dtype_role": "index",
+          "memory_scope": "global",
+          "description": "Unsigned 32-bit indices."
+        }
+      ],
+      "effects": {
+        "reads": [
+          "weight",
+          "indices"
+        ],
+        "writes": [
+          "out"
+        ],
+        "read_writes": [],
+        "conditional": [],
+        "notes": []
+      },
+      "constraints": [
+        {
+          "id": "embedding.global",
+          "category": "memory",
+          "expression": "out,weight,indices are global",
+          "status": "enforced",
+          "enforced_at": "frontend",
+          "description": "Current mapping selects S2S gather only.",
+          "evidence_ids": [
+            "src.frontend"
+          ]
+        },
+        {
+          "id": "embedding.types",
+          "category": "dtype",
+          "expression": "dtype(out)==dtype(weight) in {float16,bfloat16,float32} and dtype(indices)==uint32",
+          "status": "enforced",
+          "enforced_at": "frontend",
+          "description": "FP16/BF16/FP32 payloads on the public embedding API; FP8 rejected.",
+          "evidence_ids": [
+            "src.frontend",
+            "src.codegen-tpu",
+            "src.codegen-tpukernel"
+          ]
+        },
+        {
+          "id": "embedding.disjoint",
+          "category": "aliasing",
+          "expression": "storage(out),storage(weight),storage(indices) are pairwise distinct",
+          "status": "enforced",
+          "enforced_at": "frontend",
+          "description": "The S2S gather contract does not define in-place or index/payload aliasing.",
+          "evidence_ids": [
+            "src.frontend"
+          ]
+        },
+        {
+          "id": "embedding.shape-contract",
+          "category": "shape",
+          "expression": "weight=(V,width), out=(count,width), indices=(count,1), and V>0 is a compile-time integer",
+          "status": "enforced",
+          "enforced_at": "frontend",
+          "description": "Table height is derived from the static global weight shape; native code verifies the shared ABI height.",
+          "evidence_ids": [
+            "src.frontend",
+            "src.codegen-tpu"
+          ]
+        },
+        {
+          "id": "embedding.index-bounds",
+          "category": "value",
+          "expression": "0 <= indices[i,0] < V for every i",
+          "status": "documented",
+          "enforced_at": "not_enforced",
+          "description": "Index values are runtime data; callers must satisfy the DMA primitive's range precondition.",
+          "evidence_ids": [
+            "manual.ppl-1.7",
+            "sdk.header-71",
+            "sdk.header-71e"
+          ]
+        }
+      ],
+      "failure_policy": [
+        {
+          "condition": "unsupported payload/index dtype, non-global operand, storage alias, malformed shape, or invalid static weight shape",
+          "phase": "frontend",
+          "action": "reject",
+          "diagnostic": "Reject statically invalid S2S gather forms; runtime index bounds remain a caller precondition.",
+          "conformance": "implemented"
+        }
+      ],
+      "evidence_ids": [
+        "src.frontend",
+        "src.codegen-tpu",
+        "src.codegen-tpukernel",
+        "src.effects",
+        "test.llama-ops"
+      ]
+    },
     {
       "id": "copy",
       "frontend_symbols": ["T.ppl_copy"],
@@ -607,6 +741,16 @@
     }
   ],
   "evidence": [
+    {
+      "id": "test.llama-ops",
+      "kind": "test_source",
+      "source_root": "repo",
+      "path": "testing/python/jit/test_tpu_llama_ops.py",
+      "locator": "test_lower, run",
+      "observed_at": "2026-09-14T21:00:00+08:00",
+      "time_precision": "second",
+      "summary": "Independent Llama APIs, two-backend source tests and opt-in fresh-process numerical cases; test source does not authorize a numerical stage."
+    },
     {
       "id": "test.rv-essential",
       "kind": "test_source",
@@ -2945,6 +3089,160 @@
     }
   ],
   "capabilities": [
+    {
+      "id": "embedding.float",
+      "operation_id": "embedding",
+      "variant": "global valid-token embedding lookup",
+      "dtype_bindings": [
+        {
+          "out": "float32",
+          "weight": "float32",
+          "indices": "uint32"
+        },
+        {
+          "out": "float16",
+          "weight": "float16",
+          "indices": "uint32"
+        },
+        {
+          "out": "bfloat16",
+          "weight": "bfloat16",
+          "indices": "uint32"
+        }
+      ],
+      "constraints": [
+        "embedding.global",
+        "embedding.types",
+        "embedding.disjoint",
+        "embedding.shape-contract",
+        "embedding.index-bounds"
+      ],
+      "target_results": {
+        "bm1690.tpukernel": {
+          "support_status": "unverified",
+          "implementation_conformance": "conforming",
+          "reason": "Shared embedding source route; numerical stages require separate scoped artifacts.",
+          "verification": {
+            "declared": {
+              "status": "passed",
+              "evidence_ids": [
+                "src.frontend"
+              ],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "Public ppl_embedding validates the global row lookup contract."
+            },
+            "codegen_passed": {
+              "status": "unverified",
+              "evidence_ids": [],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "No qualifying artifact is attached for this stage; see the separately scoped Llama validation report."
+            },
+            "cmodel_numeric_passed": {
+              "status": "unverified",
+              "evidence_ids": [],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "No qualifying artifact is attached for this stage; see the separately scoped Llama validation report."
+            },
+            "pcie_numeric_passed": {
+              "status": "unverified",
+              "evidence_ids": [],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "No qualifying artifact is attached for this stage; see the separately scoped Llama validation report."
+            },
+            "sdk_declared": {
+              "status": "unverified",
+              "evidence_ids": [],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "No qualifying artifact is attached for this stage; see the separately scoped Llama validation report."
+            }
+          }
+        },
+        "sg2260e.tpukernel": {
+          "support_status": "supported",
+          "implementation_conformance": "conforming",
+          "reason": "Shared embedding source route; numerical stages require separate scoped artifacts.",
+          "verification": {
+            "declared": {
+              "status": "passed",
+              "evidence_ids": [
+                "src.frontend"
+              ],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "Public ppl_embedding validates the global row lookup contract."
+            },
+            "codegen_passed": {
+              "status": "passed",
+              "evidence_ids": [
+                "test.llama-ops",
+                "src.codegen-tpukernel"
+              ],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "Both SG2260E backend source paths are covered by parameterized API tests."
+            },
+            "cmodel_numeric_passed": {
+              "status": "unverified",
+              "evidence_ids": [],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "No qualifying artifact is attached for this stage; see the separately scoped Llama validation report."
+            },
+            "pcie_numeric_passed": {
+              "status": "unverified",
+              "evidence_ids": [],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "No qualifying artifact is attached for this stage; see the separately scoped Llama validation report."
+            },
+            "sdk_declared": {
+              "status": "unverified",
+              "evidence_ids": [],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "No qualifying artifact is attached for this stage; see the separately scoped Llama validation report."
+            }
+          }
+        },
+        "sg2260e.rv": {
+          "support_status": "supported",
+          "implementation_conformance": "conforming",
+          "reason": "Shared embedding source route; numerical stages require separate scoped artifacts.",
+          "verification": {
+            "declared": {
+              "status": "passed",
+              "evidence_ids": [
+                "src.frontend"
+              ],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "Public ppl_embedding validates the global row lookup contract."
+            },
+            "codegen_passed": {
+              "status": "passed",
+              "evidence_ids": [
+                "test.llama-ops",
+                "src.codegen-tpukernel"
+              ],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "Both SG2260E backend source paths are covered by parameterized API tests."
+            },
+            "cmodel_numeric_passed": {
+              "status": "unverified",
+              "evidence_ids": [],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "No qualifying artifact is attached for this stage; see the separately scoped Llama validation report."
+            },
+            "pcie_numeric_passed": {
+              "status": "unverified",
+              "evidence_ids": [],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "No qualifying artifact is attached for this stage; see the separately scoped Llama validation report."
+            },
+            "sdk_declared": {
+              "status": "unverified",
+              "evidence_ids": [],
+              "scope": "Valid uint32 indices; distinct global rank-2 FP16/BF16/FP32 table and output.",
+              "reason": "No qualifying artifact is attached for this stage; see the separately scoped Llama validation report."
+            }
+          }
+        }
+      }
+    },
 
 
     {

@@ -17,6 +17,7 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 _SEMANTIC_EXTERN = re.compile(r'"(tl\.(?:tpu|tpukernel)\.[a-z0-9_]+)"')
 
 _PORTABLE_EXTERNS = {
+    "tl.tpu.embedding",
     "tl.tpu.add_scalar",
     "tl.tpu.mul_scalar",
     "tl.tpu.rsqrt",
@@ -105,6 +106,7 @@ def test_semantic_extern_registry_is_isomorphic_across_compiler_layers():
     assert _semantic_externs("src/transform/address_assign.cc") == expected
     assert _semantic_externs("src/target/codegen_tpu.cc") == _PORTABLE_EXTERNS
     assert _semantic_externs("src/target/codegen_tpukernel.cc") == (_TPUKERNEL_EXTERNS | {
+        "tl.tpu.embedding",
         "tl.tpu.add_scalar",
         "tl.tpu.mul_scalar",
         "tl.tpu.rsqrt",
