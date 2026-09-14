@@ -72,7 +72,7 @@ def _make_exp_family_with_large_hw(op_name):
             work0 = T.alloc_shared((1, 1, 256, 256), "float16")
             work1 = T.alloc_shared((1, 1, 256, 256), "float16")
             coeff = T.alloc_shared((64, 32), "float16")
-            if op_name == "tl.tpukernel.exp":
+            if op_name == "tl.tpu.exp":
                 T.evaluate(
                     T.call_extern("handle", op_name, buffer_to_tile_region(out, "rw"),
                                   buffer_to_tile_region(work0, "rw"),
@@ -218,7 +218,7 @@ def test_rv_integer_copy_descriptors_preserve_signedness(dtype, dtype_name):
     assert f"PRECISION({dtype_name}), FP8TYPE({dtype_name})" not in source
 
 
-@pytest.mark.parametrize("op_name", ("tl.tpukernel.exp", "tl.tpukernel.sigmoid"))
+@pytest.mark.parametrize("op_name", ("tl.tpu.exp", "tl.tpu.sigmoid"))
 def test_exp_family_rejects_h_w_product_above_ppl_limit(op_name):
     with pytest.raises(tvm.error.TVMError, match=r"requires h\*w <= 65535"):
         _emit_source_without_address_assignment(_make_exp_family_with_large_hw(op_name))
@@ -356,7 +356,7 @@ def test_native_semantic_ops_validate_source_rank_and_full_shape():
             dst = T.alloc_shared((2, 3, 1, 4), "float32")
             src = T.alloc_shared((1, 3, 2, 4), "float32")
             T.evaluate(
-                T.call_extern("handle", "tl.tpukernel.rsqrt", buffer_to_tile_region(dst, "w"),
+                T.call_extern("handle", "tl.tpu.rsqrt", buffer_to_tile_region(dst, "w"),
                               buffer_to_tile_region(src, "r")))
 
     with pytest.raises(tvm.error.TVMError, match="matching dst/src shapes"):
@@ -420,7 +420,7 @@ def test_native_exp_rejects_transposed_coefficient_shape():
             work1 = T.alloc_shared((4, 32), "float16")
             coeff = T.alloc_shared((32, 64), "float16")
             T.evaluate(
-                T.call_extern("handle", "tl.tpukernel.exp", buffer_to_tile_region(out, "rw"),
+                T.call_extern("handle", "tl.tpu.exp", buffer_to_tile_region(out, "rw"),
                               buffer_to_tile_region(work0,
                                                     "rw"), buffer_to_tile_region(work1, "rw"),
                               buffer_to_tile_region(coeff, "rw")))

@@ -133,13 +133,20 @@ private:
                          DataType src1_dtype, const std::vector<int> &dst_shape,
                          const std::vector<int> &src0_shape,
                          const std::vector<int> &src1_shape);
+  void EmitRVConstant(double value, const std::string &dtype);
+  void EmitRVScalar(const std::string &operation, const std::string &dst,
+                    const std::string &src, DataType dtype, double value);
+  void EmitRVReduction(const std::string &operation, const std::string &src,
+                       const std::string &dst, DataType dtype, int width);
+  void EmitRVExp(const std::string &dst, const std::string &src,
+                 const std::string &work0, const std::string &work1,
+                 DataType dtype, bool sigmoid);
   void EmitRVDescriptor(const std::string &tensor, int register_id,
                         bool is_global, const std::string &dtype,
                         bool hw_aligned);
-  // Returns false only when op_name is not a registered TPU-Kernel semantic
-  // operation. Operand validation and instruction selection are owned by the
-  // TPU-Kernel translation unit.
-  bool TryEmitTPUKernelSemantic(const CallNode *op, const std::string &op_name);
+  // Shared extended semantic validation preserves the existing TPU-Kernel ABI.
+  // RV instruction sequences are implemented in codegen_rv.cc.
+  bool TryEmitTPUSemantic(const CallNode *op, const std::string &op_name);
 
   // Handle volatile loads.
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,

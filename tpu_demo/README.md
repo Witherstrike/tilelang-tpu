@@ -12,11 +12,16 @@ Low-level instruction and compiler regression tests live under
 | --- | --- | --- | --- |
 | Elementwise | Add, subtract, multiply, and divide on `[4, 32]` | Yes | Yes |
 | Matmul | `32 x 32` by `32 x 32`, using `16 x 16 x 16` tiles | Yes | Yes |
-| RMSNorm | `[8, 64]` | Yes | No |
-| Split-K RMSNorm | `[8, 128]`, split into width-32 tiles | Yes | No |
+| RMSNorm | `[8, 64]` | Yes | Yes |
+| Split-K RMSNorm | `[8, 128]`, split into width-32 tiles | Yes | Yes |
 | RoPE | `[8, 32]`, with interleaved even and odd elements | Yes | No |
-| SwiGLU | `[8, 32]` | Yes | No |
+| SwiGLU | `[8, 32]` | Yes | Yes |
 | FlashAttention | BSHD `[1, 32, 1, 16]` | Yes | No |
+
+The RV normalization and SwiGLU examples use FP32 intermediates, including
+exp/sigmoid. Their FP16/BF16 inputs and outputs are explicitly converted.
+See [the RV validation results](../docs/validation/sg2260e-rv-essential-results.json)
+for the recorded numerical cases.
 
 Every example supports `float16`, `bfloat16`, and `float32`. The split-K
 RMSNorm example splits the feature dimension, accumulates the sum of squares,

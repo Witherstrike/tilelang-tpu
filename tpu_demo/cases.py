@@ -30,6 +30,9 @@ OPERATIONS = (
     "flashattn",
 )
 RV_SUPPORTED_OPERATIONS = frozenset({
+    "rmsnorm",
+    "rmsnorm-splitk",
+    "swiglu",
     "elementwise-add",
     "elementwise-sub",
     "elementwise-mul",

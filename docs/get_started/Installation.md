@@ -103,7 +103,8 @@ SG2260E: tpub_7_1_e
 ```
 
 TileLang-TPU reads headers, libraries, CModel files, firmware, and the PCIe
-cross-compiler from this SDK. It does not require the PPL environment script.
+cross-compiler from this SDK, unless `PPL_RISCV_CC` explicitly selects an
+external executable by absolute path. It does not require the PPL environment script.
 
 ## 5. Build TileLang-TPU
 
@@ -198,6 +199,8 @@ following variable only when the runtime is installed elsewhere:
 
 ```bash
 export TILELANG_TPU_PCIE_RUNTIME_PATH=/absolute/path/to/tpuv7-runtime/lib
+# Optional: use an executable cross-compiler installed outside the PPL SDK.
+export PPL_RISCV_CC=/absolute/path/to/riscv64-unknown-linux-gnu-gcc
 ```
 
 Check the PCIe compiler, firmware, and host runtime without launching a kernel:

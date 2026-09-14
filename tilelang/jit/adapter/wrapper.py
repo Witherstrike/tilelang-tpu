@@ -803,7 +803,9 @@ class TLTPUSourceWrapper(object):
                     f'{{ status = {-400 - i}; break; }}')
 
             free_statements.append(
-                f'  if (dev_{arg_name} != nullptr) {{ tpuRtFree(&dev_{arg_name}, 0); '
+                f'  if (dev_{arg_name} != nullptr) {{ '
+                f'if (tpuRtFree(&dev_{arg_name}, 0) != tpuRtSuccess && status == 0) '
+                f'{{ status = {-500 - i}; }} '
                 f'dev_{arg_name} = nullptr; }}')
             kernel_call_args.append(f'(unsigned long long)dev_{arg_name}')
 

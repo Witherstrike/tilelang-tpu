@@ -167,7 +167,8 @@ def test_rejects_chip_map_that_disagrees_with_the_capability_registry(tmp_path):
         resolve_ppl_layout(str(tmp_path), "sg2260e")
 
 
-def test_pcie_cross_compiler_is_discovered_without_a_pinned_sdk_version(tmp_path):
+def test_pcie_cross_compiler_is_discovered_without_a_pinned_sdk_version(tmp_path, monkeypatch):
+    monkeypatch.delenv("PPL_RISCV_CC", raising=False)
     _make_ppl_17_layout(tmp_path, chip="sg2260e", arch="tpub_7_1_e")
     gcc = tmp_path / ("third_party/toolchains_dir/any-ppl-release/bin/"
                       "riscv64-unknown-linux-gnu-gcc")
@@ -177,7 +178,8 @@ def test_pcie_cross_compiler_is_discovered_without_a_pinned_sdk_version(tmp_path
     assert layout.pcie_cross_gcc() == gcc
 
 
-def test_pcie_cross_compiler_rejects_ambiguous_sdk_toolchains(tmp_path):
+def test_pcie_cross_compiler_rejects_ambiguous_sdk_toolchains(tmp_path, monkeypatch):
+    monkeypatch.delenv("PPL_RISCV_CC", raising=False)
     _make_ppl_17_layout(tmp_path)
     for release in ("first", "second"):
         _touch(tmp_path / (f"third_party/toolchains_dir/{release}/bin/"
@@ -205,3 +207,20 @@ def test_pcie_runtime_is_separate_from_the_sdk_cmodel_runtime(tmp_path, monkeypa
     monkeypatch.setenv("TILELANG_TPU_PCIE_RUNTIME_PATH", str(layout.runtime_lib))
     with pytest.raises(ValueError, match="SDK CModel runtime"):
         layout.pcie_runtime_lib()
+
+
+def test_explicit_external_cross_compiler(tmp_path, monkeypatch):
+    _make_ppl_17_layout(tmp_path)
+    compiler = tmp_path / "external/bin/riscv64-unknown-linux-gnu-gcc"
+    _touch(compiler)
+    compiler.chmod(0o755)
+    monkeypatch.setenv("PPL_RISCV_CC", str(compiler))
+    assert resolve_ppl_layout(str(tmp_path), "bm1690").pcie_cross_gcc() == compiler
+
+
+@pytest.mark.parametrize("override", ("", "relative/gcc", "/missing/compiler"))
+def test_invalid_external_cross_compiler_does_not_fall_back(tmp_path, monkeypatch, override):
+    _make_ppl_17_layout(tmp_path)
+    monkeypatch.setenv("PPL_RISCV_CC", override)
+    with pytest.raises(ValueError, match="absolute executable"):
+        resolve_ppl_layout(str(tmp_path), "bm1690").pcie_cross_gcc()

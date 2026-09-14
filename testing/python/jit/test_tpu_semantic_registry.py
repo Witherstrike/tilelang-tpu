@@ -17,6 +17,14 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 _SEMANTIC_EXTERN = re.compile(r'"(tl\.(?:tpu|tpukernel)\.[a-z0-9_]+)"')
 
 _PORTABLE_EXTERNS = {
+    "tl.tpu.add_scalar",
+    "tl.tpu.mul_scalar",
+    "tl.tpu.rsqrt",
+    "tl.tpu.reduce_sum",
+    "tl.tpu.reduce_max",
+    "tl.tpu.exp",
+    "tl.tpu.sigmoid",
+
     "tl.tpu.add",
     "tl.tpu.copy",
     "tl.tpu.div",
@@ -27,15 +35,8 @@ _PORTABLE_EXTERNS = {
     "tl.tpu.sub",
 }
 _TPUKERNEL_EXTERNS = {
-    "tl.tpukernel.add_scalar",
-    "tl.tpukernel.exp",
     "tl.tpukernel.gather",
-    "tl.tpukernel.mul_scalar",
-    "tl.tpukernel.reduce_max",
-    "tl.tpukernel.reduce_sum",
     "tl.tpukernel.rope_add",
-    "tl.tpukernel.rsqrt",
-    "tl.tpukernel.sigmoid",
     "tl.tpukernel.topk",
 }
 
@@ -103,7 +104,15 @@ def test_semantic_extern_registry_is_isomorphic_across_compiler_layers():
     assert _semantic_externs("tilelang/engine/lower.py") == expected
     assert _semantic_externs("src/transform/address_assign.cc") == expected
     assert _semantic_externs("src/target/codegen_tpu.cc") == _PORTABLE_EXTERNS
-    assert _semantic_externs("src/target/codegen_tpukernel.cc") == _TPUKERNEL_EXTERNS
+    assert _semantic_externs("src/target/codegen_tpukernel.cc") == (_TPUKERNEL_EXTERNS | {
+        "tl.tpu.add_scalar",
+        "tl.tpu.mul_scalar",
+        "tl.tpu.rsqrt",
+        "tl.tpu.reduce_sum",
+        "tl.tpu.reduce_max",
+        "tl.tpu.exp",
+        "tl.tpu.sigmoid",
+    })
 
     contract_externs = {
         symbol for operation in _machine_contract()["operations"]
@@ -436,7 +445,7 @@ def test_numeric_stage_cannot_borrow_same_target_wrong_capability(monkeypatch):
         ("claim_targets", "future-chip.rv", "claims unknown targets"),
         ("claim_targets", "bm1690.rv", "claims inapplicable targets"),
         ("capability_ids", "future-op.fp32", "claims unknown capabilities"),
-        ("capability_ids", "exp.float", "claims incompatible target/capability pairs"),
+        ("capability_ids", "rope.float", "claims incompatible target/capability pairs"),
     ],
 )
 def test_runtime_evidence_claims_form_a_closed_contract_set(monkeypatch, field, phantom, message):

@@ -468,7 +468,7 @@ def ppl_mul_C(out, inp1, value):
     _require_same_shape("ppl_mul_C", out, inp1)
     outptr = _tpu_tensor_region(out, "w")
     inpptr1 = _tpu_tensor_region(inp1, "r")
-    return T.call_extern("handle", "tl.tpukernel.mul_scalar", outptr, inpptr1, value)
+    return T.call_extern("handle", "tl.tpu.mul_scalar", outptr, inpptr1, value)
 
 
 def ppl_mul(out, inp1, inp2):
@@ -527,7 +527,7 @@ def ppl_max(out, inp1, inp2):
 
 @T.macro
 def _ppl_exp_safe(out, work0, work1, coeff):
-    T.call_extern("handle", "tl.tpukernel.exp", _tpu_tensor_region(out, "rw"),
+    T.call_extern("handle", "tl.tpu.exp", _tpu_tensor_region(out, "rw"),
                   _tpu_tensor_region(work0, "rw"), _tpu_tensor_region(work1, "rw"),
                   _tpu_tensor_region(coeff, "rw"))
 
@@ -547,7 +547,9 @@ def ppl_exp(out, work0, work1, coeff):
     Notes:
         This computes natural exponential `exp(x)`.  It uses the PPL 1.7
         `tpu_bdc_load_fp_exp_coeff` and `tpu_bdc_fp_exp` coefficient-buffer
-        contract.
+        contract on TPU-Kernel. RV currently accepts FP32 only, uses a range-
+        reduced polynomial, and leaves coeff unused. Subnormal relative
+        accuracy is not guaranteed on RV (the device may flush to zero).
     """
     for name, buffer in (("out", out), ("work0", work0), ("work1", work1), ("coeff", coeff)):
         _require_local_buffer(name, buffer)
@@ -568,7 +570,7 @@ def ppl_exp(out, work0, work1, coeff):
 
 @T.macro
 def _ppl_sigmoid_safe(out, inp, work0, work1, coeff):
-    T.call_extern("handle", "tl.tpukernel.sigmoid", _tpu_tensor_region(out, "rw"),
+    T.call_extern("handle", "tl.tpu.sigmoid", _tpu_tensor_region(out, "rw"),
                   _tpu_tensor_region(inp, "r"), _tpu_tensor_region(work0, "rw"),
                   _tpu_tensor_region(work1, "rw"), _tpu_tensor_region(coeff, "rw"))
 
@@ -579,6 +581,8 @@ def ppl_sigmoid(out, inp, work0, work1, coeff):
     The TPU-Kernel lowering uses the PPL 1.7 generic exp coefficient loader,
     followed by exp, scalar reciprocal, and scalar add operations.  ``work0``
     and ``work1`` match ``out``; ``coeff`` has shape ``(64, 32)``.
+    RV accepts FP32 only and composes its polynomial exp with reciprocal;
+    the coefficient buffer is retained for a common ABI but is unused.
     """
     buffers = (out, inp, work0, work1, coeff)
     for name, buffer in zip(  # noqa: B905
@@ -709,7 +713,7 @@ def ppl_rsqrt(out, inp):
     _require_same_shape("ppl_rsqrt", out, inp)
     inpptr = _tpu_tensor_region(inp, "r")
     outptr = _tpu_tensor_region(out, "w")
-    return T.call_extern("handle", "tl.tpukernel.rsqrt", outptr, inpptr)
+    return T.call_extern("handle", "tl.tpu.rsqrt", outptr, inpptr)
 
 
 def ppl_add_C(out, inp1, value):
@@ -737,7 +741,7 @@ def ppl_add_C(out, inp1, value):
     _require_same_shape("ppl_add_C", out, inp1)
     outptr = _tpu_tensor_region(out, "w")
     inpptr1 = _tpu_tensor_region(inp1, "r")
-    return T.call_extern("handle", "tl.tpukernel.add_scalar", outptr, inpptr1, value)
+    return T.call_extern("handle", "tl.tpu.add_scalar", outptr, inpptr1, value)
 
 
 def ppl_add(out, inp1, inp2):
@@ -817,8 +821,8 @@ def _tpu_reduce_sum_lowering(inp, out, dim, eu_elements):
         channel = T.int32(64)
         align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num
         stride = T.ceildiv(inp.shape[0], channel) * align_w
-        # Delegate the hardware-specific sequence to TPU-Kernel codegen.
-        T.call_extern("handle", "tl.tpukernel.reduce_sum", _tpu_tensor_region(inp, "rw"),
+        # Shared semantic ABI: TPU-Kernel uses padded pooling; RV uses column slices.
+        T.call_extern("handle", "tl.tpu.reduce_sum", _tpu_tensor_region(inp, "rw"),
                       _tpu_tensor_region(out, "w"), _tpu_tensor_region(tmp_buffer_sum, "rw"),
                       eu_num, align_w, stride)
 
@@ -873,8 +877,8 @@ def _tpu_reduce_max_lowering(inp, out, dim, eu_elements):
         channel = T.int32(64)
         align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num
         stride = T.ceildiv(inp.shape[0], channel) * align_w
-        # Delegate the hardware-specific sequence to TPU-Kernel codegen.
-        T.call_extern("handle", "tl.tpukernel.reduce_max", _tpu_tensor_region(inp, "rw"),
+        # Shared semantic ABI: TPU-Kernel uses padded pooling; RV uses column slices.
+        T.call_extern("handle", "tl.tpu.reduce_max", _tpu_tensor_region(inp, "rw"),
                       _tpu_tensor_region(out, "w"), _tpu_tensor_region(tmp_buffer_max, "rw"),
                       eu_num, align_w, stride)
 

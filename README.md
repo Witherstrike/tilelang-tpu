@@ -51,6 +51,9 @@ target, or BM1690 with RV Tensor is rejected before code generation.
 Only the PPL 1.7 `deps/` release layout is supported. Older PPL directory
 layouts and environment scripts are not part of this toolchain.
 
+The [RV validation results](./docs/validation/sg2260e-rv-essential-results.json) record
+CModel/PCIe checks for RV normalization and activation support.
+
 ## Quick Start
 
 Initialize the bundled TVM dependency and create a Python environment:

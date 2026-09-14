@@ -109,7 +109,7 @@ def test_rv_case_listing_excludes_tpukernel_only_composites():
     args = _execution_args(programming_model="rv", operations=None, case_ids=None)
     cases = matrix.selected_cases(args)
 
-    assert len(cases) == 15
+    assert len(cases) == 24
     assert all(case.supports_rv for case in cases)
 
 

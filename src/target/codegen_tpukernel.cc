@@ -295,7 +295,7 @@ void CodeGenTileLangTPU::EmitTPUKernelScalar(const std::string &operation,
   stream << "}\n";
 }
 
-bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
+bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
                                                   const std::string &op_name) {
   auto handle_elementwise_const = [&, this](const std::string &semantic_name,
                                             const std::string &operation) {
@@ -329,13 +329,17 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     double value = value_node->value;
     ICHECK(std::isfinite(value))
         << semantic_name << " requires a finite scalar literal";
-    EmitTPUKernelScalar(operation, dst, src, dst_dtype, value);
+    if (target_programming_model_ == "rv") {
+      EmitRVScalar(operation, dst, src, dst_dtype, value);
+    } else {
+      EmitTPUKernelScalar(operation, dst, src, dst_dtype, value);
+    }
   };
-  if (op_name == "tl.tpukernel.mul_scalar") {
+  if (op_name == "tl.tpu.mul_scalar") {
     handle_elementwise_const(op_name, "mul");
-  } else if (op_name == "tl.tpukernel.add_scalar") {
+  } else if (op_name == "tl.tpu.add_scalar") {
     handle_elementwise_const(op_name, "add");
-  } else if (op_name == "tl.tpukernel.exp") {
+  } else if (op_name == "tl.tpu.exp") {
     ICHECK_EQ(op->args.size(), 5U)
         << op_name << " expects out, work0, work1, and coeff";
     std::array<SemanticTensorOperand, 4> operands{};
@@ -372,6 +376,10 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     ValidateExpFamilyShape(operands[0].shape4, op_name);
     ICHECK(operands[3].shape4 == std::vector<int>({1, 64, 1, 32}))
         << op_name << " coefficient buffer must have shape (64, 32)";
+    if (target_programming_model_ == "rv") {
+      EmitRVExp(tensors[0], tensors[0], tensors[1], tensors[2], dtype, false);
+      return true;
+    }
     std::string dtype_name = TPUKernelDTypeName(dtype);
     this->PrintIndent();
     this->stream << "tpu_bdc_load_fp_exp_coeff(" << tensors[3] << ".addr, "
@@ -381,7 +389,7 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
                  << ".addr, " << tensors[1] << ".addr, " << tensors[2]
                  << ".addr, " << tensors[3] << ".addr, &" << tensors[0]
                  << ".shape, " << dtype_name << ");\n";
-  } else if (op_name == "tl.tpukernel.sigmoid") {
+  } else if (op_name == "tl.tpu.sigmoid") {
     ICHECK_EQ(op->args.size(), 6U)
         << op_name << " expects dst, src, work0, work1, and coeff";
     std::array<SemanticTensorOperand, 5> operands{};
@@ -426,6 +434,10 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     ICHECK(operands[4].shape4 == std::vector<int>({1, 64, 1, 32}))
         << op_name << " coefficient buffer must have shape (64, 32)";
 
+    if (target_programming_model_ == "rv") {
+      EmitRVExp(tensors[0], tensors[1], tensors[2], tensors[3], dtype, true);
+      return true;
+    }
     const std::string &dst = tensors[0];
     const std::string &src = tensors[1];
     const std::string &work0 = tensors[2];
@@ -468,7 +480,7 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     this->stream << ", 3);\n";
     this->PrintIndent();
     this->stream << "}\n";
-  } else if (op_name == "tl.tpukernel.reduce_max") {
+  } else if (op_name == "tl.tpu.reduce_max") {
     ICHECK_EQ(op->args.size(), 7U)
         << op_name
         << " expects input, output, scratch, eu_num, align_w, and stride";
@@ -544,6 +556,11 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     ICHECK_EQ(tmp_shape[0], input_shape[0]);
     ICHECK_EQ(tmp_shape[1], expected_eu)
         << op_name << " scratch width must equal the dtype-specific EU size";
+    if (target_programming_model_ == "rv") {
+      EmitRVReduction("max", input_tensor, output_tensor, dtype_, input_shape[1]);
+      return true;
+    }
+
 
     this->PrintIndent();
     int sid = this->BeginScope();
@@ -710,7 +727,7 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     this->EndScope(sid);
     this->PrintIndent();
     this->stream << "}\n";
-  } else if (op_name == "tl.tpukernel.reduce_sum") {
+  } else if (op_name == "tl.tpu.reduce_sum") {
     ICHECK_EQ(op->args.size(), 7U)
         << op_name
         << " expects input, output, scratch, eu_num, align_w, and stride";
@@ -743,10 +760,6 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     int64_t eu_num = eu_imm->value;
     int64_t align_w = align_imm->value;
     int64_t stride_n = stride_imm->value;
-
-    this->PrintIndent();
-    int sid = this->BeginScope();
-    this->stream << "{\n";
 
     auto dtype_ = operands[0].dtype;
     std::string dtype, dtype_2;
@@ -793,6 +806,14 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     ICHECK_EQ(tmp_shape[0], input_shape[0]);
     ICHECK_EQ(tmp_shape[1], expected_eu)
         << op_name << " scratch width must equal the dtype-specific EU size";
+    if (target_programming_model_ == "rv") {
+      EmitRVReduction("sum", input_tensor, output_tensor, dtype_, input_shape[1]);
+      return true;
+    }
+
+    this->PrintIndent();
+    int sid = this->BeginScope();
+    this->stream << "{\n";
     // Check the EU width and derived padded layout supplied by the frontend.
     this->PrintIndent();
     this->stream << "int eu_num = " << eu_num << ";\n";
@@ -954,7 +975,7 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
     this->EndScope(sid);
     this->PrintIndent();
     this->stream << "}\n";
-  } else if (op_name == "tl.tpukernel.rsqrt") {
+  } else if (op_name == "tl.tpu.rsqrt") {
     ICHECK_EQ(op->args.size(), 3U) << op_name << " expects dst and src";
     auto dst_operand = ParseWholeBufferRegion(op->args[1], op_name + " dst", 2);
     auto src_operand = ParseWholeBufferRegion(op->args[2], op_name + " src", 1);
@@ -974,6 +995,13 @@ bool CodeGenTileLangTPU::TryEmitTPUKernelSemantic(const CallNode *op,
         << op_name << " requires matching dst/src ranks";
     ICHECK(dst_operand.shape4 == src_operand.shape4)
         << op_name << " requires matching dst/src shapes";
+    if (target_programming_model_ == "rv") {
+      EmitRVDescriptor(src0, 8, false, TPUKernelDTypeName(dst_dtype), true);
+      EmitRVDescriptor(dst, 10, false, TPUKernelDTypeName(dst_dtype), true);
+      stream << "rvt_cfg_satu(0, false);\nrvt_cfg_round_mode(0);\n"
+             << "rvt_cfg_rsqrt_iter(3);\nrvt_sfu_rsqrt(10, 8);\n";
+      return true;
+    }
     this->PrintIndent();
     this->stream << "tpu_bdc_fp_rsqrt(" << dst << ".addr, " << src0
                  << ".addr, &" << src0 << ".shape, "

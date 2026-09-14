@@ -26,6 +26,8 @@
 #include <tvm/runtime/logging.h>
 
 #include <cmath>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -130,23 +132,10 @@ void CodeGenTileLangTPU::EmitRVCopy(const std::string &src, bool src_is_global,
 
 void CodeGenTileLangTPU::EmitRVFill(const std::string &dst, DataType dtype,
                                     double value) {
-  RVDTypeName(dtype); // Validate before emitting a partially formed kernel.
-  ICHECK_EQ(value, 0.0)
-      << "RV Tensor tl.tpu.fill currently supports the zero constant used to "
-         "initialize accumulators; non-zero scalar materialization is not yet "
-         "part of the portable TPU contract";
-  EmitRVDescriptor(dst, 10, false, RVDTypeName(dtype), true);
-  PrintIndent();
-  stream << "{\n";
-  PrintIndent();
-  stream << "uint64_t " << dst << "_zero_bits = 0;\n";
-  PrintIndent();
-  stream << "rvt_cr(1, PRECISION(" << RVDTypeName(dtype) << "), FP8TYPE("
-         << RVDTypeName(dtype) << "), &" << dst << "_zero_bits);\n";
-  PrintIndent();
+  const auto type = RVDTypeName(dtype);
+  EmitRVDescriptor(dst, 10, false, type, true);
+  EmitRVConstant(value, type);
   stream << "rvt_cp(10, 1);\n";
-  PrintIndent();
-  stream << "}\n";
 }
 
 void CodeGenTileLangTPU::EmitRVGemm(const std::string &a, const std::string &b,
@@ -250,6 +239,128 @@ void CodeGenTileLangTPU::EmitRVElementwise(
   }
   PrintIndent();
   stream << "rvt_f" << operation << "(10, 8, 9);\n";
+}
+
+// Each extended operation owns CR1 and TR8..11 until its completion fence.
+// Use SDK descriptor constructors (including SIGN for integer views), not
+// the old backend's hand-encoded register words.
+void CodeGenTileLangTPU::EmitRVConstant(double value, const std::string &dtype) {
+  std::ostringstream literal;
+  if (std::isinf(value)) {
+    literal << (value > 0 ? "INFINITY" : "(-INFINITY)");
+  } else if (std::isnan(value)) {
+    literal << "NAN";
+  } else {
+    literal << std::scientific << std::setprecision(17) << value << "f";
+  }
+  stream << "{\nscalar_t rv_scalar = {.f32 = " << literal.str() << "};\n"
+         << "rv_scalar = tpu_cast(rv_scalar, " << dtype
+         << ", DT_FP32, RM_HALF_TO_EVEN);\n"
+         << "uint64_t rv_bits = rv_scalar.u32;\n"
+         << "rvt_cr(1, PRECISION(" << dtype << "), "
+         << (dtype == "DT_INT32" ? "SIGN(" : "FP8TYPE(") << dtype
+         << "), &rv_bits);\n}\n";
+}
+
+void CodeGenTileLangTPU::EmitRVScalar(const std::string &operation,
+                                     const std::string &dst,
+                                     const std::string &src, DataType dtype,
+                                     double value) {
+  const auto type = RVDTypeName(dtype);
+  EmitRVDescriptor(src, 8, false, type, true);
+  EmitRVDescriptor(dst, 10, false, type, true);
+  EmitRVConstant(value, type);
+  stream << "rvt_cfg_satu(0, false);\nrvt_cfg_round_mode(0);\n"
+         << "rvt_f" << operation << "(10, 8, 1);\n";
+}
+
+void CodeGenTileLangTPU::EmitRVReduction(const std::string &operation,
+                                        const std::string &src,
+                                        const std::string &dst, DataType dtype,
+                                        int width) {
+  const auto type = RVDTypeName(dtype);
+  EmitRVDescriptor(dst, 10, false, type, true);
+  stream << "rvt_cfg_satu(0, false);\nrvt_cfg_round_mode(0);\n";
+  // Both public reductions overwrite the destination. Starting max at the
+  // first input also handles all-negative tiles without a finite sentinel.
+  if (operation == "sum") {
+    EmitRVConstant(0, type);
+    stream << "rvt_cp(10, 1);\n";
+  }
+  stream << "{\nfor (int rv_column = 0; rv_column < " << width
+         << "; ++rv_column) {\n"
+         << "rvt_tr(8, PRECISION(" << type << "), FP8TYPE(" << type
+         << "), " << src << ".addr + rv_column * " << dtype.bytes()
+         << ", FREE_LAYOUT, (array4_t){.n=1, .c=" << src
+         << ".shape.c, .h=1, .w=1}, (int[4]){" << src << ".stride.n, "
+         << src << ".stride.c, " << src << ".stride.h, 1});\n";
+  if (operation == "sum") {
+    stream << "rvt_fadd(10, 10, 8);\n";
+  } else {
+    stream << "if (rv_column == 0) { rvt_cp(10, 8); } "
+           << "else { rvt_fmax(10, 10, 8); }\n";
+  }
+  stream << "}\n}\n";
+}
+
+void CodeGenTileLangTPU::EmitRVExp(const std::string &dst,
+                                  const std::string &src,
+                                  const std::string &work0,
+                                  const std::string &work1, DataType dtype,
+                                  bool sigmoid) {
+  ICHECK(dtype == DataType::Float(32))
+      << "RV exp/sigmoid currently require FP32 local tensors";
+  // Port the validated exp(x/2)^2 range reduction from the former RV backend.
+  // dst=TR8, integer exponent/work0=TR9, polynomial/work1=TR10, input=TR11.
+  // Workspaces and coefficient storage are validated by the shared semantic
+  // parser. The RV polynomial does not read or initialize the coefficient tile.
+  EmitRVDescriptor(dst, 8, false, "DT_FP32", true);
+  EmitRVDescriptor(work0, 9, false, "DT_FP32", true);
+  EmitRVDescriptor(work1, 10, false, "DT_FP32", true);
+  stream << "rvt_cfg_satu(0, false);\nrvt_cfg_round_mode(0);\n";
+  if (sigmoid) {
+    EmitRVDescriptor(src, 11, false, "DT_FP32", true);
+    EmitRVConstant(-1, "DT_FP32");
+    stream << "rvt_fmul(8, 11, 1);\n";
+  }
+  stream << "rvt_cp(10, 8);\n";
+  EmitRVConstant(-104, "DT_FP32");
+  stream << "rvt_fmax(8, 8, 1);\n";
+  EmitRVConstant(89, "DT_FP32");
+  stream << "rvt_fmin(8, 8, 1);\n";
+  // Self-comparison on this SDK does not reliably classify unordered values.
+  EmitRVDescriptor(work0, 9, false, "DT_INT32", true);
+  stream << "{ uint64_t bits = 0x7fffffff;\n"
+         << "rvt_cr(1, PRECISION(DT_INT32), SIGN(DT_INT32), &bits); }\n"
+         << "rvt_and(9, 10, 1);\n"
+         << "{ uint64_t bits = 0x7f800000;\n"
+         << "rvt_cr(1, PRECISION(DT_INT32), SIGN(DT_INT32), &bits); }\n"
+         << "rvt_cmpgt(8, 9, 1, 10, 8);\n";
+  EmitRVConstant(0.5, "DT_FP32");
+  stream << "rvt_fmul(8, 8, 1);\n";
+  EmitRVConstant(1.4426950408889634, "DT_FP32");
+  stream << "rvt_fmul(10, 8, 1);\n"
+         << "rvt_cvt_f2i(9, 10);\nrvt_cvt_i2f(10, 9);\n";
+  EmitRVConstant(0.6931471805599453, "DT_FP32");
+  stream << "rvt_fmul(10, 10, 1);\nrvt_fsub(8, 8, 10);\n";
+  const double coefficients[] = {1, 1, 0.5, 1.0/6, 1.0/24, 1.0/120, 1.0/720, 1.0/5040};
+  EmitRVConstant(coefficients[7], "DT_FP32");
+  stream << "rvt_cp(10, 1);\n";
+  for (int i = 6; i >= 0; --i) {
+    stream << "rvt_fmul(10, 10, 8);\n";
+    EmitRVConstant(coefficients[i], "DT_FP32");
+    stream << "rvt_fadd(10, 10, 1);\n";
+  }
+  EmitRVConstant(127, "DT_INT32");
+  stream << "rvt_add(9, 9, 1, 0, 0);\n";
+  EmitRVConstant(8388608, "DT_INT32");
+  stream << "rvt_mul(9, 9, 1, 0, 0);\n";
+  EmitRVDescriptor(work0, 9, false, "DT_FP32", true);
+  stream << "rvt_fmul(8, 10, 9);\nrvt_fmul(8, 8, 8);\n";
+  if (sigmoid) {
+    EmitRVConstant(1, "DT_FP32");
+    stream << "rvt_fadd(8, 8, 1);\nrvt_cfg_rsqrt_iter(3);\nrvt_fdiv(8, 1, 8);\n";
+  }
 }
 
 } // namespace codegen

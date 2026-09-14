@@ -1,6 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-"""SwiGLU using FP32 intermediates and TPU-Kernel semantic operations."""
+"""SwiGLU using FP32 intermediates and portable TPU semantic operations."""
 
 from typing import Optional
 
@@ -72,7 +72,7 @@ def run(*,
         chip=chip,
         programming_model=programming_model,
         runtime_mode=runtime_mode,
-        supports_rv=False,
+        supports_rv=True,
         allow_pcie=allow_pcie,
         device_id=device_id)
     shape = (8, 32)

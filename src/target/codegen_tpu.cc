@@ -699,7 +699,14 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           op_name == "tl.tpu.copy" || op_name == "tl.tpu.fill" ||
           op_name == "tl.tpu.gemm" || op_name == "tl.tpu.add" ||
           op_name == "tl.tpu.sub" || op_name == "tl.tpu.mul" ||
-          op_name == "tl.tpu.div" || op_name == "tl.tpu.max";
+          op_name == "tl.tpu.div" || op_name == "tl.tpu.max" ||
+          op_name == "tl.tpu.add_scalar" ||
+          op_name == "tl.tpu.mul_scalar" ||
+          op_name == "tl.tpu.rsqrt" ||
+          op_name == "tl.tpu.reduce_sum" ||
+          op_name == "tl.tpu.reduce_max" ||
+          op_name == "tl.tpu.exp" ||
+          op_name == "tl.tpu.sigmoid";
       ICHECK(is_supported_portable_op)
           << "Unknown backend-neutral TPU operation " << op_name;
       ICHECK_EQ(rvt_direct_call_count_, 0)
@@ -1133,9 +1140,13 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
       handle_elementwise("div");
     } else if (op_name == "tl.tpu.max") {
       handle_elementwise("max");
-    } else if (is_tpukernel_extern) {
-      ICHECK(TryEmitTPUKernelSemantic(op, op_name))
-          << "Unknown TPU-Kernel semantic operation " << op_name;
+    } else if (is_tpukernel_extern || is_portable_tpu_op) {
+      ICHECK(TryEmitTPUSemantic(op, op_name))
+          << "Unknown TPU semantic operation " << op_name;
+      if (target_programming_model_ == "rv") {
+        // Complete composite uses before the allocator may reuse their LMEM.
+        stream << "rvt_sync_i(0xdeadbeef, 0);\n";
+      }
     } else {
       ICHECK(is_rvt_extern)
           << "Unknown external call " << op_name

@@ -77,6 +77,14 @@ def _is_valid_raw_rvt_symbol(name: str) -> bool:
 # contract test; accepting an arbitrary name from either namespace would let a
 # typo fall through to CodeGenC's generic extern emitter.
 _PORTABLE_TPU_EXTERNS = frozenset({
+    "tl.tpu.add_scalar",
+    "tl.tpu.mul_scalar",
+    "tl.tpu.rsqrt",
+    "tl.tpu.reduce_sum",
+    "tl.tpu.reduce_max",
+    "tl.tpu.exp",
+    "tl.tpu.sigmoid",
+
     "tl.tpu.add",
     "tl.tpu.copy",
     "tl.tpu.div",
@@ -87,15 +95,8 @@ _PORTABLE_TPU_EXTERNS = frozenset({
     "tl.tpu.sub",
 })
 _TPUKERNEL_EXTERNS = frozenset({
-    "tl.tpukernel.add_scalar",
-    "tl.tpukernel.exp",
     "tl.tpukernel.gather",
-    "tl.tpukernel.mul_scalar",
-    "tl.tpukernel.reduce_max",
-    "tl.tpukernel.reduce_sum",
     "tl.tpukernel.rope_add",
-    "tl.tpukernel.rsqrt",
-    "tl.tpukernel.sigmoid",
     "tl.tpukernel.topk",
 })
 
@@ -112,15 +113,15 @@ _TPU_SEMANTIC_REGION_ARGS = {
     "tl.tpu.mul": (1, 2, 3),
     "tl.tpu.div": (1, 2, 3),
     "tl.tpu.max": (1, 2, 3),
-    "tl.tpukernel.add_scalar": (1, 2),
-    "tl.tpukernel.mul_scalar": (1, 2),
-    "tl.tpukernel.exp": (1, 2, 3, 4),
-    "tl.tpukernel.sigmoid": (1, 2, 3, 4, 5),
+    "tl.tpu.add_scalar": (1, 2),
+    "tl.tpu.mul_scalar": (1, 2),
+    "tl.tpu.exp": (1, 2, 3, 4),
+    "tl.tpu.sigmoid": (1, 2, 3, 4, 5),
     "tl.tpukernel.gather": (1, 2, 3),
     "tl.tpukernel.topk": (1, 2, 3),
-    "tl.tpukernel.rsqrt": (1, 2),
-    "tl.tpukernel.reduce_sum": (1, 2, 3),
-    "tl.tpukernel.reduce_max": (1, 2, 3),
+    "tl.tpu.rsqrt": (1, 2),
+    "tl.tpu.reduce_sum": (1, 2, 3),
+    "tl.tpu.reduce_max": (1, 2, 3),
     "tl.tpukernel.rope_add": (1, 2, 3, 4, 5),
 }
 

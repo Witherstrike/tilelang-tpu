@@ -1,6 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-"""RMSNorm and memory-bounded split-K RMSNorm for TPU-Kernel."""
+"""RMSNorm and memory-bounded split-K RMSNorm for the portable TPU backends."""
 
 from typing import Optional
 
@@ -128,7 +128,7 @@ def run(*,
         chip=chip,
         programming_model=programming_model,
         runtime_mode=runtime_mode,
-        supports_rv=False,
+        supports_rv=True,
         allow_pcie=allow_pcie,
         device_id=device_id,
     )

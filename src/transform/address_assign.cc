@@ -512,19 +512,19 @@ private:
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);
-    } else if (op_name == "tl.tpukernel.mul_scalar" ||
-               op_name == "tl.tpukernel.add_scalar" ||
-               op_name == "tl.tpukernel.rsqrt") {
+    } else if (op_name == "tl.tpu.mul_scalar" ||
+               op_name == "tl.tpu.add_scalar" ||
+               op_name == "tl.tpu.rsqrt") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
-    } else if (op_name == "tl.tpukernel.reduce_sum" ||
-               op_name == "tl.tpukernel.reduce_max") {
+    } else if (op_name == "tl.tpu.reduce_sum" ||
+               op_name == "tl.tpu.reduce_max") {
       // The current pool-based lowering initializes the physically padded
       // tail of the local input tile before reducing it.
       mark_arg(1, BufferAccessKind::kReadWrite);
       mark_arg(2, BufferAccessKind::kWrite);
       mark_arg(3, BufferAccessKind::kReadWrite);
-    } else if (op_name == "tl.tpukernel.exp") {
+    } else if (op_name == "tl.tpu.exp") {
       // exp lowers to a multi-instruction composite.  Its output, both
       // workspaces, and coefficient tensor are read and written at different
       // points inside that opaque sequence, so model them as one conservative
@@ -532,7 +532,7 @@ private:
       for (size_t i = 1; i <= 4; ++i) {
         mark_arg(i, BufferAccessKind::kConservative);
       }
-    } else if (op_name == "tl.tpukernel.sigmoid") {
+    } else if (op_name == "tl.tpu.sigmoid") {
       // The PPL 1.7 sigmoid composition reuses dst/workspaces across exp,
       // reciprocal, and add instructions.  Keep every operand distinct at
       // the bank-planning boundary.
