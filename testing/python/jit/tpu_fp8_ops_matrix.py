@@ -251,7 +251,12 @@ def _validate_pcie_promotion(
     current_toolchain: Mapping[str, Any],
     pcie_started_at: str,
 ) -> dict[str, Any]:
-    """Require content-identical BM1690 and SG2260E CModel FP8 evidence."""
+    """Require matching BM1690 and SG2260E CModel FP8 evidence.
+
+    BM1690 contributes TPU-Kernel evidence for cases shared by both programming
+    models.  RV-only cases still require passing SG2260E/RV evidence, but cannot
+    require a nonexistent BM1690/RV result or an unsupported TPU-Kernel result.
+    """
     assert args.bm_cmodel_summary is not None and args.sg_cmodel_summary is not None
     if (current_toolchain.get("runtime_mode") != "pcie" or
             not isinstance(current_toolchain.get("pcie"), dict)):
@@ -303,13 +308,15 @@ def _validate_pcie_promotion(
     if not isinstance(bm_results, dict) or not isinstance(sg_results, dict):
         raise RuntimeError("FP8 promotion summary has no case result map")
     missing = []
+    bm_cases = tuple(case for case in cases if case not in _TPUKERNEL_UNSUPPORTED_CASES)
     for dtype in dtypes:
         for case in cases:
-            for key, results, expected_model in (
-                (f"bm1690/tpukernel/{dtype}/{case}", bm_results, "tpukernel"),
-                (f"sg2260e/{args.programming_model}/{dtype}/{case}", sg_results,
-                 args.programming_model),
-            ):
+            required_results = [(f"sg2260e/{args.programming_model}/{dtype}/{case}",
+                                 sg_results, args.programming_model)]
+            if case in bm_cases:
+                required_results.insert(
+                    0, (f"bm1690/tpukernel/{dtype}/{case}", bm_results, "tpukernel"))
+            for key, results, expected_model in required_results:
                 result = results.get(key)
                 if not isinstance(result, dict) or result.get("status") != "passed":
                     missing.append(key)
@@ -342,6 +349,8 @@ def _validate_pcie_promotion(
         "sg2260e_summary": sg["_resolved_path"],
         "sg2260e_summary_sha256": sg["_sha256"],
         "validated_case_count": len(dtypes) * len(cases),
+        "bm1690_validated_case_count": len(dtypes) * len(bm_cases),
+        "sg2260e_validated_case_count": len(dtypes) * len(cases),
     }
 
 
