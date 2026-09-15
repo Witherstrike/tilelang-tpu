@@ -136,9 +136,11 @@ def _uniquify_tpu_local_names(function):
     hints are renamed, including their Allocate definitions and all uses.
     """
     variables = []
+
     def collect(node):
         if isinstance(node, tir.Allocate):
             variables.append(node.buffer_var)
+
     tir.stmt_functor.post_order_visit(function.body, collect)
     reserved = {v.name for v in variables}
     seen = set()
@@ -156,11 +158,13 @@ def _uniquify_tpu_local_names(function):
     if not mapping:
         return function
     body = tir.stmt_functor.substitute(function.body, mapping)
+
     def rename_definition(node):
         if isinstance(node, tir.Allocate) and node.buffer_var in mapping:
-            return tir.Allocate(mapping[node.buffer_var], node.dtype, node.extents,
-                                node.condition, node.body, node.annotations, node.span)
+            return tir.Allocate(mapping[node.buffer_var], node.dtype, node.extents, node.condition,
+                                node.body, node.annotations, node.span)
         return None
+
     body = tir.stmt_functor.ir_transform(body, None, rename_definition, ["tir.Allocate"])
     return function.with_body(body)
 
@@ -190,6 +194,10 @@ def AssignTPUAddresses(mod: IRModule, target: Target) -> IRModule:
             raise ValueError("AssignTPUAddresses target identity mismatch for PrimFunc "
                              f"{global_var.name_hint!r}: function={function_selection}, "
                              f"requested={selected_target}")
-    mod = IRModule({gv: _uniquify_tpu_local_names(f) if isinstance(f, tir.PrimFunc) else f
-                    for gv, f in mod.functions.items()}, attrs=mod.attrs)
+    mod = IRModule(
+        {
+            gv: _uniquify_tpu_local_names(f) if isinstance(f, tir.PrimFunc) else f
+            for gv, f in mod.functions.items()
+        },
+        attrs=mod.attrs)
     return tilelang.transform.AddressAssign()(mod)

@@ -51,9 +51,6 @@ target, or BM1690 with RV Tensor is rejected before code generation.
 Only the PPL 1.7 `deps/` release layout is supported. Older PPL directory
 layouts and environment scripts are not part of this toolchain.
 
-The [RV validation results](./docs/validation/sg2260e-rv-essential-results.json) record
-CModel/PCIe checks for RV normalization and activation support.
-
 ## Quick Start
 
 Initialize the bundled TVM dependency and create a Python environment:
@@ -152,12 +149,16 @@ TPU-Kernel or RV Tensor according to the selected target:
 - `T.ppl_gemm`
 - `T.ppl_add`, `T.ppl_subtract`, `T.ppl_mul`, and `T.ppl_div`
 - `T.ppl_max`
+- Llama 2 building blocks including weighted RMSNorm, Softmax, SiLU, SwiGLU,
+  RoPE, embedding, KV-cache update, KV repetition, transpose, and causal masks
 
-TPU-Kernel also provides scalar arithmetic, `exp`, `sigmoid`, `rsqrt`, sum and
-maximum reductions, gather, top-k, and RoPE primitives. The `T.rvt_*` namespace
-is a low-level SG2260E interface for kernels that need to manage RV Tensor
-descriptors directly; it must not be mixed with high-level `T.ppl_*` semantics
-inside one kernel.
+Both TPU backends provide scalar arithmetic, `exp`, `sigmoid`, `rsqrt`, and sum
+and maximum reductions. TPU-Kernel additionally provides top-k and the legacy
+RoPE primitive. The `T.rvt_*` namespace is a low-level SG2260E interface for
+kernels that need to manage RV Tensor descriptors directly; it must not be
+mixed with high-level `T.ppl_*` semantics inside one kernel. See the
+[Llama 2 operator guide](./docs/SG2260E_RV_LLAMA2.md) for the portable API and
+its shape and dtype constraints.
 
 Operator shapes and data types are checked during lowering. Dimensions must be
 positive compile-time integers, and tiled dimensions must divide evenly unless

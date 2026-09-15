@@ -29,8 +29,6 @@ def test_nonidle_board_is_rejected(monkeypatch, tmp_path, status, util, memory):
 
 def test_timeout_stops_matrix_and_poisons_run(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["run", "--runtime", "cmodel", "--output-dir", str(tmp_path)])
-    monkeypatch.setattr(supervisor, "sdk_identity", lambda: "sdk")
-    monkeypatch.setattr(supervisor, "fingerprint", lambda: "fixed")
     monkeypatch.setattr(supervisor, "cases", lambda p: ["first", "must-not-run"])
     calls = []
 
@@ -48,27 +46,44 @@ def test_timeout_stops_matrix_and_poisons_run(monkeypatch, tmp_path):
     assert len(calls) == 1
 
 
-def test_pcie_requires_matching_complete_cmodel_proof(monkeypatch, tmp_path):
-    smi = tmp_path / "smi"
-    smi.touch()
-    manifest = tmp_path / "proof.json"
-    manifest.write_text(
-        json.dumps({
-            "runtime": "cmodel",
-            "source_sha256": "old",
-            "passed_cases": []
-        }))
-    monkeypatch.setattr(sys, "argv", [
-        "run", "--runtime", "pcie", "--output-dir",
-        str(tmp_path), "--smi",
-        str(smi), "--cmodel-manifest",
-        str(manifest)
-    ])
-    monkeypatch.setattr(supervisor, "sdk_identity", lambda: "sdk")
-    monkeypatch.setattr(supervisor, "fingerprint", lambda: "new")
+def test_pcie_requires_board_status_tool(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "argv", ["run", "--runtime", "pcie", "--output-dir", str(tmp_path)])
     monkeypatch.setattr(supervisor, "cases", lambda p: ["first"])
-    with pytest.raises(SystemExit, match="proof incomplete"):
+    with pytest.raises(SystemExit, match="requires --smi"):
         supervisor.main()
+
+
+def test_pcie_requires_explicit_runtime_load_authorization(monkeypatch, tmp_path):
+    smi = tmp_path / "tpu-smi"
+    smi.touch()
+    monkeypatch.delenv("TILELANG_TPU_ALLOW_PCIE_LOAD", raising=False)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["run", "--runtime", "pcie", "--output-dir",
+         str(tmp_path / "run"), "--smi",
+         str(smi)])
+    monkeypatch.setattr(supervisor, "cases", lambda p: ["first"])
+    with pytest.raises(SystemExit, match="TILELANG_TPU_ALLOW_PCIE_LOAD=1"):
+        supervisor.main()
+
+
+def test_case_selector_runs_only_exact_requested_case(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "argv", [
+        "run", "--runtime", "cmodel", "--output-dir",
+        str(tmp_path), "--case", "test_tpu_llama_ops/second"
+    ])
+    monkeypatch.setattr(supervisor, "cases", lambda path: ["first", "second"])
+    calls = []
+
+    def succeed(command, log, timeout):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(supervisor, "run_child", succeed)
+    supervisor.main()
+    assert len(calls) == 1
+    assert calls[0][1].endswith("test_tpu_llama_ops.py")
+    assert calls[0][3] == "second"
 
 
 def test_timeout_never_waits_for_a_stuck_driver_process(monkeypatch):
@@ -105,8 +120,15 @@ def test_post_kernel_settle_is_bounded(monkeypatch, tmp_path, utils, passes, cou
     def status_command(command, output, timeout):
         util = utils[len(calls)]
         calls.append(util)
-        output.write(json.dumps({"card0": {"chip0": {
-            "status": "Active", "mem_usage": "0MB", "tpu_util": util}}}))
+        output.write(
+            json.dumps(
+                {"card0": {
+                    "chip0": {
+                        "status": "Active",
+                        "mem_usage": "0MB",
+                        "tpu_util": util
+                    }
+                }}))
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(supervisor, "run_child", status_command)
@@ -124,9 +146,17 @@ def test_post_kernel_settle_is_bounded(monkeypatch, tmp_path, utils, passes, cou
 
 @pytest.mark.parametrize("status,memory", [("Fault", "0MB"), ("Active", "1MB")])
 def test_settle_does_not_retry_faults_or_retained_memory(monkeypatch, tmp_path, status, memory):
+
     def status_command(command, output, timeout):
-        output.write(json.dumps({"card0": {"chip0": {
-            "status": status, "mem_usage": memory, "tpu_util": "0%"}}}))
+        output.write(
+            json.dumps(
+                {"card0": {
+                    "chip0": {
+                        "status": status,
+                        "mem_usage": memory,
+                        "tpu_util": "0%"
+                    }
+                }}))
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(supervisor, "run_child", status_command)

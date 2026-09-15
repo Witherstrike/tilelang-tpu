@@ -513,8 +513,7 @@ private:
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);
     } else if (op_name == "tl.tpu.mul_scalar" ||
-               op_name == "tl.tpu.add_scalar" ||
-               op_name == "tl.tpu.rsqrt") {
+               op_name == "tl.tpu.add_scalar" || op_name == "tl.tpu.rsqrt") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
     } else if (op_name == "tl.tpu.reduce_sum" ||
@@ -539,7 +538,8 @@ private:
       for (size_t i = 1; i <= 5; ++i) {
         mark_arg(i, BufferAccessKind::kConservative);
       }
-    } else if (op_name == "tl.tpukernel.gather" || op_name == "tl.tpu.embedding") {
+    } else if (op_name == "tl.tpukernel.gather" ||
+               op_name == "tl.tpu.embedding") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);
@@ -710,7 +710,10 @@ PrimFunc InferAddress(PrimFunc f) {
                      << " would alias string-keyed LMEM metadata";
     TensorLive live;
     live.tensor_size =
-        tpuv7::TpuAlignSizeBytes(op->shape, op->dtype, "AddressAssign");
+        storage_scope == "local.matrix"
+            ? tpuv7::TpuMatrixSizeBytes(op->shape, op->dtype,
+                                        "AddressAssign matrix")
+            : tpuv7::TpuAlignSizeBytes(op->shape, op->dtype, "AddressAssign");
     live_ranges[op] = live;
   }
   BufferUseCollector(alloc_ops, &live_ranges, &bank_conflict_map)

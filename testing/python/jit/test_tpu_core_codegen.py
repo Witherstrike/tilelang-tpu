@@ -259,7 +259,7 @@ def test_topk_capability_is_chip_specific_and_fails_before_runtime():
     ).kernel_source
     assert "tpu_hau_sort_natural_index(" in bm1690_source
 
-    with pytest.raises(tvm.error.TVMError, match="unavailable on SG2260E"):
+    with pytest.raises(ValueError, match="unavailable on SG2260E"):
         tilelang.lower(
             _tpukernel_topk,
             target=_tpu_target("sg2260e", "tpukernel"),

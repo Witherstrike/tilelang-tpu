@@ -359,7 +359,7 @@ def test_native_semantic_ops_validate_source_rank_and_full_shape():
                 T.call_extern("handle", "tl.tpu.rsqrt", buffer_to_tile_region(dst, "w"),
                               buffer_to_tile_region(src, "r")))
 
-    with pytest.raises(tvm.error.TVMError, match="matching dst/src shapes"):
+    with pytest.raises(ValueError, match="matching dst/src shapes"):
         tilelang.lower(
             mismatched_rsqrt_shape,
             target=_target(),
@@ -378,7 +378,7 @@ def test_native_semantic_ops_validate_source_rank_and_full_shape():
                               buffer_to_tile_region(rhs, "r"), buffer_to_tile_region(out, "w"),
                               T.bool(False), T.bool(False), 16, 16, 16, T.bool(False)))
 
-    with pytest.raises(tvm.error.TVMError, match="requires rank-2 A"):
+    with pytest.raises(ValueError, match="requires rank-2 A"):
         tilelang.lower(
             rank3_gemm,
             target=_target(),
@@ -401,7 +401,7 @@ def test_native_gemm_rejects_output_storage_alias(programming_model):
                               buffer_to_tile_region(lhs_and_out, "w"), T.bool(False), T.bool(False),
                               16, 16, 16, T.bool(False)))
 
-    with pytest.raises(tvm.error.TVMError, match="output/accumulator C must use storage distinct"):
+    with pytest.raises(ValueError, match="output/accumulator C must use storage distinct"):
         tilelang.lower(
             aliased_gemm,
             target=_target(programming_model),
@@ -425,7 +425,7 @@ def test_native_exp_rejects_transposed_coefficient_shape():
                                                     "rw"), buffer_to_tile_region(work1, "rw"),
                               buffer_to_tile_region(coeff, "rw")))
 
-    with pytest.raises(tvm.error.TVMError, match="coefficient buffer must have shape"):
+    with pytest.raises(ValueError, match="coefficient buffer must have shape"):
         tilelang.lower(
             malformed_exp_coefficients,
             target=_target(),

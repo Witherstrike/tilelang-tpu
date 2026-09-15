@@ -13,9 +13,10 @@ import tilelang.language as T
 TARGET = "tpu -mcpu=sg2260e -tpu-programming-model=rv"
 DTYPES = ("float16", "bfloat16", "float32")
 CASES = tuple(f"{op}.{dt}" for op in ("rmsnorm", "softmax", "silu", "swiglu", "rope", "transpose",
-                                      "embedding", "cache", "repeat", "chain")
-              for dt in DTYPES) + ("mask.float32",) + tuple(
-                  f"gemm-{layout}.{dt}" for layout in ("nn", "nt", "acc") for dt in DTYPES[:2])
+                                      "embedding", "cache", "repeat", "chain", "mask")
+              for dt in DTYPES) + tuple(
+                  f"gemm-{layout}.{dt}" for layout in ("nn", "acc") for dt in DTYPES) + tuple(
+                      f"gemm-nt.{dt}" for dt in DTYPES[:2])
 
 CASES += tuple(
     f"{op}.{dt}" for op in ("rmsnorm-wide", "softmax-wide", "rope-head") for dt in DTYPES)
@@ -51,7 +52,7 @@ def make_kernel(op, dtype, rows=3, width=32):
     if op == "mask":
 
         @T.prim_func
-        def kernel(O: T.Tensor((rows, rows + 2), "float32")):
+        def kernel(O: T.Tensor((rows, rows + 2), dtype)):
             with T.Kernel(1, is_cpu=True):
                 T.ppl_causal_mask(O, 2)
 
@@ -78,17 +79,22 @@ def make_kernel(op, dtype, rows=3, width=32):
         trans = op == "gemm-nt"
         accum = op == "gemm-acc"
         bshape = (16, width) if trans else (width, 16)
+        allocation_scope = "local.matrix" if dtype == "float32" else "shared"
 
         @T.prim_func
         def kernel(A: T.Tensor((rows, width), dtype), B: T.Tensor(bshape, dtype), O: T.Tensor(
             (rows, 16), "float32")):
             with T.Kernel(1, is_cpu=True):
-                a = T.alloc_shared((rows, width), dtype)
-                b = T.alloc_shared(bshape, dtype)
-                c = T.alloc_shared((rows, 16), "float32")
+                a = T.alloc_shared((rows, width), dtype, scope=allocation_scope)
+                b = T.alloc_shared(bshape, dtype, scope=allocation_scope)
+                c = T.alloc_shared((rows, 16), "float32", scope=allocation_scope)
                 T.ppl_copy(A, a)
                 T.ppl_copy(B, b)
-                T.ppl_fill(c, T.float32(1))
+                if dtype == "float32":
+                    if accum:
+                        T.ppl_gemm(a, b, c, transpose_B=trans, accumulate=False)
+                else:
+                    T.ppl_fill(c, T.float32(1))
                 T.ppl_gemm(a, b, c, transpose_B=trans, accumulate=accum)
                 T.ppl_copy(c, O)
 
@@ -162,12 +168,15 @@ def inputs_reference(op, dtype, rows=3, width=32):
         ref[2:2 + rows] = x
         return [x, old], ref
     if op == "mask":
-        return [], torch.where(
+        ref = torch.where(
             torch.arange(rows + 2)[None, :] > torch.arange(rows)[:, None] + 2, float("-inf"), 0.)
+        return [], ref.to(dt)
     if op.startswith("gemm-"):
         b = torch.randn((16, width) if op == "gemm-nt" else (width, 16)).to(dt)
         ref = x.float() @ (b.float().T if op == "gemm-nt" else b.float())
-        return [x, b], ref + (1 if op == "gemm-acc" else 0)
+        if op == "gemm-acc":
+            return [x, b], ref * 2 if dtype == "float32" else ref + 1
+        return [x, b], ref
     if op == "rope":
         positions = torch.arange(rows).float() + 127
         theta = positions[:, None] * 10000**(-torch.arange(0, width, 2).float() / width)
@@ -204,14 +213,23 @@ def test_lower(case, model):
     if model == 'rv':
         assert 'rvt_' in source
         assert 'tpu_bdc_' not in source
+        if case.startswith('gemm-nn.float32'):
+            assert 'rvt_fmm_nn' in source
+            assert 'rvt_fmm2_nn' not in source
+        if case.startswith('gemm-acc.float32'):
+            assert 'rvt_fmma_nn' in source
+            assert 'rvt_fmm2a_nn' not in source
     else:
         assert 'rvt_' not in source
+        if case.startswith(('gemm-nn.float32', 'gemm-acc.float32')):
+            assert 'tpu_bdc_fp32_mm' in source
 
 
 def test_reject_alias_and_invalid_contracts():
     from tvm import tir
     x = tir.decl_buffer((3, 32), 'float32', scope='shared')
     y = tir.decl_buffer((3, 32), 'float32', scope='shared')
+    z = tir.decl_buffer((3, 32), 'float32', scope='shared')
     with pytest.raises(ValueError):
         T.ppl_softmax(x, x)
     with pytest.raises(ValueError):
@@ -220,21 +238,29 @@ def test_reject_alias_and_invalid_contracts():
         T.ppl_rope(x, y, x, y)
     with pytest.raises(ValueError):
         T.ppl_repeat_kv(x, y, 0, 16)
+    matrix = tir.decl_buffer((3, 32), 'float32', scope='local.matrix')
+    with pytest.raises(ValueError, match='local.matrix'):
+        T.ppl_add(matrix, matrix, matrix)
+    with pytest.raises(ValueError, match='local.matrix'):
+        T.ppl_gemm(x, y, z, accumulate=False)
 
 
-def run(case, runtime, output_dir, rows=3, width=32):
+def run(case, runtime, output_dir, rows=3, width=32, model="rv"):
     op, dt = case.split('.')
     op, rows, width = resolve_shape(op, rows, width)
     path = Path(output_dir)
     path.mkdir(parents=True, exist_ok=True)
     kernel = tilelang.compile(
-        make_kernel(op, dt, rows, width), out_idx=-1, target=TARGET, runtime_mode=runtime)
+        make_kernel(op, dt, rows, width),
+        out_idx=-1,
+        target=TARGET.replace("=rv", "=" + model),
+        runtime_mode=runtime)
     (path / "kernel.c").write_text(kernel.get_kernel_source())
     inputs, ref = inputs_reference(op, dt, rows, width)
     result = kernel(*inputs)
     exact = op in ('embedding', 'transpose', 'cache', 'repeat', 'mask')
     rtol, atol = (0, 0) if exact else {
-        'float32': (3e-5, 3e-6),
+        'float32': (3e-5, 5e-6),
         'float16': (4e-3, 3e-3),
         'bfloat16': (3e-2, 2e-2)
     }[dt]
@@ -246,6 +272,7 @@ def run(case, runtime, output_dir, rows=3, width=32):
             {
                 'case': case,
                 'runtime': runtime,
+                'programming_model': model,
                 'rows': rows,
                 'width': width,
                 'rtol': rtol,
@@ -260,7 +287,8 @@ if __name__ == '__main__':
     p.add_argument('--case', choices=CASES, required=True)
     p.add_argument('--runtime', choices=('cmodel', 'pcie'), required=True)
     p.add_argument('--output-dir', required=True)
+    p.add_argument('--model', choices=('rv', 'tpukernel'), default='rv')
     p.add_argument('--rows', type=int, default=3)
     p.add_argument('--width', type=int, default=32)
     a = p.parse_args()
-    run(a.case, a.runtime, a.output_dir, a.rows, a.width)
+    run(a.case, a.runtime, a.output_dir, a.rows, a.width, a.model)

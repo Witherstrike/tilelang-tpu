@@ -217,18 +217,12 @@ class PPLLayout:
         return header
 
     def pcie_cross_gcc(self) -> Path:
-        """Use an explicit PPL_RISCV_CC or discover one SDK-provided compiler.
+        """Find the one PPL-provided PCIe compiler without pinning an SDK version.
 
         CModel users do not need a cross compiler, so discovery is intentionally
         delayed until a PCIe build.  More than one candidate is an ambiguity,
         not a reason to silently select an arbitrary SDK revision.
         """
-        override = os.environ.get("PPL_RISCV_CC")
-        if override is not None:
-            compiler = Path(override).expanduser()
-            if not compiler.is_absolute() or not compiler.is_file() or not os.access(compiler, os.X_OK):
-                raise ValueError("PPL_RISCV_CC must name an absolute executable cross-compiler")
-            return compiler.resolve()
         candidates = tuple(sorted(self.toolchains_root.glob("*/bin/riscv64-unknown-linux-gnu-gcc")))
         if not candidates:
             raise FileNotFoundError("PPL PCIe cross compiler is missing; expected "

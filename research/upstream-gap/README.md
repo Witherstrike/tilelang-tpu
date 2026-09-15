@@ -30,10 +30,10 @@ Current numerical coverage includes:
   FlashAttention examples
 - BM1690 and SG2260E CModel tests, followed by serialized SG2260E PCIe tests
 
-The exact supported selectors and validation stages are recorded in
-`research/tpu-op-contract/contract.json`. Fixed demo workloads do not imply
-support for arbitrary shapes, dynamic dimensions, multicore schedules, or
-every data-type combination.
+The source-level semantic registry and numerical test matrices define the
+supported selectors. Fixed demo workloads do not imply support for arbitrary
+shapes, dynamic dimensions, multicore schedules, or every data-type
+combination.
 
 ## Related upstream projects
 

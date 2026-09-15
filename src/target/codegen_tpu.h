@@ -95,6 +95,7 @@ private:
     std::string descriptor;
     DataType dtype;
     std::vector<int> shape4;
+    std::string scope;
     size_t rank{0};
     bool is_local{false};
   };
@@ -108,6 +109,12 @@ private:
   void EmitRVCopy(const std::string &src, bool src_is_global,
                   const std::string &src_dtype, const std::string &dst,
                   bool dst_is_global, const std::string &dst_dtype);
+  void EmitTPUKernelMatrixCopy(const std::string &src, bool src_is_global,
+                               const std::string &dst, bool dst_is_global,
+                               DataType dtype, int64_t rows, int64_t cols);
+  void EmitRVMatrixCopy(const std::string &src, bool src_is_global,
+                        const std::string &dst, bool dst_is_global,
+                        DataType dtype, int64_t rows, int64_t cols);
   void EmitTPUKernelFill(const std::string &dst, DataType dtype, double value);
   void EmitRVFill(const std::string &dst, DataType dtype, double value);
   void EmitTPUKernelGemm(const std::string &a, const std::string &b,
@@ -160,7 +167,8 @@ private:
   std::string AllocLocalVarID(const tir::VarNode *v);
   SemanticTensorOperand ParseWholeBufferRegion(const PrimExpr &expr,
                                                const std::string &context,
-                                               int expected_access_mask) const;
+                                               int expected_access_mask,
+                                               bool allow_matrix = false) const;
   const std::vector<int> &DescriptorShape4(const VarNode *data_var,
                                            const std::string &context) const;
   // Global semantic operands carry Buffer::data variables, while generated

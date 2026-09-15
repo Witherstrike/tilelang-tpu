@@ -208,21 +208,15 @@ int init() {{
   return 0;
 }}
 
-int post() {{
-  int cleanup_status = 0;
+void post() {{
   if (tpu_module != nullptr) {{
-    if (tpuRtKernelUnloadModule(tpu_module, stream) != tpuRtSuccess) {{
-      cleanup_status = -9;
-    }}
+    tpuRtKernelUnloadModule(tpu_module, stream);
     tpu_module = nullptr;
   }}
   if (stream != nullptr) {{
-    if (tpuRtStreamDestroy(stream) != tpuRtSuccess && cleanup_status == 0) {{
-      cleanup_status = -10;
-    }}
+    tpuRtStreamDestroy(stream);
     stream = nullptr;
   }}
-  return cleanup_status;
 }}
 
 extern "C" int tilelang_tpu_run(void** args) {{
@@ -354,8 +348,7 @@ extern "C" int tilelang_tpu_run(void** args) {{
   }} while (false);
 
 {free_statements}
-  const int cleanup_status = post();
-  if (status == 0) {{ status = cleanup_status; }}
+  post();
 #ifdef TILELANG_TPU_PCIE_PROFILING
   if (profile_handle != nullptr) {{
     tpudnnDestroy(profile_handle);

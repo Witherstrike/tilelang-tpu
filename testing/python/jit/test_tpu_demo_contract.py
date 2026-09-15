@@ -24,8 +24,10 @@ def test_registry_is_unique_complete_and_capability_scoped():
     assert len(cases) == 36
     assert len({case.case_id for case in cases}) == len(cases)
     assert sum(case.supports_rv for case in cases) == 24
-    assert {"elementwise-add", "elementwise-sub", "elementwise-mul", "elementwise-div",
-            "matmul", "rmsnorm", "rmsnorm-splitk", "swiglu"} == RV_SUPPORTED_OPERATIONS
+    assert {
+        "elementwise-add", "elementwise-sub", "elementwise-mul", "elementwise-div", "matmul",
+        "rmsnorm", "rmsnorm-splitk", "swiglu"
+    } == RV_SUPPORTED_OPERATIONS
     flash_cases = [case for case in cases if case.operation == "flashattn"]
     assert len(flash_cases) == 9
     assert {case.variant for case in flash_cases} == {"balanced", "descending-max", "weighted-keys"}

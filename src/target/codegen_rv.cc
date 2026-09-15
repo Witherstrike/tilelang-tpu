@@ -130,6 +130,48 @@ void CodeGenTileLangTPU::EmitRVCopy(const std::string &src, bool src_is_global,
   }
 }
 
+void CodeGenTileLangTPU::EmitRVMatrixCopy(const std::string &src,
+                                          bool src_is_global,
+                                          const std::string &dst,
+                                          bool dst_is_global, DataType dtype,
+                                          int64_t rows, int64_t cols) {
+  ICHECK_EQ(dtype, DataType::Float(32));
+  constexpr int64_t kElementsPerEU = 16;
+  ICHECK_EQ(cols % kElementsPerEU, 0)
+      << "RV FP32 matrix width must be a multiple of 16";
+  ICHECK_NE(src_is_global, dst_is_global)
+      << "RV matrix copy requires exactly one global operand";
+  const std::string matrix_shape =
+      "(array4_t){.n=" + std::to_string(rows) +
+      ", .c=" + std::to_string(cols / kElementsPerEU) +
+      ", .h=1, .w=" + std::to_string(kElementsPerEU) + "}";
+  auto emit_global = [&](const std::string &tensor, int register_id) {
+    PrintIndent();
+    stream << "rvt_gr(" << register_id
+           << ", PRECISION(DT_FP32), FP8TYPE(DT_FP32), " << tensor
+           << ".addr, FREE_LAYOUT, " << matrix_shape << ", (int[4]){" << tensor
+           << ".stride.c, " << kElementsPerEU << ", " << kElementsPerEU
+           << ", 1});\n";
+  };
+  auto emit_local = [&](const std::string &tensor, int register_id) {
+    PrintIndent();
+    stream << "rvt_tr(" << register_id
+           << ", PRECISION(DT_FP32), FP8TYPE(DT_FP32), " << tensor
+           << ".addr, HW_ALIGN_LAYOUT, " << matrix_shape << ", (int *)NULL);\n";
+  };
+  if (src_is_global) {
+    emit_global(src, 32);
+    emit_local(dst, 9);
+    PrintIndent();
+    stream << "rvt_dma_ld(9, 32);\n";
+  } else {
+    emit_local(src, 8);
+    emit_global(dst, 32);
+    PrintIndent();
+    stream << "rvt_dma_st(32, 8);\n";
+  }
+}
+
 void CodeGenTileLangTPU::EmitRVFill(const std::string &dst, DataType dtype,
                                     double value) {
   const auto type = RVDTypeName(dtype);
@@ -150,15 +192,25 @@ void CodeGenTileLangTPU::EmitRVGemm(const std::string &a, const std::string &b,
   ICHECK(a_dtype == b_dtype)
       << "RV Tensor GEMM requires matching A/B dtypes, got " << a_dtype
       << " and " << b_dtype;
-  ICHECK(a_dtype == DataType::Float(16) || a_dtype == DataType::BFloat(16))
-      << "RV Tensor fmm2 currently accepts FP16 or BF16 TileLang inputs, got "
+  const bool is_fp32 = a_dtype == DataType::Float(32);
+  ICHECK(is_fp32 || a_dtype == DataType::Float(16) ||
+         a_dtype == DataType::BFloat(16))
+      << "RV Tensor GEMM accepts FP32, FP16, or BF16 TileLang inputs, got "
       << a_dtype;
-  ICHECK(
-      (accumulate && c_dtype == DataType::Float(32)) ||
-      (!accumulate && (c_dtype == DataType::Float(32) || c_dtype == a_dtype)))
-      << "RV Tensor accumulating fmm2 requires an FP32 C tile; overwrite mode "
-         "permits FP32 or a C tile matching A/B, got "
-      << c_dtype;
+  if (is_fp32) {
+    ICHECK_EQ(c_dtype, DataType::Float(32))
+        << "RV Tensor FP32 GEMM requires an FP32 output/accumulator";
+    ICHECK(!transpose_b)
+        << "RV Tensor FP32 GEMM uses rvt_fmm_nn and requires KxN weights; "
+           "transpose_B is available only on the FP16/BF16 fmm2 path";
+  } else {
+    ICHECK(
+        (accumulate && c_dtype == DataType::Float(32)) ||
+        (!accumulate && (c_dtype == DataType::Float(32) || c_dtype == a_dtype)))
+        << "RV Tensor accumulating fmm2 requires an FP32 C tile; overwrite "
+           "mode permits FP32 or a C tile matching A/B, got "
+        << c_dtype;
+  }
   ICHECK_GT(m, 0);
   ICHECK_GT(n, 0);
   ICHECK_GT(k, 0);
@@ -166,15 +218,38 @@ void CodeGenTileLangTPU::EmitRVGemm(const std::string &a, const std::string &b,
   ICHECK_LT(n, 1 << 16);
   ICHECK_LT(k, 1 << 16);
 
-  EmitRVDescriptor(a, 8, false, RVDTypeName(a_dtype), true);
-  EmitRVDescriptor(b, 9, false, RVDTypeName(b_dtype), true);
-  EmitRVDescriptor(c, 10, false, RVDTypeName(c_dtype), true);
-  PrintIndent();
-  stream << "rvt_cfg_quant(0);\n";
+  if (is_fp32) {
+    constexpr int64_t kElementsPerEU = 16;
+    auto emit_matrix = [&](const std::string &tensor, int register_id,
+                           int64_t rows, int64_t cols) {
+      ICHECK_EQ(cols % kElementsPerEU, 0)
+          << "RV FP32 matrix width must be a multiple of 16";
+      PrintIndent();
+      stream << "rvt_tr(" << register_id
+             << ", PRECISION(DT_FP32), FP8TYPE(DT_FP32), " << tensor
+             << ".addr, HW_ALIGN_LAYOUT, (array4_t){.n=" << rows
+             << ", .c=" << cols / kElementsPerEU
+             << ", .h=1, .w=" << kElementsPerEU << "}, (int *)NULL);\n";
+    };
+    emit_matrix(a, 8, m, k);
+    emit_matrix(b, 9, k, n);
+    emit_matrix(c, 10, m, n);
+  } else {
+    EmitRVDescriptor(a, 8, false, RVDTypeName(a_dtype), true);
+    EmitRVDescriptor(b, 9, false, RVDTypeName(b_dtype), true);
+    EmitRVDescriptor(c, 10, false, RVDTypeName(c_dtype), true);
+  }
   PrintIndent();
   stream << "rvt_cfg_satu(0, false);\n";
   PrintIndent();
-  // Accumulation is an explicit semantic bit; the RV ISA has both variants.
+  if (is_fp32) {
+    stream << (accumulate ? "rvt_fmma_nn" : "rvt_fmm_nn")
+           << "(10, 8, 9, 0, 0);\n";
+    return;
+  }
+  stream << "rvt_cfg_quant(0);\n";
+  PrintIndent();
+  // Accumulation is an explicit semantic bit; fmm2 has both variants.
   const char *instruction = nullptr;
   if (transpose_b) {
     instruction = accumulate ? "rvt_fmm2a_nt" : "rvt_fmm2_nt";
@@ -244,7 +319,8 @@ void CodeGenTileLangTPU::EmitRVElementwise(
 // Each extended operation owns CR1 and TR8..11 until its completion fence.
 // Use SDK descriptor constructors (including SIGN for integer views), not
 // the old backend's hand-encoded register words.
-void CodeGenTileLangTPU::EmitRVConstant(double value, const std::string &dtype) {
+void CodeGenTileLangTPU::EmitRVConstant(double value,
+                                        const std::string &dtype) {
   std::ostringstream literal;
   if (std::isinf(value)) {
     literal << (value > 0 ? "INFINITY" : "(-INFINITY)");
@@ -263,9 +339,9 @@ void CodeGenTileLangTPU::EmitRVConstant(double value, const std::string &dtype) 
 }
 
 void CodeGenTileLangTPU::EmitRVScalar(const std::string &operation,
-                                     const std::string &dst,
-                                     const std::string &src, DataType dtype,
-                                     double value) {
+                                      const std::string &dst,
+                                      const std::string &src, DataType dtype,
+                                      double value) {
   const auto type = RVDTypeName(dtype);
   EmitRVDescriptor(src, 8, false, type, true);
   EmitRVDescriptor(dst, 10, false, type, true);
@@ -275,9 +351,9 @@ void CodeGenTileLangTPU::EmitRVScalar(const std::string &operation,
 }
 
 void CodeGenTileLangTPU::EmitRVReduction(const std::string &operation,
-                                        const std::string &src,
-                                        const std::string &dst, DataType dtype,
-                                        int width) {
+                                         const std::string &src,
+                                         const std::string &dst, DataType dtype,
+                                         int width) {
   const auto type = RVDTypeName(dtype);
   EmitRVDescriptor(dst, 10, false, type, true);
   stream << "rvt_cfg_satu(0, false);\nrvt_cfg_round_mode(0);\n";
@@ -289,11 +365,11 @@ void CodeGenTileLangTPU::EmitRVReduction(const std::string &operation,
   }
   stream << "{\nfor (int rv_column = 0; rv_column < " << width
          << "; ++rv_column) {\n"
-         << "rvt_tr(8, PRECISION(" << type << "), FP8TYPE(" << type
-         << "), " << src << ".addr + rv_column * " << dtype.bytes()
+         << "rvt_tr(8, PRECISION(" << type << "), FP8TYPE(" << type << "), "
+         << src << ".addr + rv_column * " << dtype.bytes()
          << ", FREE_LAYOUT, (array4_t){.n=1, .c=" << src
-         << ".shape.c, .h=1, .w=1}, (int[4]){" << src << ".stride.n, "
-         << src << ".stride.c, " << src << ".stride.h, 1});\n";
+         << ".shape.c, .h=1, .w=1}, (int[4]){" << src << ".stride.n, " << src
+         << ".stride.c, " << src << ".stride.h, 1});\n";
   if (operation == "sum") {
     stream << "rvt_fadd(10, 10, 8);\n";
   } else {
@@ -304,10 +380,10 @@ void CodeGenTileLangTPU::EmitRVReduction(const std::string &operation,
 }
 
 void CodeGenTileLangTPU::EmitRVExp(const std::string &dst,
-                                  const std::string &src,
-                                  const std::string &work0,
-                                  const std::string &work1, DataType dtype,
-                                  bool sigmoid) {
+                                   const std::string &src,
+                                   const std::string &work0,
+                                   const std::string &work1, DataType dtype,
+                                   bool sigmoid) {
   ICHECK(dtype == DataType::Float(32))
       << "RV exp/sigmoid currently require FP32 local tensors";
   // Port the validated exp(x/2)^2 range reduction from the former RV backend.
@@ -343,7 +419,8 @@ void CodeGenTileLangTPU::EmitRVExp(const std::string &dst,
          << "rvt_cvt_f2i(9, 10);\nrvt_cvt_i2f(10, 9);\n";
   EmitRVConstant(0.6931471805599453, "DT_FP32");
   stream << "rvt_fmul(10, 10, 1);\nrvt_fsub(8, 8, 10);\n";
-  const double coefficients[] = {1, 1, 0.5, 1.0/6, 1.0/24, 1.0/120, 1.0/720, 1.0/5040};
+  const double coefficients[] = {1,        1,         0.5,       1.0 / 6,
+                                 1.0 / 24, 1.0 / 120, 1.0 / 720, 1.0 / 5040};
   EmitRVConstant(coefficients[7], "DT_FP32");
   stream << "rvt_cp(10, 1);\n";
   for (int i = 6; i >= 0; --i) {
@@ -359,7 +436,8 @@ void CodeGenTileLangTPU::EmitRVExp(const std::string &dst,
   stream << "rvt_fmul(8, 10, 9);\nrvt_fmul(8, 8, 8);\n";
   if (sigmoid) {
     EmitRVConstant(1, "DT_FP32");
-    stream << "rvt_fadd(8, 8, 1);\nrvt_cfg_rsqrt_iter(3);\nrvt_fdiv(8, 1, 8);\n";
+    stream
+        << "rvt_fadd(8, 8, 1);\nrvt_cfg_rsqrt_iter(3);\nrvt_fdiv(8, 1, 8);\n";
   }
 }
 

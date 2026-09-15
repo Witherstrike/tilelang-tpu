@@ -111,7 +111,8 @@ def import_source(source: Optional[str] = None):
     # source is the source code to be imported
     return block_attr({"pragma_import_c": source}) if source is not None else None
 
+
 from .ppl_llama import (  # noqa: F401
-    ppl_rmsnorm, ppl_softmax, ppl_silu, ppl_swiglu, ppl_rope, ppl_transpose,
-    ppl_causal_mask, ppl_kv_cache_update, ppl_repeat_kv,
+    ppl_rmsnorm, ppl_softmax, ppl_silu, ppl_swiglu, ppl_rope, ppl_transpose, ppl_causal_mask,
+    ppl_kv_cache_update, ppl_repeat_kv,
 )

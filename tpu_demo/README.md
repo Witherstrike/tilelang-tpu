@@ -20,8 +20,6 @@ Low-level instruction and compiler regression tests live under
 
 The RV normalization and SwiGLU examples use FP32 intermediates, including
 exp/sigmoid. Their FP16/BF16 inputs and outputs are explicitly converted.
-See [the RV validation results](../docs/validation/sg2260e-rv-essential-results.json)
-for the recorded numerical cases.
 
 Every example supports `float16`, `bfloat16`, and `float32`. The split-K
 RMSNorm example splits the feature dimension, accumulates the sum of squares,

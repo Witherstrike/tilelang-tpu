@@ -19,17 +19,23 @@ TARGET = "tpu -mcpu=sg2260e -tpu-programming-model=rv"
 DTYPES = ("float16", "bfloat16", "float32")
 CASES = tuple(f"{op}.{dtype}" for op in ("fill", "scalar", "rsqrt", "sum", "max")
               for dtype in DTYPES) + ("sum-wide.float32", "max-wide.float32", "exp.float32",
-                                      "exp-extremes.float32", "sigmoid.float32",
-                                      "rmsnorm.float32", "softmax.float32", "swiglu.float32") + tuple(
-    f"{op}.{dtype}" for op in ("demo-rmsnorm", "demo-splitk", "demo-swiglu") for dtype in DTYPES)
+                                      "exp-extremes.float32", "sigmoid.float32", "rmsnorm.float32",
+                                      "softmax.float32", "swiglu.float32") + tuple(
+                                          f"{op}.{dtype}"
+                                          for op in ("demo-rmsnorm", "demo-splitk", "demo-swiglu")
+                                          for dtype in DTYPES)
 
 
 def make_kernel(operation, dtype="float32", rows=65, width=33):
     if operation.startswith("demo-"):
         from tpu_demo.rmsnorm.rmsnorm import build_rmsnorm, build_rmsnorm_splitk
         from tpu_demo.swiglu.swiglu import build_swiglu
-        return {"demo-rmsnorm": build_rmsnorm, "demo-splitk": build_rmsnorm_splitk,
-                "demo-swiglu": build_swiglu}[operation](dtype=dtype)
+        return {
+            "demo-rmsnorm": build_rmsnorm,
+            "demo-splitk": build_rmsnorm_splitk,
+            "demo-swiglu": build_swiglu
+        }[operation](
+            dtype=dtype)
     reduce = operation in ("sum", "max", "sum-wide", "max-wide")
     out_width = 1 if reduce else width
 
@@ -89,6 +95,7 @@ def make_kernel(operation, dtype="float32", rows=65, width=33):
                 T.ppl_rsqrt(r, r)
                 T.ppl_mul(y, x, r)
                 T.ppl_copy(y, O)
+
     return kernel
 
 
@@ -105,14 +112,15 @@ def test_extended_ops_lower_through_public_engine(case):
 @pytest.mark.parametrize("op", ("exp", "sigmoid"))
 @pytest.mark.parametrize("dtype", ("float16", "bfloat16"))
 def test_exp_family_rejects_unported_dtypes(op, dtype):
-    with pytest.raises(tilelang.tvm.error.TVMError, match="require FP32"):
+    with pytest.raises(ValueError, match="requires FP32"):
         tilelang.lower(make_kernel(op, dtype), target=TARGET)
 
 
 @pytest.mark.parametrize("op", ("scalar", "rsqrt", "sum", "max", "exp", "sigmoid"))
 def test_promoted_ops_retain_tpukernel_lowering(op):
-    artifact = tilelang.lower(make_kernel(op, "float32", rows=4),
-                                target="tpu -mcpu=sg2260e -tpu-programming-model=tpukernel")
+    artifact = tilelang.lower(
+        make_kernel(op, "float32", rows=4),
+        target="tpu -mcpu=sg2260e -tpu-programming-model=tpukernel")
     assert "tpu_bdc_" in artifact.kernel_source
     assert "rvt_" not in artifact.kernel_source
 
@@ -130,9 +138,12 @@ def run_case(case, runtime, output_dir):
         x = -x.abs() - 1
         x[0] = -torch.inf
     elif op == "exp-extremes":
-        special = torch.tensor([float('nan'), float('inf'), -float('inf'), -104., -90.,
-                                -87., -80., -20., 0., 1., 20., 80., 88., 89.])
-        x = special.repeat((rows * width + len(special) - 1) // len(special))[:rows * width].reshape(rows, width)
+        special = torch.tensor([
+            float('nan'),
+            float('inf'), -float('inf'), -104., -90., -87., -80., -20., 0., 1., 20., 80., 88., 89.
+        ])
+        x = special.repeat(
+            (rows * width + len(special) - 1) // len(special))[:rows * width].reshape(rows, width)
     x = x.to(getattr(torch, dtype))
     xf = x.float()
     if op == "fill":
@@ -158,19 +169,20 @@ def run_case(case, runtime, output_dir):
     else:
         raise ValueError(op)
     tilelang.disable_cache()
-    compiled = tilelang.compile(make_kernel(op, dtype, rows, width), out_idx=[1],
-                               target=TARGET, runtime_mode=runtime)
+    compiled = tilelang.compile(
+        make_kernel(op, dtype, rows, width), out_idx=[1], target=TARGET, runtime_mode=runtime)
     result = compiled(x)
     if isinstance(result, (tuple, list)):
         result = result[0]
     result = result.float()
     # Quarter-integer scalar/reduction inputs make these oracles exact even
     # under reduced-precision accumulation; transcendental tolerances differ.
-    rtol, atol = ((2e-5, 2e-6) if dtype == "float32" else
-                  (3e-3, 2e-3) if dtype == "float16" else (2e-2, 1e-2))
+    rtol, atol = ((2e-5, 2e-6) if dtype == "float32" else (3e-3, 2e-3) if dtype == "float16" else
+                  (2e-2, 1e-2))
     if op in ("fill", "scalar") or op.startswith(("sum", "max")):
         rtol = atol = 0
-    torch.testing.assert_close(result, expected.to(x.dtype).float(), rtol=rtol, atol=atol, equal_nan=True)
+    torch.testing.assert_close(
+        result, expected.to(x.dtype).float(), rtol=rtol, atol=atol, equal_nan=True)
     # Explicitly check non-finite classes; atol alone cannot validate these.
     assert torch.equal(torch.isnan(result), torch.isnan(expected))
     assert torch.equal(torch.isposinf(result), torch.isposinf(expected))
@@ -181,10 +193,18 @@ def run_case(case, runtime, output_dir):
         (output_dir / f"{case}.c").write_text(compiled.get_kernel_source())
     finite = torch.isfinite(result) & torch.isfinite(expected)
     error = (result[finite] - expected[finite]).abs().max().item() if finite.any() else 0.
-    print("RV_ESSENTIAL_RESULT=" + json.dumps({"case": case, "runtime": runtime,
-          "shape": [rows, width], "status": "passed", "max_abs_error": error,
-          "rtol": rtol, "atol": atol,
-          "subnormal_relative_accuracy": "not_qualified"}), flush=True)
+    print(
+        "RV_ESSENTIAL_RESULT=" + json.dumps({
+            "case": case,
+            "runtime": runtime,
+            "shape": [rows, width],
+            "status": "passed",
+            "max_abs_error": error,
+            "rtol": rtol,
+            "atol": atol,
+            "subnormal_relative_accuracy": "not_qualified"
+        }),
+        flush=True)
 
 
 def run_demo(case, runtime, output_dir):
@@ -200,22 +220,34 @@ def run_demo(case, runtime, output_dir):
     else:
         expected = x.float() * torch.rsqrt(x.float().square().mean(1, keepdim=True) + 1e-12)
     tilelang.disable_cache()
-    compiled = tilelang.compile(make_kernel(op, dtype), out_idx=[len(args)],
-                               target=TARGET, runtime_mode=runtime)
+    compiled = tilelang.compile(
+        make_kernel(op, dtype), out_idx=[len(args)], target=TARGET, runtime_mode=runtime)
     result = compiled(*args)
     if isinstance(result, (tuple, list)):
         result = result[0]
-    rtol, atol = ((2e-5, 2e-6) if dtype == "float32" else
-                  (3e-3, 2e-3) if dtype == "float16" else (2e-2, 1e-2))
+    rtol, atol = ((2e-5, 2e-6) if dtype == "float32" else (3e-3, 2e-3) if dtype == "float16" else
+                  (2e-2, 1e-2))
     expected = expected.to(x.dtype)
     torch.testing.assert_close(result, expected, rtol=rtol, atol=atol)
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
-        torch.save({"inputs": args, "output": result, "expected": expected}, output_dir / f"{case}.pt")
+        torch.save({
+            "inputs": args,
+            "output": result,
+            "expected": expected
+        }, output_dir / f"{case}.pt")
         (output_dir / f"{case}.c").write_text(compiled.get_kernel_source())
-    print("RV_ESSENTIAL_RESULT=" + json.dumps({"case": case, "runtime": runtime,
-          "shape": shape, "status": "passed", "rtol": rtol, "atol": atol,
-          "max_abs_error": (result.float() - expected.float()).abs().max().item()}), flush=True)
+    print(
+        "RV_ESSENTIAL_RESULT=" + json.dumps({
+            "case": case,
+            "runtime": runtime,
+            "shape": shape,
+            "status": "passed",
+            "rtol": rtol,
+            "atol": atol,
+            "max_abs_error": (result.float() - expected.float()).abs().max().item()
+        }),
+        flush=True)
 
 
 if __name__ == "__main__":

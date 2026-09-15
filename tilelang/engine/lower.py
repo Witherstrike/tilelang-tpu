@@ -85,7 +85,6 @@ _PORTABLE_TPU_EXTERNS = frozenset({
     "tl.tpu.reduce_max",
     "tl.tpu.exp",
     "tl.tpu.sigmoid",
-
     "tl.tpu.add",
     "tl.tpu.copy",
     "tl.tpu.div",
@@ -282,6 +281,13 @@ def _validate_tpu_residual_ir(mod: tvm.IRModule, target: Target, tpu_config) -> 
 
         tir.stmt_functor.post_order_visit(function.body, collect_extern_model)
 
+        if (tpu_config.chip == "sg2260e" and
+                "tl.tpukernel.topk" in externs_by_model.get("tpukernel", ())):
+            raise _tpu_contract_error(
+                target, function_name, "target-capability",
+                "tl.tpukernel.topk is unavailable on SG2260E: the PPL 1.7 "
+                "tpub_7_1_e runtime rejects tpu_hau_sort_natural_index")
+
         for parameter in function.params:
             vector_dtype = _vector_dtype_in_type(parameter.type_annotation)
             if (_has_vector_lanes(getattr(parameter, "dtype", None)) or vector_dtype is not None):
@@ -365,6 +371,43 @@ def _validate_tpu_residual_ir(mod: tvm.IRModule, target: Target, tpu_config) -> 
                         f"{extern_name} tensor argument {position} must start "
                         "with a BufferLoad whose index rank matches its "
                         "logical extents")
+
+            region_ranks = tuple(len(region.args) - 2 for region in regions)
+            region_shapes = tuple(
+                tuple(getattr(extent, "value", None)
+                      for extent in region.args[2:])
+                for region in regions)
+            region_data = tuple(region.args[0].buffer.data for region in regions)
+            region_dtypes = tuple(str(region.args[0].buffer.dtype) for region in regions)
+            if extern_name == "tl.tpu.rsqrt":
+                if region_ranks[0] != region_ranks[1]:
+                    raise _tpu_contract_error(target, function_name, "semantic-region-ABI",
+                                              f"{extern_name} requires matching dst/src ranks")
+                if region_shapes[0] != region_shapes[1]:
+                    raise _tpu_contract_error(target, function_name, "semantic-region-ABI",
+                                              f"{extern_name} requires matching dst/src shapes")
+            elif extern_name == "tl.tpu.gemm":
+                if any(rank != 2 for rank in region_ranks):
+                    operand = ("A", "B", "C")[next(
+                        index for index, rank in enumerate(region_ranks) if rank != 2)]
+                    raise _tpu_contract_error(target, function_name, "semantic-region-ABI",
+                                              f"{extern_name} requires rank-2 {operand}")
+                if region_data[2] in region_data[:2]:
+                    raise _tpu_contract_error(
+                        target, function_name, "semantic-region-ABI",
+                        f"{extern_name} output/accumulator C must use storage "
+                        "distinct from A and B")
+            elif extern_name in {"tl.tpu.exp", "tl.tpu.sigmoid"}:
+                coefficient_index = 3 if extern_name == "tl.tpu.exp" else 4
+                if (region_ranks[coefficient_index] != 2 or
+                        region_shapes[coefficient_index] != (64, 32)):
+                    raise _tpu_contract_error(
+                        target, function_name, "semantic-region-ABI",
+                        f"{extern_name} coefficient buffer must have shape (64, 32)")
+                if (tpu_config.programming_model == "rv" and
+                        any(dtype != "float32" for dtype in region_dtypes)):
+                    raise _tpu_contract_error(target, function_name, "target-capability",
+                                              f"{extern_name} RV lowering requires FP32 tensors")
 
             canonical_semantic_calls.add(node)
             for region in regions:

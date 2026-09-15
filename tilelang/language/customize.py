@@ -8,7 +8,7 @@ from tvm.tir import PrimExpr, Buffer, BufferRegion, BufferLoad
 from typing import List, Union
 from .copy import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
 
-_TPU_LOCAL_SCOPES = {"shared", "shared.dyn", "local", "local.fragment"}
+_TPU_LOCAL_SCOPES = {"shared", "shared.dyn", "local", "local.fragment", "local.matrix"}
 _TPU_BASE_FLOAT_DTYPES = {"float16", "bfloat16", "float32"}
 _TPU_FP8_DTYPES = {"e4m3_float8", "e5m2_float8"}
 _TPU_ELEMENTWISE_FLOAT_DTYPES = _TPU_BASE_FLOAT_DTYPES | _TPU_FP8_DTYPES
@@ -47,10 +47,12 @@ def _require_descriptor_shape(operation, value):
                              f"descriptor limit {_TPUV7_DESCRIPTOR_DIM_MAX}")
 
 
-def _require_local_buffer(name, value):
+def _require_local_buffer(name, value, *, allow_matrix=False):
     _require_buffer(name, value)
     if value.scope() not in _TPU_LOCAL_SCOPES:
         raise ValueError(f"{name} must reside in TPU local memory, got scope={value.scope()!r}")
+    if value.scope() == "local.matrix" and not allow_matrix:
+        raise ValueError(f"{name} uses local.matrix storage, which is reserved for FP32 GEMM")
     _require_descriptor_shape(name, value)
 
 
@@ -248,14 +250,14 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, *, accumulate):
         transpose form is needed.
     """
     for name, buffer in (("A", A), ("B", B), ("C", C)):
-        _require_local_buffer(name, buffer)
+        _require_local_buffer(name, buffer, allow_matrix=True)
         _require_rank(name, buffer, 2)
     _require_same_dtype("ppl_gemm inputs", A, B)
     _require_storage_disjoint("ppl_gemm", "C", C, "A", A)
     _require_storage_disjoint("ppl_gemm", "C", C, "B", B)
     input_dtype = str(A.dtype)
-    if input_dtype not in {"float16", "bfloat16"} | _TPU_FP8_DTYPES:
-        raise ValueError("ppl_gemm inputs must use float16, bfloat16, or FP8; "
+    if input_dtype not in _TPU_BASE_FLOAT_DTYPES | _TPU_FP8_DTYPES:
+        raise ValueError("ppl_gemm inputs must use float32, float16, bfloat16, or FP8; "
                          f"got {A.dtype}")
     if not isinstance(transpose_A, bool) or not isinstance(transpose_B, bool):
         raise TypeError("ppl_gemm transpose_A and transpose_B must be Python bools")
@@ -263,12 +265,18 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False, *, accumulate):
         raise TypeError("ppl_gemm accumulate must be a Python bool")
     if transpose_A:
         raise ValueError("ppl_gemm does not support transpose_A=True")
-    if input_dtype in _TPU_FP8_DTYPES:
+    if input_dtype == "float32" or input_dtype in _TPU_FP8_DTYPES:
         if str(C.dtype) != "float32":
-            raise ValueError("ppl_gemm FP8 inputs require a float32 output/accumulator")
+            raise ValueError("ppl_gemm FP32/FP8 inputs require a float32 output/accumulator")
     elif str(C.dtype) != "float32" and not (not accumulate and str(C.dtype) == input_dtype):
         raise ValueError("ppl_gemm requires a float32 C tile when accumulate=True; "
                          "overwrite mode also permits C to match the input dtype")
+    scopes = {buffer.scope() for buffer in (A, B, C)}
+    if input_dtype == "float32":
+        if scopes != {"local.matrix"}:
+            raise ValueError("ppl_gemm FP32 operands must use local.matrix storage")
+    elif "local.matrix" in scopes:
+        raise ValueError("ppl_gemm local.matrix storage is reserved for FP32 operands")
     Aptr = _tpu_tensor_region(A, "r")
     Bptr = _tpu_tensor_region(B, "r")
     Cptr = _tpu_tensor_region(C, "rw" if accumulate else "w")

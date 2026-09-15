@@ -44,20 +44,32 @@ void ValidateExpFamilyShape(const std::vector<int> &shape4,
   tl::tpuv7::ValidateDescriptorShape4(shape4, op_name.c_str());
   const int64_t hw =
       static_cast<int64_t>(shape4[2]) * static_cast<int64_t>(shape4[3]);
-  ICHECK_LE(hw, tl::tpuv7::kDescriptorDimMax)
-      << op_name << " requires h*w <= " << tl::tpuv7::kDescriptorDimMax
-      << " for tpu_bdc_fp_exp, got " << shape4[2] << "*" << shape4[3] << "="
-      << hw;
+  if (hw > tl::tpuv7::kDescriptorDimMax) {
+    std::ostringstream message;
+    message << op_name << " requires h*w <= " << tl::tpuv7::kDescriptorDimMax
+            << " for tpu_bdc_fp_exp, got " << shape4[2] << "*" << shape4[3]
+            << "=" << hw;
+    // This is invalid user IR, not an internal compiler invariant.  Throw a
+    // regular runtime error so callers get a deterministic diagnostic without
+    // depending on the platform's native backtrace implementation.
+    throw tvm::runtime::Error(message.str());
+  }
 }
 
 void ValidateReductionAlignedWidth(int64_t aligned_width,
                                    const std::string &op_name) {
-  ICHECK_GT(aligned_width, 0) << op_name << " aligned width must be positive";
-  ICHECK_LE(aligned_width, tl::tpuv7::kDescriptorDimMax)
-      << op_name << " aligned width " << aligned_width
-      << " exceeds the TPUv7/PPL dim4 limit " << tl::tpuv7::kDescriptorDimMax
-      << "; the reduction lowering materializes this width in padded dim4 "
-         "descriptors";
+  if (aligned_width <= 0) {
+    throw tvm::runtime::Error(op_name + " aligned width must be positive");
+  }
+  if (aligned_width > tl::tpuv7::kDescriptorDimMax) {
+    std::ostringstream message;
+    message << op_name << " aligned width " << aligned_width
+            << " exceeds the TPUv7/PPL dim4 limit "
+            << tl::tpuv7::kDescriptorDimMax
+            << "; the reduction lowering materializes this width in padded "
+               "dim4 descriptors";
+    throw tvm::runtime::Error(message.str());
+  }
 }
 
 const char *TPUKernelDTypeName(DataType dtype) {
@@ -134,6 +146,27 @@ void CodeGenTileLangTPU::EmitTPUKernelCopy(
          << ".stride), " << src_dtype << ");\n";
 }
 
+void CodeGenTileLangTPU::EmitTPUKernelMatrixCopy(
+    const std::string &src, bool src_is_global, const std::string &dst,
+    bool dst_is_global, DataType dtype, int64_t rows, int64_t cols) {
+  ICHECK_EQ(dtype, DataType::Float(32));
+  constexpr int64_t kElementsPerEU = 16;
+  ICHECK_EQ(cols % kElementsPerEU, 0)
+      << "TPU-Kernel FP32 matrix width must be a multiple of 16";
+  ICHECK_NE(src_is_global, dst_is_global)
+      << "TPU-Kernel matrix copy requires exactly one global operand";
+  PrintIndent();
+  if (src_is_global) {
+    stream << "tpu_gdma_matrix_S2L(" << dst << ".addr, " << src << ".addr, "
+           << rows << ", " << cols << ", " << kElementsPerEU << ", " << src
+           << ".stride.c, DT_FP32);\n";
+  } else {
+    stream << "tpu_gdma_matrix_L2S(" << dst << ".addr, " << src << ".addr, "
+           << rows << ", " << cols << ", " << kElementsPerEU << ", " << dst
+           << ".stride.c, DT_FP32);\n";
+  }
+}
+
 void CodeGenTileLangTPU::EmitTPUKernelFill(const std::string &dst,
                                            DataType dtype, double value) {
   const char *scalar_field = nullptr;
@@ -187,11 +220,25 @@ void CodeGenTileLangTPU::EmitTPUKernelGemm(
   ICHECK(a_dtype == b_dtype)
       << "TPU-Kernel GEMM requires matching input dtypes, got " << a_dtype
       << " and " << b_dtype;
+  const bool is_fp32 = a_dtype == DataType::Float(32);
   const bool is_fp8 = a_dtype.is_e4m3_float8() || a_dtype.is_e5m2_float8();
-  ICHECK(a_dtype == DataType::Float(16) || a_dtype == DataType::BFloat(16) ||
-         is_fp8)
-      << "TPU-Kernel GEMM requires FP16, BF16, or matching FP8 inputs, got "
+  ICHECK(is_fp32 || a_dtype == DataType::Float(16) ||
+         a_dtype == DataType::BFloat(16) || is_fp8)
+      << "TPU-Kernel GEMM requires FP32, FP16, BF16, or matching FP8 inputs, "
+         "got "
       << a_dtype;
+  if (is_fp32) {
+    ICHECK_EQ(c_dtype, DataType::Float(32))
+        << "TPU-Kernel FP32 GEMM requires an FP32 output/accumulator";
+    ICHECK(!transpose_b)
+        << "TPU-Kernel FP32 GEMM currently requires KxN weights; the SDK "
+           "does not expose an FP32 right-transpose form";
+    PrintIndent();
+    stream << "tpu_bdc_fp32_mm(" << c << ".addr, " << a << ".addr, " << b
+           << ".addr, 0, " << m << ", " << k << ", " << n << ", 16, 16, false, "
+           << (accumulate ? "true" : "false") << ");\n";
+    return;
+  }
   if (is_fp8) {
     ICHECK_EQ(c_dtype, DataType::Float(32))
         << "TPU-Kernel FP8 GEMM requires an FP32 output/accumulator";
@@ -295,8 +342,10 @@ void CodeGenTileLangTPU::EmitTPUKernelScalar(const std::string &operation,
   stream << "}\n";
 }
 
+// The former TPU-Kernel-only entry point was named TryEmitTPUKernelSemantic.
+// Portable operations now dispatch through this shared selector.
 bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
-                                                  const std::string &op_name) {
+                                            const std::string &op_name) {
   auto handle_elementwise_const = [&, this](const std::string &semantic_name,
                                             const std::string &operation) {
     ICHECK_EQ(op->args.size(), 4U)
@@ -557,10 +606,10 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     ICHECK_EQ(tmp_shape[1], expected_eu)
         << op_name << " scratch width must equal the dtype-specific EU size";
     if (target_programming_model_ == "rv") {
-      EmitRVReduction("max", input_tensor, output_tensor, dtype_, input_shape[1]);
+      EmitRVReduction("max", input_tensor, output_tensor, dtype_,
+                      input_shape[1]);
       return true;
     }
-
 
     this->PrintIndent();
     int sid = this->BeginScope();
@@ -807,7 +856,8 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     ICHECK_EQ(tmp_shape[1], expected_eu)
         << op_name << " scratch width must equal the dtype-specific EU size";
     if (target_programming_model_ == "rv") {
-      EmitRVReduction("sum", input_tensor, output_tensor, dtype_, input_shape[1]);
+      EmitRVReduction("sum", input_tensor, output_tensor, dtype_,
+                      input_shape[1]);
       return true;
     }
 
@@ -1085,7 +1135,8 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
                  << dtype << ");\n";
     this->PrintIndent();
     this->stream << "}\n";
-  } else if (op_name == "tl.tpukernel.gather" || op_name == "tl.tpu.embedding") {
+  } else if (op_name == "tl.tpukernel.gather" ||
+             op_name == "tl.tpu.embedding") {
     ICHECK_EQ(op->args.size(), 5U)
         << op_name << " expects output, param, index, and param_h";
     std::array<SemanticTensorOperand, 3> operands{};
@@ -1151,13 +1202,13 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
       for (size_t i = 0; i < tensors.size(); ++i) {
         const auto &t = tensors[i];
         stream << "__tilelang_tpu_tensor_info emb" << i << " = " << t << ";\n";
-        stream << "emb" << i << ".shape = (dim4){1,1," << t
-               << ".shape.c," << t << ".shape.w};\n";
+        stream << "emb" << i << ".shape = (dim4){1,1," << t << ".shape.c," << t
+               << ".shape.w};\n";
         // Whole global descriptors intentionally carry zero stride with
         // default_stride=true. FREE_LAYOUT needs explicit contiguous strides.
-        stream << "emb" << i << ".stride = (dim4){" << t << ".shape.c*"
-               << t << ".shape.w," << t << ".shape.c*" << t << ".shape.w,"
-               << t << ".shape.w,1};\n";
+        stream << "emb" << i << ".stride = (dim4){" << t << ".shape.c*" << t
+               << ".shape.w," << t << ".shape.c*" << t << ".shape.w," << t
+               << ".shape.w,1};\n";
         EmitRVDescriptor("emb" + std::to_string(i), 32 + i, true,
                          i == 2 ? "DT_UINT32" : dtype, false);
       }

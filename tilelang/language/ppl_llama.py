@@ -189,7 +189,6 @@ def ppl_transpose(out, inp):
     return _transpose(out, inp)
 
 
-
 @T.macro
 def _causal_mask(out, past):
     zero = T.alloc_shared((1, 1), out.dtype)
@@ -205,13 +204,13 @@ def _causal_mask(out, past):
 
 
 def ppl_causal_mask(out, past_length=0):
-    """Global FP32 additive causal mask (Q,past_length+Q).
+    """Global additive causal mask shaped (Q,past_length+Q).
 
     Masked entries are -Inf, unmasked entries zero, including the cache prefix.
     """
     _require_global_buffer("out", out)
     _require_rank("out", out, 2)
-    _require_dtype("out", out, {"float32"})
+    _require_dtype("out", out, _TPU_BASE_FLOAT_DTYPES)
     if type(past_length) is not int or past_length < 0:
         raise ValueError("ppl_causal_mask past_length must be a nonnegative static integer")
     if int(out.shape[1]) != past_length + int(out.shape[0]):

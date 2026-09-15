@@ -270,9 +270,7 @@ Each new operation or target capability must define:
 4. Instruction selection and synchronization requirements
 5. Positive and negative source tests
 6. CModel numerical cases before PCIe cases
-7. A machine-readable contract entry with exact evidence references
+7. Focused source tests and a reproducible numerical validation command
 
 Raw SDK symbols or successful compilation alone do not establish an operation
-contract. See [`test-report.md`](test-report.md) for runtime results and
-[`../tpu-op-contract/README.md`](../tpu-op-contract/README.md) for the contract
-format.
+contract. See [`test-report.md`](test-report.md) for the validation procedure.
