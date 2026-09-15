@@ -104,3 +104,30 @@ finite model activations, LMEM capacity and exact tiling are caller obligations.
 The functional transpose and column-wise RoPE are not performance implementations.
 No full checkpoint inference, arbitrary dynamic shapes, multi-core scaling,
 FP8, strict IEEE transcendental behavior, or training support is claimed.
+
+## Verified results (2026-09-15)
+
+Implementation revision: `74096491774009fb29e69bb9d770386a5cf609ab`.
+[Machine-readable results and output hashes](validation/sg2260e-rv-llama2-results.json)
+record these separately scoped checks:
+
+- **547 static tests passed**, 8 SDK-conditional cases skipped locally; the
+  independent build used clean TVM `a8a54d2b1f43c23a47f2fc08779654918eae6464`.
+- **CModel 78/78 passed**: original 32 essential cases plus 46 Llama cases,
+  including 4096-wide RMSNorm/Softmax and `(65,128)` RoPE. The clean-TVM and
+  original-source builds produced identical generated C and output bytes for
+  all 78 cases. The copied checkout's pre-existing TVM edits were preserved and
+  are not part of the implementation commit.
+- **Remote PCIe compilation/linking 46/46 passed**, without loading device
+  libraries. All 46 generated kernels match the CModel sources byte-for-byte.
+  Remote Llama API/registry checks passed 135 tests.
+- **PCIe numerical execution not performed.** The final device-0 check at
+  `2026-09-15T11:01:38+08:00` reported Active, 0% utilization and 0MB memory,
+  but admin1-owned quarantine/session markers remained under `/run/lock`.
+  These markers were neither removed nor bypassed. As requested, the work is
+  submitted with board numerical validation pending recovery/ownership clearance.
+
+The common extern capability contract registers embedding and its compiler
+stages. Its stricter runtime-claim format has not been populated from this
+separate result format; numerical capability rows are intentionally not promoted
+using test-source evidence alone.
