@@ -78,7 +78,11 @@ def make_kernel(operation, dtype="float32", rows=65, width=33):
                     T.ppl_div(y, y, r)
                     T.ppl_copy(y, O)
                 elif operation in ("sigmoid", "swiglu"):
-                    T.ppl_sigmoid(y, x, w0, w1, coeff)
+                    T.ppl_mul_C(y, x, T.float32(-1.0))
+                    T.ppl_exp(y, w0, w1, coeff)
+                    T.ppl_add_C(y, y, T.float32(1.0))
+                    T.ppl_fill(w0, T.float32(1.0))
+                    T.ppl_div(y, w0, y)
                     if operation == "swiglu":
                         T.ppl_mul(y, y, x)
                         T.ppl_mul(y, y, x)

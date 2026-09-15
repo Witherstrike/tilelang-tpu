@@ -204,7 +204,10 @@ def run(*,
     normalized = (
         source.float() *
         torch.rsqrt(torch.mean(source.float().square(), dim=1, keepdim=True) + 1e-12))
-    expected = normalized.to(host_dtype) * weight
+    # The low-precision kernel rounds the normalized value before applying
+    # the low-precision weight.  Express that boundary explicitly because
+    # PyTorch CPU does not implement arithmetic directly on FP8 tensors.
+    expected = (normalized.to(host_dtype).float() * weight.float()).to(host_dtype)
     atol, rtol = tolerance(dtype, "rmsnorm")
     metrics = comparison(destination, expected, atol=atol, rtol=rtol)
     return result_payload(

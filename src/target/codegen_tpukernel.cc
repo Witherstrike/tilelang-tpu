@@ -113,14 +113,13 @@ void CodeGenTileLangTPU::EmitTPUKernelCopy(
   if (src_dtype != dst_dtype) {
     ICHECK(!src_is_global && !dst_is_global)
         << "TPU copy-and-convert currently requires two local tensors";
-    auto is_valid_fp32_peer = [](const std::string &dtype) {
+    auto is_supported_float = [](const std::string &dtype) {
       return dtype == "DT_FP16" || dtype == "DT_BFP16" ||
-             dtype == "DT_FP8E4M3" || dtype == "DT_FP8E5M2";
+             dtype == "DT_FP32" || dtype == "DT_FP8E4M3" ||
+             dtype == "DT_FP8E5M2";
     };
-    ICHECK((src_dtype == "DT_FP32" && is_valid_fp32_peer(dst_dtype)) ||
-           (dst_dtype == "DT_FP32" && is_valid_fp32_peer(src_dtype)))
-        << "TPU-Kernel copy-and-convert is limited to the validated FP32 <-> "
-           "{FP16, BF16, FP8E4M3, FP8E5M2} pairs; got "
+    ICHECK(is_supported_float(src_dtype) && is_supported_float(dst_dtype))
+        << "TPU-Kernel copy-and-convert requires floating-point operands; got "
         << src_dtype << " -> " << dst_dtype;
     stream << "tpu_bdc_cast(" << dst << ".addr, " << src << ".addr, &" << dst
            << ".shape, (" << dst << ".default_stride ? NULL : &" << dst
@@ -178,10 +177,7 @@ void CodeGenTileLangTPU::EmitTPUKernelFill(const std::string &dst,
   } else if (dtype == DataType::BFloat(16)) {
     scalar_field = "bf16";
   } else if (is_fp8) {
-    ICHECK_EQ(value, 0.0)
-        << "TPU-Kernel FP8 fill currently supports only the validated zero "
-           "bit pattern";
-    scalar_field = "u32";
+    scalar_field = "f32";
   } else {
     LOG(FATAL) << "TPU-Kernel fill does not support dtype " << dtype;
   }
@@ -191,12 +187,8 @@ void CodeGenTileLangTPU::EmitTPUKernelFill(const std::string &dst,
   stream << "{\n";
   PrintIndent();
   stream << "scalar_t " << dst << "_scalar_" << scalar_field;
-  if (is_fp8) {
-    stream << " = {.u32 = 0};\n";
-  } else {
-    stream << " = {.f32 = " << FloatingLiteral(value) << "};\n";
-  }
-  if (dtype != DataType::Float(32) && !is_fp8) {
+  stream << " = {.f32 = " << FloatingLiteral(value) << "};\n";
+  if (dtype != DataType::Float(32)) {
     PrintIndent();
     stream << dst << "_scalar_" << scalar_field << " = tpu_cast(" << dst
            << "_scalar_" << scalar_field << ", " << dtype_name
@@ -215,8 +207,6 @@ void CodeGenTileLangTPU::EmitTPUKernelGemm(
     const std::string &a, const std::string &b, const std::string &c,
     DataType a_dtype, DataType b_dtype, DataType c_dtype, bool transpose_a,
     bool transpose_b, bool accumulate, int64_t m, int64_t n, int64_t k) {
-  ICHECK(!transpose_a)
-      << "TileLang TPU GEMM does not yet support transpose_A=true";
   ICHECK(a_dtype == b_dtype)
       << "TPU-Kernel GEMM requires matching input dtypes, got " << a_dtype
       << " and " << b_dtype;
@@ -234,11 +224,16 @@ void CodeGenTileLangTPU::EmitTPUKernelGemm(
         << "TPU-Kernel FP32 GEMM currently requires KxN weights; the SDK "
            "does not expose an FP32 right-transpose form";
     PrintIndent();
-    stream << "tpu_bdc_fp32_mm(" << c << ".addr, " << a << ".addr, " << b
-           << ".addr, 0, " << m << ", " << k << ", " << n << ", 16, 16, false, "
+    stream << (transpose_a ? "tpu_bdc_fp32_mm_L_trans(" : "tpu_bdc_fp32_mm(")
+           << c << ".addr, " << a << ".addr, " << b << ".addr, 0, "
+           << (transpose_a ? k : m) << ", " << (transpose_a ? m : k) << ", "
+           << n << ", 16, 16, false, "
            << (accumulate ? "true" : "false") << ");\n";
     return;
   }
+  ICHECK(!transpose_a)
+      << "TPU-Kernel FP16/BF16/FP8 GEMM does not expose a standalone "
+         "transpose-A form";
   if (is_fp8) {
     ICHECK_EQ(c_dtype, DataType::Float(32))
         << "TPU-Kernel FP8 GEMM requires an FP32 output/accumulator";
@@ -426,7 +421,7 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     ICHECK(operands[3].shape4 == std::vector<int>({1, 64, 1, 32}))
         << op_name << " coefficient buffer must have shape (64, 32)";
     if (target_programming_model_ == "rv") {
-      EmitRVExp(tensors[0], tensors[0], tensors[1], tensors[2], dtype, false);
+      EmitRVExp(tensors[0], tensors[1], tensors[2], dtype);
       return true;
     }
     std::string dtype_name = TPUKernelDTypeName(dtype);
@@ -438,97 +433,6 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
                  << ".addr, " << tensors[1] << ".addr, " << tensors[2]
                  << ".addr, " << tensors[3] << ".addr, &" << tensors[0]
                  << ".shape, " << dtype_name << ");\n";
-  } else if (op_name == "tl.tpu.sigmoid") {
-    ICHECK_EQ(op->args.size(), 6U)
-        << op_name << " expects dst, src, work0, work1, and coeff";
-    std::array<SemanticTensorOperand, 5> operands{};
-    std::array<std::string, 5> tensors{};
-    DataType dtype;
-    for (size_t i = 0; i < operands.size(); ++i) {
-      operands[i] = ParseWholeBufferRegion(
-          op->args[i + 1], op_name + " operand " + std::to_string(i),
-          i == 1 ? 1 : 3);
-      ICHECK(operands[i].is_local)
-          << op_name << " operands must all reside in local memory";
-      tensors[i] = operands[i].descriptor;
-      DataType operand_dtype = operands[i].dtype;
-      if (i == 0) {
-        dtype = operand_dtype;
-        ICHECK(dtype == DataType::Float(16) || dtype == DataType::BFloat(16) ||
-               dtype == DataType::Float(32))
-            << op_name << " supports only FP16, BF16, and FP32, got " << dtype;
-      } else {
-        ICHECK_EQ(operand_dtype, dtype)
-            << op_name << " requires matching operand dtypes";
-      }
-    }
-    for (size_t i = 0; i < operands.size(); ++i) {
-      for (size_t j = i + 1; j < operands.size(); ++j) {
-        ICHECK_NE(operands[i].data_var, operands[j].data_var)
-            << op_name << " requires distinct storage for every operand";
-      }
-    }
-    const size_t payload_rank = operands[0].rank;
-    for (size_t i = 1; i < 4; ++i) {
-      ICHECK_EQ(operands[i].rank, payload_rank)
-          << op_name << " requires matching payload ranks";
-    }
-    ICHECK_EQ(operands[4].rank, 2U)
-        << op_name << " coefficient buffer must be rank 2";
-    ICHECK(operands[0].shape4 == operands[1].shape4 &&
-           operands[0].shape4 == operands[2].shape4 &&
-           operands[0].shape4 == operands[3].shape4)
-        << op_name << " requires dst/src/work0/work1 to have matching shapes";
-    ValidateExpFamilyShape(operands[0].shape4, op_name);
-    ICHECK(operands[4].shape4 == std::vector<int>({1, 64, 1, 32}))
-        << op_name << " coefficient buffer must have shape (64, 32)";
-
-    if (target_programming_model_ == "rv") {
-      EmitRVExp(tensors[0], tensors[1], tensors[2], tensors[3], dtype, true);
-      return true;
-    }
-    const std::string &dst = tensors[0];
-    const std::string &src = tensors[1];
-    const std::string &work0 = tensors[2];
-    const std::string &work1 = tensors[3];
-    const std::string &coeff = tensors[4];
-    const std::string dtype_name = TPUKernelDTypeName(dtype);
-    const std::string one = name_supply_->FreshName("tpukernel_one");
-
-    this->PrintIndent();
-    this->stream << "tpu_bdc_load_fp_exp_coeff(" << coeff << ".addr, "
-                 << dtype_name << ");\n";
-    this->PrintIndent();
-    this->stream << "tpu_bdc_fp_exp(" << work0 << ".addr, " << src << ".addr, "
-                 << dst << ".addr, " << work1 << ".addr, " << coeff
-                 << ".addr, &" << src << ".shape, " << dtype_name << ");\n";
-    this->PrintIndent();
-    this->stream << "{\n";
-    this->PrintIndent();
-    this->stream << "scalar_t " << one << " = {.f32 = 1.0f};\n";
-    if (dtype != DataType::Float(32)) {
-      this->PrintIndent();
-      this->stream << one << " = tpu_cast(" << one << ", " << dtype_name
-                   << ", DT_FP32, RM_HALF_TO_EVEN);\n";
-    }
-    auto emit_scalar = [&, this](const char *instruction,
-                                 const std::string &out,
-                                 const std::string &input) {
-      this->PrintIndent();
-      this->stream << instruction << "(" << out << ".addr, " << input
-                   << ".addr, " << one << ", &" << out << ".shape, (" << out
-                   << ".default_stride ? NULL : &" << out << ".stride), ("
-                   << input << ".default_stride ? NULL : &" << input
-                   << ".stride), " << dtype_name;
-    };
-    emit_scalar("tpu_bdc_fp_tunable_C_div", work1, work0);
-    this->stream << ", 3);\n";
-    emit_scalar("tpu_bdc_fp_add_C", dst, work1);
-    this->stream << ");\n";
-    emit_scalar("tpu_bdc_fp_tunable_C_div", dst, dst);
-    this->stream << ", 3);\n";
-    this->PrintIndent();
-    this->stream << "}\n";
   } else if (op_name == "tl.tpu.reduce_max") {
     ICHECK_EQ(op->args.size(), 7U)
         << op_name
@@ -564,6 +468,12 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     int64_t stride_n = stride_imm->value;
     // Select the floating-point format used by the pool sequence.
     auto dtype_ = operands[0].dtype;
+    const bool is_fp8 =
+        dtype_.is_e4m3_float8() || dtype_.is_e5m2_float8();
+    ICHECK(dtype_ == DataType::Float(16) ||
+           dtype_ == DataType::BFloat(16) ||
+           dtype_ == DataType::Float(32) || is_fp8)
+        << op_name << " supports FP8, FP16, BF16, and FP32, got " << dtype_;
     std::string dtype;
     if (dtype_ == DataType::Float(16)) {
       dtype = "DT_FP16";
@@ -571,9 +481,8 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
       dtype = "DT_FP32";
     } else if (dtype_ == DataType::BFloat(16)) {
       dtype = "DT_BFP16";
-    } else {
-      LOG(FATAL) << op_name << " supports only FP16, BF16, and FP32, got "
-                 << dtype_;
+    } else if (is_fp8) {
+      dtype = TPUKernelDTypeName(dtype_);
     }
     for (size_t i = 1; i < operands.size(); ++i) {
       ICHECK_EQ(operands[i].dtype, dtype_)
@@ -709,9 +618,7 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
                  << input_tensor << ".shape.c, 1, align_w - " << input_tensor
                  << ".shape.w};\n";
     this->PrintIndent();
-    int elem_size =
-        (dtype_ == DataType::Float(16) || dtype_ == DataType::BFloat(16)) ? 2
-                                                                          : 4;
+    int elem_size = dtype_.bytes();
     this->stream << "    int elem_size = " << elem_size << ";\n";
     this->PrintIndent();
     this->stream << "    int offset = " << input_tensor
@@ -811,6 +718,18 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     int64_t stride_n = stride_imm->value;
 
     auto dtype_ = operands[0].dtype;
+    const bool is_fp8 =
+        dtype_.is_e4m3_float8() || dtype_.is_e5m2_float8();
+    ICHECK(dtype_ == DataType::Float(16) ||
+           dtype_ == DataType::BFloat(16) ||
+           dtype_ == DataType::Float(32) || is_fp8)
+        << op_name << " supports FP8, FP16, BF16, and FP32, got " << dtype_;
+    if (is_fp8 && target_programming_model_ != "rv") {
+      throw tvm::runtime::Error(
+          op_name +
+          " supports FP8 only with RV Tensor; TPU-Kernel supports FP16, "
+          "BF16, and FP32");
+    }
     std::string dtype, dtype_2;
     if (dtype_ == DataType::Float(16)) {
       dtype = "DT_FP16";
@@ -821,9 +740,9 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     } else if (dtype_ == DataType::BFloat(16)) {
       dtype = "DT_BFP16";
       dtype_2 = "bf16";
-    } else {
-      LOG(FATAL) << op_name << " supports only FP16, BF16, and FP32, got "
-                 << dtype_;
+    } else if (is_fp8) {
+      dtype = TPUKernelDTypeName(dtype_);
+      dtype_2 = "u32";
     }
     for (size_t i = 1; i < operands.size(); ++i) {
       ICHECK_EQ(operands[i].dtype, dtype_)
@@ -1057,84 +976,6 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
                  << ".addr, &" << src0 << ".shape, "
                  << TPUKernelDTypeName(dst_dtype) << ");\n";
 
-  } else if (op_name == "tl.tpukernel.rope_add") {
-    ICHECK_EQ(op->args.size(), 6U)
-        << op_name << " expects dst and four input tiles";
-    std::array<SemanticTensorOperand, 5> operands{};
-    std::array<std::string, 5> tensors{};
-    for (size_t i = 0; i < operands.size(); ++i) {
-      operands[i] = ParseWholeBufferRegion(
-          op->args[i + 1], op_name + " operand " + std::to_string(i),
-          i == 0 ? 2 : 1);
-      ICHECK(operands[i].is_local)
-          << op_name << " operands must all reside in local memory";
-      tensors[i] = operands[i].descriptor;
-      ICHECK_EQ(operands[i].rank, 2U) << op_name << " requires rank-2 operands";
-    }
-    auto dtype_ = operands[0].dtype;
-    for (size_t i = 1; i < operands.size(); ++i) {
-      ICHECK_EQ(operands[i].dtype, dtype_)
-          << op_name << " requires matching operand dtypes";
-      ICHECK(operands[i].shape4 == operands[0].shape4)
-          << op_name << " requires matching operand shapes";
-    }
-    for (size_t i = 1; i < operands.size(); ++i) {
-      ICHECK_NE(operands[0].data_var, operands[i].data_var)
-          << op_name << " output storage must not alias an input";
-    }
-    auto dst = tensors[0];
-    auto even_src0 = tensors[1];
-    auto even_src1 = tensors[2];
-    auto odd_src0 = tensors[3];
-    auto odd_src1 = tensors[4];
-    ICHECK_EQ(operands[0].shape4[3] % 2, 0)
-        << op_name << " requires an even W dimension";
-    std::string dtype;
-    int bytes_size = 0;
-    if (dtype_ == DataType::Float(16)) {
-      dtype = "DT_FP16";
-      bytes_size = 2;
-    } else if (dtype_ == DataType::Float(32)) {
-      dtype = "DT_FP32";
-      bytes_size = 4;
-    } else if (dtype_ == DataType::BFloat(16)) {
-      dtype = "DT_BFP16";
-      bytes_size = 2;
-    } else if (dtype_.is_e4m3_float8() || dtype_.is_e5m2_float8()) {
-      dtype = TPUKernelDTypeName(dtype_);
-      bytes_size = 1;
-    } else {
-      LOG(FATAL) << op_name << " supports only FP8, FP16, BF16, and FP32, got "
-                 << dtype_;
-    }
-    this->PrintIndent();
-    this->stream << "{\n";
-    this->PrintIndent();
-    this->stream << "dim4 half_stride;\n";
-    this->PrintIndent();
-    this->stream << "tpu_aligned_stride(&half_stride, 0, &" << dst << ".shape, "
-                 << dtype << ");\n";
-    this->PrintIndent();
-    this->stream << "half_stride.w *= 2;\n";
-    this->PrintIndent();
-    this->stream << "dim4 half_shape = {.n = " << dst
-                 << ".shape.n, .c = " << dst << ".shape.c, .h = " << dst
-                 << ".shape.h, .w = " << dst << ".shape.w};\n";
-    this->PrintIndent();
-    this->stream << "half_shape.w /= 2;\n";
-    this->PrintIndent();
-    this->stream << "tpu_bdc_fp_add(" << dst << ".addr, " << even_src0
-                 << ".addr, " << even_src1 << ".addr + " << bytes_size
-                 << ", &half_shape, &half_stride, &half_stride, &half_stride, "
-                 << dtype << ");\n";
-    this->PrintIndent();
-    this->stream << "tpu_bdc_fp_add(" << dst << ".addr + " << bytes_size << ", "
-                 << odd_src0 << ".addr + " << bytes_size << ", " << odd_src1
-                 << ".addr, &half_shape, &half_stride, &half_stride, "
-                    "&half_stride, "
-                 << dtype << ");\n";
-    this->PrintIndent();
-    this->stream << "}\n";
   } else if (op_name == "tl.tpukernel.gather" ||
              op_name == "tl.tpu.embedding") {
     ICHECK_EQ(op->args.size(), 5U)
@@ -1191,11 +1032,6 @@ bool CodeGenTileLangTPU::TryEmitTPUSemantic(const CallNode *op,
     const std::string &dst = tensors[0];
     const std::string &param = tensors[1];
     const std::string &index = tensors[2];
-    if (op_name == "tl.tpu.embedding") {
-      ICHECK(dtype_ == DataType::Float(16) || dtype_ == DataType::Float(32) ||
-             dtype_ == DataType::BFloat(16))
-          << op_name << " requires FP16, BF16, or FP32 payloads";
-    }
     if (target_programming_model_ == "rv") {
       // Row-major global tables: reinterpret logical C rows as DMA H rows.
       stream << "{\n";

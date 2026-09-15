@@ -644,9 +644,6 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
       ICHECK(operation != "div")
           << "TileLang TPU " << operation
           << " has no validated FP8 instruction contract";
-      ICHECK_EQ(target_programming_model_, "tpukernel")
-          << "FP8 " << operation
-          << " is validated only for the TPU-Kernel programming model";
     } else {
       ICHECK(dst_dtype == DataType::Float(16) ||
              dst_dtype == DataType::BFloat(16) ||
@@ -709,7 +706,7 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           op_name == "tl.tpu.add_scalar" || op_name == "tl.tpu.mul_scalar" ||
           op_name == "tl.tpu.rsqrt" || op_name == "tl.tpu.reduce_sum" ||
           op_name == "tl.tpu.reduce_max" || op_name == "tl.tpu.exp" ||
-          op_name == "tl.tpu.sigmoid" || op_name == "tl.tpu.embedding";
+          op_name == "tl.tpu.embedding";
       ICHECK(is_supported_portable_op)
           << "Unknown backend-neutral TPU operation " << op_name;
       ICHECK_EQ(rvt_direct_call_count_, 0)
@@ -1011,18 +1008,18 @@ void CodeGenTileLangTPU::VisitExpr_(const CallNode *op, std::ostream &os) {
           return dtype == "DT_FP8E4M3" || dtype == "DT_FP8E5M2";
         };
         if (is_fp8(src_dtype) || is_fp8(dst_dtype)) {
-          ICHECK_EQ(target_programming_model_, "tpukernel")
-              << op_name
-              << " FP8 transport is validated only for the "
-                 "TPU-Kernel programming model";
           const bool same_format = src_dtype == dst_dtype;
-          const bool fp32_conversion =
-              (is_fp8(src_dtype) && dst_dtype == "DT_FP32") ||
-              (src_dtype == "DT_FP32" && is_fp8(dst_dtype));
-          ICHECK(same_format || fp32_conversion)
+          auto is_base_float = [](const std::string &dtype) {
+            return dtype == "DT_FP16" || dtype == "DT_BFP16" ||
+                   dtype == "DT_FP32";
+          };
+          const bool float_conversion =
+              (is_fp8(src_dtype) && is_base_float(dst_dtype)) ||
+              (is_base_float(src_dtype) && is_fp8(dst_dtype));
+          ICHECK(same_format || float_conversion)
               << op_name
-              << " FP8 supports same-format transport and the "
-                 "validated FP32 conversion boundary only";
+              << " FP8 supports same-format transport and conversion to or "
+                 "from FP16, BF16, or FP32 only";
         }
         // Region descriptors must be declared before either backend emits an
         // instruction that references them.

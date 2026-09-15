@@ -531,13 +531,6 @@ private:
       for (size_t i = 1; i <= 4; ++i) {
         mark_arg(i, BufferAccessKind::kConservative);
       }
-    } else if (op_name == "tl.tpu.sigmoid") {
-      // The PPL 1.7 sigmoid composition reuses dst/workspaces across exp,
-      // reciprocal, and add instructions.  Keep every operand distinct at
-      // the bank-planning boundary.
-      for (size_t i = 1; i <= 5; ++i) {
-        mark_arg(i, BufferAccessKind::kConservative);
-      }
     } else if (op_name == "tl.tpukernel.gather" ||
                op_name == "tl.tpu.embedding") {
       mark_arg(1, BufferAccessKind::kWrite);
@@ -547,12 +540,6 @@ private:
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kWrite);
       mark_arg(3, BufferAccessKind::kRead);
-    } else if (op_name == "tl.tpukernel.rope_add") {
-      mark_arg(1, BufferAccessKind::kWrite);
-      mark_arg(2, BufferAccessKind::kRead);
-      mark_arg(3, BufferAccessKind::kRead);
-      mark_arg(4, BufferAccessKind::kRead);
-      mark_arg(5, BufferAccessKind::kRead);
     } else {
       // Unknown/non-TPU externs have no instruction contract in this pass.
       // Keep their buffer operands conservative; the residual-IR verifier or

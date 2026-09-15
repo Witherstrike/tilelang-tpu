@@ -17,7 +17,6 @@ _PORTABLE_EXTERNS = {
     "tl.tpu.reduce_sum",
     "tl.tpu.reduce_max",
     "tl.tpu.exp",
-    "tl.tpu.sigmoid",
     "tl.tpu.add",
     "tl.tpu.copy",
     "tl.tpu.div",
@@ -29,7 +28,6 @@ _PORTABLE_EXTERNS = {
 }
 _TPUKERNEL_EXTERNS = {
     "tl.tpukernel.gather",
-    "tl.tpukernel.rope_add",
     "tl.tpukernel.topk",
 }
 _PORTABLE_IMPLEMENTED_IN_TPUKERNEL = {
@@ -40,7 +38,6 @@ _PORTABLE_IMPLEMENTED_IN_TPUKERNEL = {
     "tl.tpu.reduce_sum",
     "tl.tpu.reduce_max",
     "tl.tpu.exp",
-    "tl.tpu.sigmoid",
 }
 
 

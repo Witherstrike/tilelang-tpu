@@ -7,7 +7,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-DTYPES = ("float16", "bfloat16", "float32")
+BASE_DTYPES = ("float16", "bfloat16", "float32")
+FP8_DTYPES = ("e4m3_float8", "e5m2_float8")
+DTYPES = BASE_DTYPES + FP8_DTYPES
 CHIP_CORE_COUNTS = {"bm1690": 8, "sg2260e": 4}
 TARGET_CONFIGS = (
     ("bm1690", "tpukernel"),
@@ -30,6 +32,10 @@ OPERATIONS = (
     "flashattn",
 )
 RV_SUPPORTED_OPERATIONS = frozenset(OPERATIONS)
+OPERATION_DTYPES = {
+    operation: (BASE_DTYPES if operation == "elementwise-div" else DTYPES)
+    for operation in OPERATIONS
+}
 
 
 def kernel_variant(operation: str, dtype: str, programming_model: str) -> str:
@@ -46,7 +52,7 @@ def kernel_variant(operation: str, dtype: str, programming_model: str) -> str:
     if operation == "matmul":
         if dtype != "float32":
             return "matmul_low_precision"
-        return f"matmul_{programming_model}_fp32"
+        return "matmul_fp32"
     if operation in ("rmsnorm", "rmsnorm-splitk"):
         base = operation.replace("-", "_")
         precision = "fp32" if dtype == "float32" else "low_precision"
@@ -79,7 +85,7 @@ def build_cases() -> tuple[DemoCase, ...]:
     cases = []
     for operation in OPERATIONS:
         supports_rv = operation in RV_SUPPORTED_OPERATIONS
-        for dtype in DTYPES:
+        for dtype in OPERATION_DTYPES[operation]:
             variants = (("balanced", "descending-max",
                          "weighted-keys") if operation == "flashattn" else ("default",))
             causal_modes = (False, True) if operation == "flashattn" else (False,)

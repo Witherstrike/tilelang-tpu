@@ -145,9 +145,8 @@ private:
                     const std::string &src, DataType dtype, double value);
   void EmitRVReduction(const std::string &operation, const std::string &src,
                        const std::string &dst, DataType dtype, int width);
-  void EmitRVExp(const std::string &dst, const std::string &src,
-                 const std::string &work0, const std::string &work1,
-                 DataType dtype, bool sigmoid);
+  void EmitRVExp(const std::string &dst, const std::string &work0,
+                 const std::string &work1, DataType dtype);
   void EmitRVDescriptor(const std::string &tensor, int register_id,
                         bool is_global, const std::string &dtype,
                         bool hw_aligned);

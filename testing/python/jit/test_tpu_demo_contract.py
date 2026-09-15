@@ -10,6 +10,7 @@ import torch
 import tilelang
 
 from tilelang.engine.tpu_config import TPU_CHIP_SPECS
+from tilelang.language import customize
 from tpu_demo.cases import (CHIP_CORE_COUNTS, OPERATIONS, RV_SUPPORTED_OPERATIONS, TARGET_CONFIGS,
                             build_cases, kernel_variant)
 from tpu_demo.common import DemoNumericalMismatch, comparison, validate_selection
@@ -24,12 +25,12 @@ from tpu_demo.swiglu import build_swiglu
 
 def test_registry_is_unique_complete_and_capability_scoped():
     cases = build_cases()
-    assert len(cases) == 45
+    assert len(cases) == 73
     assert len({case.case_id for case in cases}) == len(cases)
     assert sum(case.supports_rv for case in cases) == len(cases)
     assert set(OPERATIONS) == RV_SUPPORTED_OPERATIONS
     flash_cases = [case for case in cases if case.operation == "flashattn"]
-    assert len(flash_cases) == 18
+    assert len(flash_cases) == 30
     assert {case.variant for case in flash_cases} == {"balanced", "descending-max", "weighted-keys"}
     assert {case.is_causal for case in flash_cases} == {False, True}
 
@@ -78,8 +79,7 @@ def test_kernel_variants_cover_only_distinct_frontend_expressions():
         "elementwise_mul",
         "elementwise_div",
         "matmul_low_precision",
-        "matmul_tpukernel_fp32",
-        "matmul_rv_fp32",
+        "matmul_fp32",
         "rmsnorm_low_precision",
         "rmsnorm_fp32",
         "rmsnorm_splitk_low_precision",
@@ -122,8 +122,37 @@ def test_demo_implementations_do_not_call_composite_rope_or_sigmoid_ops():
     assert not (demo_root.parent / "tilelang/language/ppl_llama.py").exists()
 
 
+def test_public_tpu_ops_document_backend_dtype_support_and_mapping():
+    operation_names = (
+        "ppl_gemm",
+        "ppl_copy",
+        "ppl_fill",
+        "ppl_add",
+        "ppl_subtract",
+        "ppl_mul",
+        "ppl_div",
+        "ppl_max",
+        "ppl_add_C",
+        "ppl_mul_C",
+        "ppl_exp",
+        "ppl_rsqrt",
+        "ppl_reduce_sum",
+        "ppl_reduce_max",
+        "ppl_gather",
+        "ppl_embedding",
+        "ppl_topk",
+    )
+    for name in operation_names:
+        assert "Dtype support:" in getattr(customize, name).__doc__
+
+    mapping = (Path(__file__).resolve().parents[3] /
+               "tpu_demo/OP_MAPPING.md").read_text(encoding="utf-8")
+    for name in operation_names:
+        assert f"`{name}`" in mapping
+
+
 @pytest.mark.parametrize("programming_model", ("tpukernel", "rv"))
-def test_fp32_matmul_selects_the_backend_specific_frontend(programming_model):
+def test_fp32_matmul_uses_one_portable_frontend_and_native_backend_mapping(programming_model):
     source = tilelang.lower(
         build_matmul(dtype="float32", programming_model=programming_model),
         target=f"tpu -mcpu=sg2260e -tpu-programming-model={programming_model}").kernel_source
@@ -131,8 +160,7 @@ def test_fp32_matmul_selects_the_backend_specific_frontend(programming_model):
         assert "rvt_fmm_nn" in source
         assert "rvt_fmm2" not in source
     else:
-        assert "tpu_bdc_fp_mm" in source
-        assert "tpu_bdc_fp32_mm" not in source
+        assert "tpu_bdc_fp32_mm" in source
 
 
 def test_lightweight_demo_target_registry_matches_compiler_capabilities():

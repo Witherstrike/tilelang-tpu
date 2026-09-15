@@ -84,7 +84,6 @@ _PORTABLE_TPU_EXTERNS = frozenset({
     "tl.tpu.reduce_sum",
     "tl.tpu.reduce_max",
     "tl.tpu.exp",
-    "tl.tpu.sigmoid",
     "tl.tpu.add",
     "tl.tpu.copy",
     "tl.tpu.div",
@@ -96,7 +95,6 @@ _PORTABLE_TPU_EXTERNS = frozenset({
 })
 _TPUKERNEL_EXTERNS = frozenset({
     "tl.tpukernel.gather",
-    "tl.tpukernel.rope_add",
     "tl.tpukernel.topk",
 })
 
@@ -117,13 +115,11 @@ _TPU_SEMANTIC_REGION_ARGS = {
     "tl.tpu.add_scalar": (1, 2),
     "tl.tpu.mul_scalar": (1, 2),
     "tl.tpu.exp": (1, 2, 3, 4),
-    "tl.tpu.sigmoid": (1, 2, 3, 4, 5),
     "tl.tpukernel.gather": (1, 2, 3),
     "tl.tpukernel.topk": (1, 2, 3),
     "tl.tpu.rsqrt": (1, 2),
     "tl.tpu.reduce_sum": (1, 2, 3),
     "tl.tpu.reduce_max": (1, 2, 3),
-    "tl.tpukernel.rope_add": (1, 2, 3, 4, 5),
 }
 
 # CUDA/HIP synchronization has no implicit TPU meaning.  Some operations have
@@ -397,8 +393,8 @@ def _validate_tpu_residual_ir(mod: tvm.IRModule, target: Target, tpu_config) -> 
                         target, function_name, "semantic-region-ABI",
                         f"{extern_name} output/accumulator C must use storage "
                         "distinct from A and B")
-            elif extern_name in {"tl.tpu.exp", "tl.tpu.sigmoid"}:
-                coefficient_index = 3 if extern_name == "tl.tpu.exp" else 4
+            elif extern_name == "tl.tpu.exp":
+                coefficient_index = 3
                 if (region_ranks[coefficient_index] != 2 or
                         region_shapes[coefficient_index] != (64, 32)):
                     raise _tpu_contract_error(

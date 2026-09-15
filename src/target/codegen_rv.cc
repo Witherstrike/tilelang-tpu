@@ -46,6 +46,12 @@ std::string RVDTypeName(DataType dtype) {
   if (dtype == DataType::BFloat(16)) {
     return "DT_BFP16";
   }
+  if (dtype.is_e4m3_float8()) {
+    return "DT_FP8E4M3";
+  }
+  if (dtype.is_e5m2_float8()) {
+    return "DT_FP8E5M2";
+  }
   LOG(FATAL) << "RV Tensor floating-point lowering does not support dtype "
              << dtype;
   return "DT_FP32";
@@ -105,7 +111,9 @@ void CodeGenTileLangTPU::EmitRVCopy(const std::string &src, bool src_is_global,
         << "RV Tensor copy-and-convert requires two local tensors; DMA does "
            "not perform dtype conversion";
     auto is_supported_float = [](const std::string &dtype) {
-      return dtype == "DT_FP16" || dtype == "DT_BFP16" || dtype == "DT_FP32";
+      return dtype == "DT_FP16" || dtype == "DT_BFP16" ||
+             dtype == "DT_FP32" || dtype == "DT_FP8E4M3" ||
+             dtype == "DT_FP8E5M2";
     };
     ICHECK(is_supported_float(src_dtype) && is_supported_float(dst_dtype))
         << "RV Tensor rvt_cvt_f2f only accepts supported floating-point "
@@ -186,16 +194,14 @@ void CodeGenTileLangTPU::EmitRVGemm(const std::string &a, const std::string &b,
                                     bool transpose_a, bool transpose_b,
                                     bool accumulate, int64_t m, int64_t n,
                                     int64_t k) {
-  ICHECK(!transpose_a)
-      << "RV Tensor high-performance GEMM does not expose a standalone TN "
-         "form; transpose_A=true is not supported by tl.tpu.gemm";
   ICHECK(a_dtype == b_dtype)
       << "RV Tensor GEMM requires matching A/B dtypes, got " << a_dtype
       << " and " << b_dtype;
   const bool is_fp32 = a_dtype == DataType::Float(32);
+  const bool is_fp8 = a_dtype.is_e4m3_float8() || a_dtype.is_e5m2_float8();
   ICHECK(is_fp32 || a_dtype == DataType::Float(16) ||
-         a_dtype == DataType::BFloat(16))
-      << "RV Tensor GEMM accepts FP32, FP16, or BF16 TileLang inputs, got "
+         a_dtype == DataType::BFloat(16) || is_fp8)
+      << "RV Tensor GEMM accepts FP8, FP16, BF16, or FP32 TileLang inputs, got "
       << a_dtype;
   if (is_fp32) {
     ICHECK_EQ(c_dtype, DataType::Float(32))
@@ -204,11 +210,15 @@ void CodeGenTileLangTPU::EmitRVGemm(const std::string &a, const std::string &b,
         << "RV Tensor FP32 GEMM uses rvt_fmm_nn and requires KxN weights; "
            "transpose_B is available only on the FP16/BF16 fmm2 path";
   } else {
+    ICHECK(!transpose_a)
+        << "RV Tensor FP16/BF16/FP8 fmm2 does not expose a standalone "
+           "transpose-A form";
     ICHECK(
         (accumulate && c_dtype == DataType::Float(32)) ||
-        (!accumulate && (c_dtype == DataType::Float(32) || c_dtype == a_dtype)))
-        << "RV Tensor accumulating fmm2 requires an FP32 C tile; overwrite "
-           "mode permits FP32 or a C tile matching A/B, got "
+        (!accumulate && (c_dtype == DataType::Float(32) ||
+                         (!is_fp8 && c_dtype == a_dtype))))
+        << "RV Tensor accumulating and FP8 fmm2 forms require an FP32 C tile; "
+           "FP16/BF16 overwrite mode also permits C to match A/B, got "
         << c_dtype;
   }
   ICHECK_GT(m, 0);
@@ -231,7 +241,7 @@ void CodeGenTileLangTPU::EmitRVGemm(const std::string &a, const std::string &b,
              << ", .c=" << cols / kElementsPerEU
              << ", .h=1, .w=" << kElementsPerEU << "}, (int *)NULL);\n";
     };
-    emit_matrix(a, 8, m, k);
+    emit_matrix(a, 8, transpose_a ? k : m, transpose_a ? m : k);
     emit_matrix(b, 9, k, n);
     emit_matrix(c, 10, m, n);
   } else {
@@ -243,7 +253,10 @@ void CodeGenTileLangTPU::EmitRVGemm(const std::string &a, const std::string &b,
   stream << "rvt_cfg_satu(0, false);\n";
   PrintIndent();
   if (is_fp32) {
-    stream << (accumulate ? "rvt_fmma_nn" : "rvt_fmm_nn")
+    const char *instruction = transpose_a
+                                  ? (accumulate ? "rvt_fmma_tn" : "rvt_fmm_tn")
+                                  : (accumulate ? "rvt_fmma_nn" : "rvt_fmm_nn");
+    stream << instruction
            << "(10, 8, 9, 0, 0);\n";
     return;
   }
@@ -380,12 +393,10 @@ void CodeGenTileLangTPU::EmitRVReduction(const std::string &operation,
 }
 
 void CodeGenTileLangTPU::EmitRVExp(const std::string &dst,
-                                   const std::string &src,
                                    const std::string &work0,
-                                   const std::string &work1, DataType dtype,
-                                   bool sigmoid) {
+                                   const std::string &work1, DataType dtype) {
   ICHECK(dtype == DataType::Float(32))
-      << "RV exp/sigmoid currently require FP32 local tensors";
+      << "RV exp currently requires FP32 local tensors";
   // Port the validated exp(x/2)^2 range reduction from the former RV backend.
   // dst=TR8, integer exponent/work0=TR9, polynomial/work1=TR10, input=TR11.
   // Workspaces and coefficient storage are validated by the shared semantic
@@ -394,11 +405,6 @@ void CodeGenTileLangTPU::EmitRVExp(const std::string &dst,
   EmitRVDescriptor(work0, 9, false, "DT_FP32", true);
   EmitRVDescriptor(work1, 10, false, "DT_FP32", true);
   stream << "rvt_cfg_satu(0, false);\nrvt_cfg_round_mode(0);\n";
-  if (sigmoid) {
-    EmitRVDescriptor(src, 11, false, "DT_FP32", true);
-    EmitRVConstant(-1, "DT_FP32");
-    stream << "rvt_fmul(8, 11, 1);\n";
-  }
   stream << "rvt_cp(10, 8);\n";
   EmitRVConstant(-104, "DT_FP32");
   stream << "rvt_fmax(8, 8, 1);\n";
@@ -434,11 +440,6 @@ void CodeGenTileLangTPU::EmitRVExp(const std::string &dst,
   stream << "rvt_mul(9, 9, 1, 0, 0);\n";
   EmitRVDescriptor(work0, 9, false, "DT_FP32", true);
   stream << "rvt_fmul(8, 10, 9);\nrvt_fmul(8, 8, 8);\n";
-  if (sigmoid) {
-    EmitRVConstant(1, "DT_FP32");
-    stream
-        << "rvt_fadd(8, 8, 1);\nrvt_cfg_rsqrt_iter(3);\nrvt_fdiv(8, 1, 8);\n";
-  }
 }
 
 } // namespace codegen

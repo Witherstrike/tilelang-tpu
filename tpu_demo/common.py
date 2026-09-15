@@ -34,6 +34,8 @@ def torch_dtype(dtype: str) -> torch.dtype:
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
             "float32": torch.float32,
+            "e4m3_float8": torch.float8_e4m3fn,
+            "e5m2_float8": torch.float8_e5m2,
         }[dtype]
     except KeyError as error:
         raise ValueError(f"unsupported demo dtype: {dtype!r}") from error
@@ -227,6 +229,8 @@ def tolerance(dtype: str, family: str) -> tuple[float, float]:
             "float16": (5e-3, 5e-3),
             "bfloat16": (2e-2, 2e-2),
             "float32": (1e-5, 1e-5),
+            "e4m3_float8": (2.5e-1, 1e-1),
+            "e5m2_float8": (5e-1, 2e-1),
         }[dtype]
     if family == "elementwise-div":
         return {
@@ -239,22 +243,28 @@ def tolerance(dtype: str, family: str) -> tuple[float, float]:
             "float16": (1e-2, 1e-2),
             "bfloat16": (2e-2, 2e-2),
             "float32": (1e-2, 1e-2),
+            "e4m3_float8": (2.5e-1, 1.25e-1),
+            "e5m2_float8": (7.5e-1, 2.5e-1),
         }[dtype]
-    if family == "matmul-rv-fp32":
+    if family == "matmul-native-fp32":
         if dtype != "float32":
-            raise ValueError("native RV FP32 matmul tolerance requires float32")
+            raise ValueError("native FP32 matmul tolerance requires float32")
         return 5e-5, 5e-5
     if family in ("rmsnorm", "swiglu"):
         return {
             "float16": (1e-2, 1e-2),
             "bfloat16": (3e-2, 3e-2),
             "float32": (1e-2, 1e-2),
+            "e4m3_float8": (2.5e-1, 1.25e-1),
+            "e5m2_float8": (7.5e-1, 2.5e-1),
         }[dtype]
     if family == "rope":
         return {
             "float16": (5e-3, 5e-3),
             "bfloat16": (2e-2, 2e-2),
             "float32": (1e-5, 1e-5),
+            "e4m3_float8": (2.5e-1, 1.25e-1),
+            "e5m2_float8": (5e-1, 2.5e-1),
         }[dtype]
     if family == "flashattn":
         # In addition to reduced-precision GEMMs, the vendor polynomial exp
@@ -264,6 +274,8 @@ def tolerance(dtype: str, family: str) -> tuple[float, float]:
             "float16": (2e-2, 2e-2),
             "bfloat16": (2e-2, 2e-2),
             "float32": (2e-2, 2e-2),
+            "e4m3_float8": (2.5e-1, 1.5e-1),
+            "e5m2_float8": (7.5e-1, 3e-1),
         }[dtype]
     raise ValueError(f"unknown tolerance family: {family!r}")
 
