@@ -25,6 +25,34 @@ Every example supports `float16`, `bfloat16`, and `float32`. The split-K
 RMSNorm example splits the feature dimension, accumulates the sum of squares,
 and then normalizes each tile. It is unrelated to parallel split-K GEMM.
 
+## Kernel selection
+
+The result payload records the selected frontend in
+`parameters.kernel_variant`. A kernel is shared when its semantic operation
+sequence is identical and only the public dtype or target instruction mapping
+changes.
+
+| Operator | FP16/BF16 kernel | TPU-Kernel FP32 kernel | RV Tensor FP32 kernel | Special case |
+| --- | --- | --- | --- | --- |
+| Add | `elementwise_add` | `elementwise_add` | `elementwise_add` | One expression for all dtypes and targets |
+| Subtract | `elementwise_sub` | `elementwise_sub` | `elementwise_sub` | One expression for all dtypes and targets |
+| Multiply | `elementwise_mul` | `elementwise_mul` | `elementwise_mul` | One expression for all dtypes and targets |
+| Divide | `elementwise_div` | `elementwise_div` | `elementwise_div` | Positive validation divisors avoid a zero-denominator test |
+| Matmul | `matmul_low_precision` | `matmul_tpukernel_fp32` | `matmul_rv_fp32` | See the backend-specific matrix paths below |
+| RMSNorm | `rmsnorm_low_precision` | `rmsnorm_fp32` | `rmsnorm_fp32` | Low-precision output is rounded before applying the weight |
+| Split-K RMSNorm | `rmsnorm_splitk_low_precision` | `rmsnorm_splitk_fp32` | `rmsnorm_splitk_fp32` | Two serial passes over width tiles |
+| RoPE | `rope` | `rope` | `rope` | FP32 cosine/sine tables and intermediates |
+| SwiGLU | `swiglu_low_precision` | `swiglu_fp32` | `swiglu_fp32` | Sigmoid is expanded into exp/add/div/multiply primitives |
+| FlashAttention | `flashattn_low_precision` | `flashattn_fp32` | `flashattn_fp32` | FP32 public tensors use BF16 matrix operands |
+
+All kernels in this table are validated with FP16, BF16, and FP32 where shown.
+The supported target/runtime combinations are:
+
+| Target | TPU-Kernel CModel | TPU-Kernel PCIe | RV Tensor CModel | RV Tensor PCIe |
+| --- | --- | --- | --- | --- |
+| BM1690 | Yes | Not in this matrix | No | No |
+| SG2260E | Yes | Yes | Yes | Yes |
+
 ## Builder functions
 
 The operator packages export these builders:

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import tpu_demo_ops_matrix as matrix
-from tpu_demo.cases import case_by_id
+from tpu_demo.cases import case_by_id, kernel_variant
 
 
 def _execution_args(**overrides):
@@ -531,6 +531,7 @@ def _numeric_payload(case, *, chip="sg2260e", programming_model="tpukernel", run
         "parameters": {
             "variant": case.variant,
             "is_causal": case.is_causal,
+            "kernel_variant": kernel_variant(case.operation, case.dtype, programming_model),
         },
     }
 
@@ -613,13 +614,28 @@ def test_validate_numeric_identity_rejects_nonpassing_or_nonfinite_metrics(metri
 def test_validate_numeric_identity_rejects_missing_variant_identity():
     case = case_by_id("flashattn.float16.weighted-keys")
     payload = _numeric_payload(case)
-    payload["parameters"] = {}
+    del payload["parameters"]["variant"]
 
     with pytest.raises(RuntimeError, match="scheduled variant"):
         matrix.validate_numeric_identity(
             payload,
             chip="sg2260e",
             programming_model="tpukernel",
+            runtime_mode="cmodel",
+            case=case,
+        )
+
+
+def test_validate_numeric_identity_rejects_wrong_kernel_variant():
+    case = case_by_id("matmul.float32")
+    payload = _numeric_payload(case, programming_model="rv")
+    payload["parameters"]["kernel_variant"] = "matmul_tpukernel_fp32"
+
+    with pytest.raises(RuntimeError, match="kernel variant mismatch"):
+        matrix.validate_numeric_identity(
+            payload,
+            chip="sg2260e",
+            programming_model="rv",
             runtime_mode="cmodel",
             case=case,
         )

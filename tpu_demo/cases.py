@@ -32,6 +32,36 @@ OPERATIONS = (
 RV_SUPPORTED_OPERATIONS = frozenset(OPERATIONS)
 
 
+def kernel_variant(operation: str, dtype: str, programming_model: str) -> str:
+    """Return the concrete frontend kernel selected by a matrix case."""
+    if operation not in OPERATIONS:
+        raise ValueError(f"unknown TPU demo operation: {operation!r}")
+    if dtype not in DTYPES:
+        raise ValueError(f"unknown TPU demo dtype: {dtype!r}")
+    if programming_model not in PROGRAMMING_MODELS:
+        raise ValueError(f"unknown TPU programming model: {programming_model!r}")
+
+    if operation.startswith("elementwise-"):
+        return operation.replace("-", "_")
+    if operation == "matmul":
+        if dtype != "float32":
+            return "matmul_low_precision"
+        return f"matmul_{programming_model}_fp32"
+    if operation in ("rmsnorm", "rmsnorm-splitk"):
+        base = operation.replace("-", "_")
+        precision = "fp32" if dtype == "float32" else "low_precision"
+        return f"{base}_{precision}"
+    if operation == "swiglu":
+        precision = "fp32" if dtype == "float32" else "low_precision"
+        return f"swiglu_{precision}"
+    if operation == "flashattn":
+        precision = "fp32" if dtype == "float32" else "low_precision"
+        return f"flashattn_{precision}"
+    if operation == "rope":
+        return "rope"
+    raise AssertionError(f"unhandled TPU demo operation: {operation}")
+
+
 @dataclass(frozen=True)
 class DemoCase:
     case_id: str

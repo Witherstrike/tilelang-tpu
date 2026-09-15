@@ -19,58 +19,74 @@ def build_matmul(*,
                  block_n: int = 16,
                  block_k: int = 16,
                  dtype: str = "float16",
-                 programming_model: str = "tpukernel",
-                 fp32_compute_dtype: str = "bfloat16"):
+                 programming_model: str = "tpukernel"):
     if programming_model not in ("tpukernel", "rv"):
         raise ValueError(f"unsupported TPU programming model: {programming_model!r}")
-    if fp32_compute_dtype not in ("float16", "bfloat16"):
-        raise ValueError("FP32 matmul compute dtype must be float16 or bfloat16")
     torch_dtype(dtype)
     validate_dimensions("matmul", m=m, n=n, k=k, block_m=block_m, block_n=block_n, block_k=block_k)
     validate_exact_tiling("matmul", ("m", m, block_m), ("n", n, block_n), ("k", k, block_k))
-    native_fp32 = dtype == "float32" and programming_model == "rv"
-    compute_dtype = "float32" if native_fp32 else (
-        fp32_compute_dtype if dtype == "float32" else dtype)
-    compute_scope = "local.matrix" if native_fp32 else "shared"
 
-    @T.prim_func
-    def kernel(A: T.Tensor((m, k), dtype), B: T.Tensor((k, n), dtype), C: T.Tensor((m, n), dtype)):
-        with T.Kernel(T.ceildiv(n, block_n), T.ceildiv(m, block_m), is_cpu=True) as (bx, by):
-            A_compute = T.alloc_shared((block_m, block_k), compute_dtype, scope=compute_scope)
-            B_compute = T.alloc_shared((block_k, block_n), compute_dtype, scope=compute_scope)
-            C_acc = T.alloc_shared((block_m, block_n), "float32", scope=compute_scope)
-            steps = T.ceildiv(k, block_k)
-            if native_fp32:
-                T.ppl_copy(A[by * block_m, 0], A_compute)
-                T.ppl_copy(B[0, bx * block_n], B_compute)
-                T.ppl_gemm(A_compute, B_compute, C_acc, accumulate=False)
-                for ko in T.serial(steps - 1):
-                    next_ko = ko + 1
-                    T.ppl_copy(A[by * block_m, next_ko * block_k], A_compute)
-                    T.ppl_copy(B[next_ko * block_k, bx * block_n], B_compute)
-                    T.ppl_gemm(A_compute, B_compute, C_acc, accumulate=True)
-            else:
-                T.ppl_fill(C_acc, T.float32(0))
-                for ko in T.serial(steps):
-                    if dtype == "float32":
-                        A_input = T.alloc_shared((block_m, block_k), dtype)
-                        B_input = T.alloc_shared((block_k, block_n), dtype)
-                        T.ppl_copy(A[by * block_m, ko * block_k], A_input)
-                        T.ppl_copy(B[ko * block_k, bx * block_n], B_input)
-                        T.ppl_copy(A_input, A_compute)
-                        T.ppl_copy(B_input, B_compute)
-                    else:
-                        T.ppl_copy(A[by * block_m, ko * block_k], A_compute)
-                        T.ppl_copy(B[ko * block_k, bx * block_n], B_compute)
-                    T.ppl_gemm(A_compute, B_compute, C_acc, accumulate=True)
-            if native_fp32 or dtype == "float32":
-                T.ppl_copy(C_acc, C[by * block_m, bx * block_n])
-            else:
+    if dtype != "float32":
+
+        @T.prim_func
+        def matmul_low_precision(A: T.Tensor((m, k), dtype), B: T.Tensor((k, n), dtype),
+                                 C: T.Tensor((m, n), dtype)):
+            with T.Kernel(T.ceildiv(n, block_n), T.ceildiv(m, block_m), is_cpu=True) as (bx, by):
+                A_compute = T.alloc_shared((block_m, block_k), dtype)
+                B_compute = T.alloc_shared((block_k, block_n), dtype)
+                C_acc = T.alloc_shared((block_m, block_n), "float32")
                 C_output = T.alloc_shared((block_m, block_n), dtype)
+                T.ppl_fill(C_acc, T.float32(0))
+                for ko in T.serial(T.ceildiv(k, block_k)):
+                    T.ppl_copy(A[by * block_m, ko * block_k], A_compute)
+                    T.ppl_copy(B[ko * block_k, bx * block_n], B_compute)
+                    T.ppl_gemm(A_compute, B_compute, C_acc, accumulate=True)
                 T.ppl_copy(C_acc, C_output)
                 T.ppl_copy(C_output, C[by * block_m, bx * block_n])
 
-    return kernel
+        return matmul_low_precision
+
+    if programming_model == "tpukernel":
+
+        @T.prim_func
+        def matmul_tpukernel_fp32(A: T.Tensor((m, k), "float32"), B: T.Tensor((k, n), "float32"),
+                                  C: T.Tensor((m, n), "float32")):
+            with T.Kernel(T.ceildiv(n, block_n), T.ceildiv(m, block_m), is_cpu=True) as (bx, by):
+                A_input = T.alloc_shared((block_m, block_k), "float32")
+                B_input = T.alloc_shared((block_k, block_n), "float32")
+                A_compute = T.alloc_shared((block_m, block_k), "bfloat16")
+                B_compute = T.alloc_shared((block_k, block_n), "bfloat16")
+                C_acc = T.alloc_shared((block_m, block_n), "float32")
+                T.ppl_fill(C_acc, T.float32(0))
+                for ko in T.serial(T.ceildiv(k, block_k)):
+                    T.ppl_copy(A[by * block_m, ko * block_k], A_input)
+                    T.ppl_copy(B[ko * block_k, bx * block_n], B_input)
+                    T.ppl_copy(A_input, A_compute)
+                    T.ppl_copy(B_input, B_compute)
+                    T.ppl_gemm(A_compute, B_compute, C_acc, accumulate=True)
+                T.ppl_copy(C_acc, C[by * block_m, bx * block_n])
+
+        return matmul_tpukernel_fp32
+
+    @T.prim_func
+    def matmul_rv_fp32(A: T.Tensor((m, k), "float32"), B: T.Tensor((k, n), "float32"), C: T.Tensor(
+        (m, n), "float32")):
+        with T.Kernel(T.ceildiv(n, block_n), T.ceildiv(m, block_m), is_cpu=True) as (bx, by):
+            A_compute = T.alloc_shared((block_m, block_k), "float32", scope="local.matrix")
+            B_compute = T.alloc_shared((block_k, block_n), "float32", scope="local.matrix")
+            C_acc = T.alloc_shared((block_m, block_n), "float32", scope="local.matrix")
+            steps = T.ceildiv(k, block_k)
+            T.ppl_copy(A[by * block_m, 0], A_compute)
+            T.ppl_copy(B[0, bx * block_n], B_compute)
+            T.ppl_gemm(A_compute, B_compute, C_acc, accumulate=False)
+            for ko in T.serial(steps - 1):
+                next_ko = ko + 1
+                T.ppl_copy(A[by * block_m, next_ko * block_k], A_compute)
+                T.ppl_copy(B[next_ko * block_k, bx * block_n], B_compute)
+                T.ppl_gemm(A_compute, B_compute, C_acc, accumulate=True)
+            T.ppl_copy(C_acc, C[by * block_m, bx * block_n])
+
+    return matmul_rv_fp32
 
 
 def run(*,

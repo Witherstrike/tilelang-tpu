@@ -11,7 +11,7 @@ import tilelang
 
 from tilelang.engine.tpu_config import TPU_CHIP_SPECS
 from tpu_demo.cases import (CHIP_CORE_COUNTS, OPERATIONS, RV_SUPPORTED_OPERATIONS, TARGET_CONFIGS,
-                            build_cases)
+                            build_cases, kernel_variant)
 from tpu_demo.common import DemoNumericalMismatch, comparison, validate_selection
 from tpu_demo.elementwise import build_elementwise
 from tpu_demo.flashattn import build_flashattn
@@ -37,7 +37,59 @@ def test_registry_is_unique_complete_and_capability_scoped():
 @pytest.mark.parametrize("invalid", (1, 0, "false", None))
 def test_flashattn_requires_a_boolean_causal_flag(invalid):
     with pytest.raises(TypeError, match="boolean is_causal"):
-        build_flashattn(is_causal=invalid)
+        _attention_mask(32, invalid)
+
+
+def _build_case_kernel(case, programming_model):
+    if case.operation.startswith("elementwise-"):
+        return build_elementwise(case.operation.removeprefix("elementwise-"), dtype=case.dtype)
+    if case.operation == "matmul":
+        return build_matmul(dtype=case.dtype, programming_model=programming_model)
+    if case.operation == "rmsnorm":
+        return build_rmsnorm(dtype=case.dtype)
+    if case.operation == "rmsnorm-splitk":
+        return build_rmsnorm_splitk(dtype=case.dtype)
+    if case.operation == "rope":
+        return build_rope(dtype=case.dtype)
+    if case.operation == "swiglu":
+        return build_swiglu(dtype=case.dtype)
+    if case.operation == "flashattn":
+        return build_flashattn(dtype=case.dtype)
+    raise AssertionError(f"unhandled test operation: {case.operation}")
+
+
+@pytest.mark.parametrize("programming_model", ("tpukernel", "rv"))
+@pytest.mark.parametrize("case", build_cases(), ids=lambda case: case.case_id)
+def test_each_matrix_case_selects_the_declared_kernel(case, programming_model):
+    program = _build_case_kernel(case, programming_model)
+    assert str(program.attrs["global_symbol"]) == kernel_variant(case.operation, case.dtype,
+                                                                 programming_model)
+
+
+def test_kernel_variants_cover_only_distinct_frontend_expressions():
+    actual = {
+        kernel_variant(case.operation, case.dtype, programming_model)
+        for case in build_cases()
+        for programming_model in ("tpukernel", "rv")
+    }
+    assert actual == {
+        "elementwise_add",
+        "elementwise_sub",
+        "elementwise_mul",
+        "elementwise_div",
+        "matmul_low_precision",
+        "matmul_tpukernel_fp32",
+        "matmul_rv_fp32",
+        "rmsnorm_low_precision",
+        "rmsnorm_fp32",
+        "rmsnorm_splitk_low_precision",
+        "rmsnorm_splitk_fp32",
+        "rope",
+        "swiglu_low_precision",
+        "swiglu_fp32",
+        "flashattn_low_precision",
+        "flashattn_fp32",
+    }
 
 
 @pytest.mark.parametrize("dtype", ("float16", "bfloat16", "float32"))

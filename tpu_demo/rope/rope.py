@@ -25,9 +25,9 @@ def build_rope(*,
         raise ValueError("RoPE width and block width must both be even")
 
     @T.prim_func
-    def kernel(source: T.Tensor((rows, width), dtype), cosine: T.Tensor(
+    def rope(source: T.Tensor((rows, width), dtype), cosine: T.Tensor(
         (rows, width // 2), "float32"), sine: T.Tensor((rows, width // 2), "float32"),
-               destination: T.Tensor((rows, width), dtype)):
+             destination: T.Tensor((rows, width), dtype)):
         with T.Kernel(
                 T.ceildiv(rows, block_rows), T.ceildiv(width, block_width),
                 is_cpu=True) as (bx, by):
@@ -69,7 +69,7 @@ def build_rope(*,
                 T.ppl_copy(odd_value, output[0, 2 * pair + 1])
             T.ppl_copy(output, destination[bx * block_rows, by * block_width])
 
-    return kernel
+    return rope
 
 
 def _cosine_sine(rows: int, width: int) -> Tuple[torch.Tensor, torch.Tensor]:

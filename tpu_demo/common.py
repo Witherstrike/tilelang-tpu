@@ -16,7 +16,8 @@ from typing import Any, Mapping, Optional, Sequence
 
 import torch
 
-from tpu_demo.cases import (CHIP_CORE_COUNTS, CHIPS, PROGRAMMING_MODELS, RUNTIME_MODES)
+from tpu_demo.cases import (CHIP_CORE_COUNTS, CHIPS, PROGRAMMING_MODELS, RUNTIME_MODES,
+                            kernel_variant)
 
 
 class DemoNumericalMismatch(AssertionError):
@@ -278,6 +279,8 @@ def result_payload(
     timing: Mapping[str, float],
     parameters: Mapping[str, Any],
 ) -> dict[str, Any]:
+    result_parameters = dict(parameters)
+    result_parameters["kernel_variant"] = kernel_variant(operation, dtype, programming_model)
     return {
         "status": "passed",
         "operation": operation,
@@ -285,7 +288,7 @@ def result_payload(
         "chip": chip,
         "programming_model": programming_model,
         "runtime_mode": runtime_mode,
-        "parameters": dict(parameters),
+        "parameters": result_parameters,
         "metrics": dict(metrics),
         "timing": dict(timing),
     }

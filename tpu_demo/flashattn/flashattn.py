@@ -31,11 +31,7 @@ def build_flashattn(*,
                     head_dim: int = 16,
                     block_m: int = 16,
                     block_n: int = 16,
-                    dtype: str = "float16",
-                    programming_model: str = "tpukernel",
-                    is_causal: bool = False):
-    if programming_model not in ("tpukernel", "rv"):
-        raise ValueError(f"unsupported TPU programming model: {programming_model!r}")
+                    dtype: str = "float16"):
     torch_dtype(dtype)
     validate_dimensions(
         "flashattn",
@@ -45,30 +41,97 @@ def build_flashattn(*,
         head_dim=head_dim,
         block_m=block_m,
         block_n=block_n)
-    if not isinstance(is_causal, bool):
-        raise TypeError(f"flashattn requires boolean is_causal, got {is_causal!r}")
     validate_exact_tiling("flashattn", ("sequence/block_m", sequence, block_m),
                           ("sequence/block_n", sequence, block_n))
-    compute_dtype = "bfloat16" if dtype == "float32" else dtype
     scale = 1.0 / math.sqrt(head_dim)
 
+    if dtype != "float32":
+
+        @T.prim_func
+        def flashattn_low_precision(Q: T.Tensor(
+            (batch, sequence, heads, head_dim), dtype), K: T.Tensor(
+                (batch, sequence, heads, head_dim), dtype), V: T.Tensor(
+                    (batch, sequence, heads, head_dim), dtype), Mask: T.Tensor(
+                        (sequence, sequence), "float32"), Output: T.Tensor(
+                            (batch, sequence, heads, head_dim), dtype)):
+            with T.Kernel(T.ceildiv(sequence, block_m), heads, batch, is_cpu=True) as (bx, by, bz):
+                q_compute = T.alloc_shared((block_m, head_dim), dtype)
+                k_compute = T.alloc_shared((block_n, head_dim), dtype)
+                v_compute = T.alloc_shared((block_n, head_dim), dtype)
+                output_local = T.alloc_shared((block_m, head_dim), dtype)
+                scores = T.alloc_shared((block_m, block_n), "float32")
+                mask = T.alloc_shared((block_m, block_n), "float32")
+                scores_compute = T.alloc_shared((block_m, block_n), dtype)
+                accumulator = T.alloc_shared((block_m, head_dim), "float32")
+                normalized = T.alloc_shared((block_m, head_dim), "float32")
+                row_max = T.alloc_shared((block_m, 1), "float32")
+                current_max = T.alloc_shared((block_m, 1), "float32")
+                previous_max = T.alloc_shared((block_m, 1), "float32")
+                previous_scale = T.alloc_shared((block_m, 1), "float32")
+                chunk_sum = T.alloc_shared((block_m, 1), "float32")
+                row_sum = T.alloc_shared((block_m, 1), "float32")
+                scale_work0 = T.alloc_shared((block_m, 1), "float32")
+                scale_work1 = T.alloc_shared((block_m, 1), "float32")
+                exp_coeff = T.alloc_shared((64, 32), "float32")
+                score_work0 = T.alloc_shared((block_m, block_n), "float32")
+                score_work1 = T.alloc_shared((block_m, block_n), "float32")
+
+                T.ppl_copy(Q[bz:bz + 1, bx * block_m:(bx + 1) * block_m, by:by + 1, 0:head_dim],
+                           q_compute)
+                T.ppl_fill(accumulator, T.float32(0))
+                T.ppl_fill(row_sum, T.float32(0))
+                T.ppl_fill(row_max, -T.infinity("float32"))
+
+                for ko in T.serial(T.ceildiv(sequence, block_n)):
+                    T.ppl_copy(K[bz:bz + 1, ko * block_n:(ko + 1) * block_n, by:by + 1, 0:head_dim],
+                               k_compute)
+                    T.ppl_copy(V[bz:bz + 1, ko * block_n:(ko + 1) * block_n, by:by + 1, 0:head_dim],
+                               v_compute)
+
+                    T.ppl_gemm(q_compute, k_compute, scores, transpose_B=True, accumulate=False)
+                    T.ppl_mul_C(scores, scores, T.float32(scale))
+                    T.ppl_copy(Mask[bx * block_m, ko * block_n], mask)
+                    T.ppl_add(scores, scores, mask)
+                    T.ppl_copy(row_max, previous_max)
+                    T.ppl_reduce_max(scores, current_max, dim=1)
+                    T.ppl_max(row_max, previous_max, current_max)
+                    T.ppl_subtract(previous_scale, previous_max, row_max)
+                    T.ppl_exp(previous_scale, scale_work0, scale_work1, exp_coeff)
+
+                    T.ppl_subtract(scores, scores, row_max)
+                    T.ppl_exp(scores, score_work0, score_work1, exp_coeff)
+                    T.ppl_reduce_sum(scores, chunk_sum, dim=1)
+
+                    T.ppl_mul(row_sum, row_sum, previous_scale)
+                    T.ppl_add(row_sum, row_sum, chunk_sum)
+                    T.ppl_mul(accumulator, accumulator, previous_scale)
+                    T.ppl_copy(scores, scores_compute)
+                    T.ppl_gemm(scores_compute, v_compute, accumulator, accumulate=True)
+
+                T.ppl_div(normalized, accumulator, row_sum)
+                T.ppl_copy(normalized, output_local)
+                T.ppl_copy(
+                    output_local, Output[bz:bz + 1, bx * block_m:(bx + 1) * block_m, by:by + 1,
+                                         0:head_dim])
+
+        return flashattn_low_precision
+
     @T.prim_func
-    def kernel(Q: T.Tensor((batch, sequence, heads, head_dim), dtype), K: T.Tensor(
-        (batch, sequence, heads, head_dim), dtype), V: T.Tensor(
-            (batch, sequence, heads, head_dim), dtype), Mask: T.Tensor(
+    def flashattn_fp32(Q: T.Tensor((batch, sequence, heads, head_dim), "float32"), K: T.Tensor(
+        (batch, sequence, heads, head_dim), "float32"), V: T.Tensor(
+            (batch, sequence, heads, head_dim), "float32"), Mask: T.Tensor(
                 (sequence, sequence), "float32"), Output: T.Tensor(
-                    (batch, sequence, heads, head_dim), dtype)):
+                    (batch, sequence, heads, head_dim), "float32")):
         with T.Kernel(T.ceildiv(sequence, block_m), heads, batch, is_cpu=True) as (bx, by, bz):
-            q_compute = T.alloc_shared((block_m, head_dim), compute_dtype)
-            k_compute = T.alloc_shared((block_n, head_dim), compute_dtype)
-            v_compute = T.alloc_shared((block_n, head_dim), compute_dtype)
-            q_input = T.alloc_shared((block_m, head_dim), dtype)
-            k_input = T.alloc_shared((block_n, head_dim), dtype)
-            v_input = T.alloc_shared((block_n, head_dim), dtype)
-            output_local = T.alloc_shared((block_m, head_dim), dtype)
+            q_input = T.alloc_shared((block_m, head_dim), "float32")
+            k_input = T.alloc_shared((block_n, head_dim), "float32")
+            v_input = T.alloc_shared((block_n, head_dim), "float32")
+            q_compute = T.alloc_shared((block_m, head_dim), "bfloat16")
+            k_compute = T.alloc_shared((block_n, head_dim), "bfloat16")
+            v_compute = T.alloc_shared((block_n, head_dim), "bfloat16")
             scores = T.alloc_shared((block_m, block_n), "float32")
             mask = T.alloc_shared((block_m, block_n), "float32")
-            scores_compute = T.alloc_shared((block_m, block_n), compute_dtype)
+            scores_compute = T.alloc_shared((block_m, block_n), "bfloat16")
             accumulator = T.alloc_shared((block_m, head_dim), "float32")
             normalized = T.alloc_shared((block_m, head_dim), "float32")
             row_max = T.alloc_shared((block_m, 1), "float32")
@@ -83,30 +146,20 @@ def build_flashattn(*,
             score_work0 = T.alloc_shared((block_m, block_n), "float32")
             score_work1 = T.alloc_shared((block_m, block_n), "float32")
 
-            if dtype == "float32":
-                T.ppl_copy(Q[bz:bz + 1, bx * block_m:(bx + 1) * block_m, by:by + 1, 0:head_dim],
-                           q_input)
-                T.ppl_copy(q_input, q_compute)
-            else:
-                T.ppl_copy(Q[bz:bz + 1, bx * block_m:(bx + 1) * block_m, by:by + 1, 0:head_dim],
-                           q_compute)
+            T.ppl_copy(Q[bz:bz + 1, bx * block_m:(bx + 1) * block_m, by:by + 1, 0:head_dim],
+                       q_input)
+            T.ppl_copy(q_input, q_compute)
             T.ppl_fill(accumulator, T.float32(0))
             T.ppl_fill(row_sum, T.float32(0))
             T.ppl_fill(row_max, -T.infinity("float32"))
 
             for ko in T.serial(T.ceildiv(sequence, block_n)):
-                if dtype == "float32":
-                    T.ppl_copy(K[bz:bz + 1, ko * block_n:(ko + 1) * block_n, by:by + 1, 0:head_dim],
-                               k_input)
-                    T.ppl_copy(V[bz:bz + 1, ko * block_n:(ko + 1) * block_n, by:by + 1, 0:head_dim],
-                               v_input)
-                    T.ppl_copy(k_input, k_compute)
-                    T.ppl_copy(v_input, v_compute)
-                else:
-                    T.ppl_copy(K[bz:bz + 1, ko * block_n:(ko + 1) * block_n, by:by + 1, 0:head_dim],
-                               k_compute)
-                    T.ppl_copy(V[bz:bz + 1, ko * block_n:(ko + 1) * block_n, by:by + 1, 0:head_dim],
-                               v_compute)
+                T.ppl_copy(K[bz:bz + 1, ko * block_n:(ko + 1) * block_n, by:by + 1, 0:head_dim],
+                           k_input)
+                T.ppl_copy(V[bz:bz + 1, ko * block_n:(ko + 1) * block_n, by:by + 1, 0:head_dim],
+                           v_input)
+                T.ppl_copy(k_input, k_compute)
+                T.ppl_copy(v_input, v_compute)
 
                 T.ppl_gemm(q_compute, k_compute, scores, transpose_B=True, accumulate=False)
                 T.ppl_mul_C(scores, scores, T.float32(scale))
@@ -129,17 +182,10 @@ def build_flashattn(*,
                 T.ppl_gemm(scores_compute, v_compute, accumulator, accumulate=True)
 
             T.ppl_div(normalized, accumulator, row_sum)
-            if dtype == "float32":
-                T.ppl_copy(
-                    normalized, Output[bz:bz + 1, bx * block_m:(bx + 1) * block_m, by:by + 1,
-                                       0:head_dim])
-            else:
-                T.ppl_copy(normalized, output_local)
-                T.ppl_copy(
-                    output_local, Output[bz:bz + 1, bx * block_m:(bx + 1) * block_m, by:by + 1,
-                                         0:head_dim])
+            T.ppl_copy(normalized, Output[bz:bz + 1, bx * block_m:(bx + 1) * block_m, by:by + 1,
+                                          0:head_dim])
 
-    return kernel
+    return flashattn_fp32
 
 
 def _reference(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor,
@@ -195,6 +241,8 @@ def _validation_inputs(dtype: str, variant: str, seed: int):
 
 
 def _attention_mask(sequence: int, is_causal: bool) -> torch.Tensor:
+    if not isinstance(is_causal, bool):
+        raise TypeError(f"flashattn requires boolean is_causal, got {is_causal!r}")
     if is_causal:
         return torch.triu(
             torch.full((sequence, sequence), float("-inf"), dtype=torch.float32), diagonal=1)
@@ -228,13 +276,8 @@ def run(*,
     output = torch.zeros_like(q)
     timing = compile_and_launch(
         build_flashattn(
-            batch=batch,
-            heads=heads,
-            sequence=sequence,
-            head_dim=head_dim,
-            dtype=dtype,
-            programming_model=programming_model,
-            is_causal=is_causal), (*tensors, mask, output),
+            batch=batch, heads=heads, sequence=sequence, head_dim=head_dim, dtype=dtype),
+        (*tensors, mask, output),
         chip=chip,
         programming_model=programming_model,
         runtime_mode=runtime_mode)
