@@ -234,13 +234,15 @@ def tolerance(dtype: str, family: str) -> tuple[float, float]:
             "float32": (1e-5, 1e-5),
         }[dtype]
     if family == "matmul":
-        # The FP32 public path intentionally uses BF16 multiply with FP32
-        # accumulation because neither TPU matrix engine accepts FP32 inputs.
         return {
             "float16": (1e-2, 1e-2),
             "bfloat16": (2e-2, 2e-2),
             "float32": (1e-2, 1e-2),
         }[dtype]
+    if family == "matmul-rv-fp32":
+        if dtype != "float32":
+            raise ValueError("native RV FP32 matmul tolerance requires float32")
+        return 5e-5, 5e-5
     if family in ("rmsnorm", "swiglu"):
         return {
             "float16": (1e-2, 1e-2),

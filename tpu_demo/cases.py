@@ -29,16 +29,7 @@ OPERATIONS = (
     "swiglu",
     "flashattn",
 )
-RV_SUPPORTED_OPERATIONS = frozenset({
-    "rmsnorm",
-    "rmsnorm-splitk",
-    "swiglu",
-    "elementwise-add",
-    "elementwise-sub",
-    "elementwise-mul",
-    "elementwise-div",
-    "matmul",
-})
+RV_SUPPORTED_OPERATIONS = frozenset(OPERATIONS)
 
 
 @dataclass(frozen=True)
@@ -48,6 +39,7 @@ class DemoCase:
     dtype: str
     supports_rv: bool
     variant: str = "default"
+    is_causal: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -60,16 +52,20 @@ def build_cases() -> tuple[DemoCase, ...]:
         for dtype in DTYPES:
             variants = (("balanced", "descending-max",
                          "weighted-keys") if operation == "flashattn" else ("default",))
-            for variant in variants:
-                suffix = f".{variant}" if variant != "default" else ""
-                cases.append(
-                    DemoCase(
-                        case_id=f"{operation}.{dtype}{suffix}",
-                        operation=operation,
-                        dtype=dtype,
-                        supports_rv=supports_rv,
-                        variant=variant,
-                    ))
+            causal_modes = (False, True) if operation == "flashattn" else (False,)
+            for is_causal in causal_modes:
+                for variant in variants:
+                    suffix = f".{variant}" if variant != "default" else ""
+                    causal_suffix = ".causal" if is_causal else ""
+                    cases.append(
+                        DemoCase(
+                            case_id=f"{operation}.{dtype}{suffix}{causal_suffix}",
+                            operation=operation,
+                            dtype=dtype,
+                            supports_rv=supports_rv,
+                            variant=variant,
+                            is_causal=is_causal,
+                        ))
     return tuple(cases)
 
 

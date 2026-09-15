@@ -3,16 +3,19 @@
 """Pure-Python safety and shape contracts for the public TPU demos."""
 
 import json
+from pathlib import Path
 
 import pytest
 import torch
+import tilelang
 
 from tilelang.engine.tpu_config import TPU_CHIP_SPECS
-from tpu_demo.cases import (CHIP_CORE_COUNTS, RV_SUPPORTED_OPERATIONS, TARGET_CONFIGS, build_cases)
+from tpu_demo.cases import (CHIP_CORE_COUNTS, OPERATIONS, RV_SUPPORTED_OPERATIONS, TARGET_CONFIGS,
+                            build_cases)
 from tpu_demo.common import DemoNumericalMismatch, comparison, validate_selection
 from tpu_demo.elementwise import build_elementwise
 from tpu_demo.flashattn import build_flashattn
-from tpu_demo.flashattn.flashattn import _reference, _validation_inputs
+from tpu_demo.flashattn.flashattn import _attention_mask, _reference, _validation_inputs
 from tpu_demo.matmul import build_matmul
 from tpu_demo.rmsnorm import build_rmsnorm, build_rmsnorm_splitk
 from tpu_demo.rope import build_rope
@@ -21,16 +24,14 @@ from tpu_demo.swiglu import build_swiglu
 
 def test_registry_is_unique_complete_and_capability_scoped():
     cases = build_cases()
-    assert len(cases) == 36
+    assert len(cases) == 45
     assert len({case.case_id for case in cases}) == len(cases)
-    assert sum(case.supports_rv for case in cases) == 24
-    assert {
-        "elementwise-add", "elementwise-sub", "elementwise-mul", "elementwise-div", "matmul",
-        "rmsnorm", "rmsnorm-splitk", "swiglu"
-    } == RV_SUPPORTED_OPERATIONS
+    assert sum(case.supports_rv for case in cases) == len(cases)
+    assert set(OPERATIONS) == RV_SUPPORTED_OPERATIONS
     flash_cases = [case for case in cases if case.operation == "flashattn"]
-    assert len(flash_cases) == 9
+    assert len(flash_cases) == 18
     assert {case.variant for case in flash_cases} == {"balanced", "descending-max", "weighted-keys"}
+    assert {case.is_causal for case in flash_cases} == {False, True}
 
 
 @pytest.mark.parametrize("invalid", (1, 0, "false", None))
@@ -42,10 +43,44 @@ def test_flashattn_requires_a_boolean_causal_flag(invalid):
 @pytest.mark.parametrize("dtype", ("float16", "bfloat16", "float32"))
 def test_flashattn_weighted_keys_rejects_uniform_weight_degeneracy(dtype):
     q, k, v = _validation_inputs(dtype, "weighted-keys", seed=0)
-    expected = _reference(q, k, v, dtype).float()
+    expected = _reference(q, k, v, _attention_mask(q.shape[1], False), dtype).float()
     compute_v = v.to(torch.bfloat16).float() if dtype == "float32" else v.float()
     uniform = compute_v.mean(dim=1, keepdim=True).expand_as(expected)
     assert torch.max(torch.abs(expected - uniform)).item() > 0.1
+
+
+@pytest.mark.parametrize("dtype", ("float16", "bfloat16", "float32"))
+def test_flashattn_causal_mask_changes_the_reference(dtype):
+    q, k, v = _validation_inputs(dtype, "weighted-keys", seed=0)
+    noncausal = _reference(q, k, v, _attention_mask(q.shape[1], False), dtype)
+    causal = _reference(q, k, v, _attention_mask(q.shape[1], True), dtype)
+    assert torch.max(torch.abs(noncausal.float() - causal.float())).item() > 0.05
+
+
+def test_demo_implementations_do_not_call_composite_rope_or_sigmoid_ops():
+    demo_root = Path(__file__).resolve().parents[3] / "tpu_demo"
+    rope_source = (demo_root / "rope/rope.py").read_text(encoding="utf-8")
+    swiglu_source = (demo_root / "swiglu/swiglu.py").read_text(encoding="utf-8")
+    assert "ppl_rope_add" not in rope_source
+    assert "ppl_sigmoid" not in swiglu_source
+    for operation in ("ppl_copy", "ppl_mul", "ppl_subtract", "ppl_add"):
+        assert operation in rope_source
+    for operation in ("ppl_exp", "ppl_add_C", "ppl_div", "ppl_mul"):
+        assert operation in swiglu_source
+    assert not (demo_root.parent / "tilelang/language/ppl_llama.py").exists()
+
+
+@pytest.mark.parametrize("programming_model", ("tpukernel", "rv"))
+def test_fp32_matmul_selects_the_backend_specific_frontend(programming_model):
+    source = tilelang.lower(
+        build_matmul(dtype="float32", programming_model=programming_model),
+        target=f"tpu -mcpu=sg2260e -tpu-programming-model={programming_model}").kernel_source
+    if programming_model == "rv":
+        assert "rvt_fmm_nn" in source
+        assert "rvt_fmm2" not in source
+    else:
+        assert "tpu_bdc_fp_mm" in source
+        assert "tpu_bdc_fp32_mm" not in source
 
 
 def test_lightweight_demo_target_registry_matches_compiler_capabilities():

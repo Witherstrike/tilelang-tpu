@@ -149,16 +149,14 @@ TPU-Kernel or RV Tensor according to the selected target:
 - `T.ppl_gemm`
 - `T.ppl_add`, `T.ppl_subtract`, `T.ppl_mul`, and `T.ppl_div`
 - `T.ppl_max`
-- Llama 2 building blocks including weighted RMSNorm, Softmax, SiLU, SwiGLU,
-  RoPE, embedding, KV-cache update, KV repetition, transpose, and causal masks
 
 Both TPU backends provide scalar arithmetic, `exp`, `sigmoid`, `rsqrt`, and sum
 and maximum reductions. TPU-Kernel additionally provides top-k and the legacy
 RoPE primitive. The `T.rvt_*` namespace is a low-level SG2260E interface for
 kernels that need to manage RV Tensor descriptors directly; it must not be
 mixed with high-level `T.ppl_*` semantics inside one kernel. See the
-[Llama 2 operator guide](./docs/SG2260E_RV_LLAMA2.md) for the portable API and
-its shape and dtype constraints.
+[`tpu_demo` guide](./tpu_demo/README.md) for operator examples and their
+validation matrix.
 
 Operator shapes and data types are checked during lowering. Dimensions must be
 positive compile-time integers, and tiled dimensions must divide evenly unless

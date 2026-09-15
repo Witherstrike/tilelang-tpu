@@ -12,14 +12,14 @@ Low-level instruction and compiler regression tests live under
 | --- | --- | --- | --- |
 | Elementwise | Add, subtract, multiply, and divide on `[4, 32]` | Yes | Yes |
 | Matmul | `32 x 32` by `32 x 32`, using `16 x 16 x 16` tiles | Yes | Yes |
-| RMSNorm | `[8, 64]` | Yes | Yes |
+| RMSNorm | Weighted normalization on `[8, 64]` | Yes | Yes |
 | Split-K RMSNorm | `[8, 128]`, split into width-32 tiles | Yes | Yes |
-| RoPE | `[8, 32]`, with interleaved even and odd elements | Yes | No |
+| RoPE | `[8, 32]`, with interleaved even and odd elements | Yes | Yes |
 | SwiGLU | `[8, 32]` | Yes | Yes |
-| FlashAttention | BSHD `[1, 32, 1, 16]` | Yes | No |
+| FlashAttention | BSHD `[1, 32, 1, 16]`, causal and non-causal | Yes | Yes |
 
-The RV normalization and SwiGLU examples use FP32 intermediates, including
-exp/sigmoid. Their FP16/BF16 inputs and outputs are explicitly converted.
+Normalization, RoPE, and SwiGLU use FP32 intermediates. Their FP16/BF16 inputs
+and outputs are explicitly converted.
 
 Every example supports `float16`, `bfloat16`, and `float32`. The split-K
 RMSNorm example splits the feature dimension, accumulates the sum of squares,
@@ -50,6 +50,7 @@ program = build_matmul(
     block_n=16,
     block_k=16,
     dtype="float16",
+    programming_model="rv",
 )
 ```
 
@@ -103,10 +104,13 @@ The examples have the following limits:
 
 - Dimensions must be positive compile-time integers.
 - Tiled dimensions must divide evenly; tail handling is not implemented.
-- FP32 matmul and FlashAttention convert matrix operands to BF16 and accumulate
-  in FP32. Their reference functions apply the same conversion.
+- RV Tensor FP32 matmul uses its native FP32 matrix path. TPU-Kernel FP32
+  matmul converts its matrix operands to BF16. FlashAttention converts FP32
+  Q/K/V matrix operands to BF16 because its QK product requires a transposed
+  right operand. All of these paths accumulate in FP32.
 - RMSNorm and SwiGLU use FP32 intermediate values for FP16 and BF16 inputs.
-- FlashAttention accepts `is_causal=False`. Causal masking is not implemented.
+- FlashAttention receives an explicit FP32 additive mask and validates both
+  causal and non-causal execution.
 - The FlashAttention input variants `descending-max` and `weighted-keys` test
   online-softmax state updates; they are not separate operator modes.
 

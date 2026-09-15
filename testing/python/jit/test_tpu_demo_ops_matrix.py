@@ -105,11 +105,11 @@ def test_validate_args_requires_explicit_single_chip_cmodel_stage():
             ))
 
 
-def test_rv_case_listing_excludes_tpukernel_only_composites():
+def test_rv_case_listing_includes_every_demo():
     args = _execution_args(programming_model="rv", operations=None, case_ids=None)
     cases = matrix.selected_cases(args)
 
-    assert len(cases) == 24
+    assert len(cases) == 45
     assert all(case.supports_rv for case in cases)
 
 
@@ -529,7 +529,8 @@ def _numeric_payload(case, *, chip="sg2260e", programming_model="tpukernel", run
             "finite": True
         },
         "parameters": {
-            "variant": case.variant
+            "variant": case.variant,
+            "is_causal": case.is_causal,
         },
     }
 
@@ -615,6 +616,21 @@ def test_validate_numeric_identity_rejects_missing_variant_identity():
     payload["parameters"] = {}
 
     with pytest.raises(RuntimeError, match="scheduled variant"):
+        matrix.validate_numeric_identity(
+            payload,
+            chip="sg2260e",
+            programming_model="tpukernel",
+            runtime_mode="cmodel",
+            case=case,
+        )
+
+
+def test_validate_numeric_identity_rejects_missing_causal_identity():
+    case = case_by_id("flashattn.float16.weighted-keys.causal")
+    payload = _numeric_payload(case)
+    del payload["parameters"]["is_causal"]
+
+    with pytest.raises(RuntimeError, match="causal mode"):
         matrix.validate_numeric_identity(
             payload,
             chip="sg2260e",

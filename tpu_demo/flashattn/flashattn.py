@@ -1,6 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-"""Non-causal tiled online-softmax attention for TPU-Kernel.
+"""Tiled online-softmax attention for TPU-Kernel and RV Tensor.
 
 The public tensors retain TileLang's ``[batch, sequence, heads, head_dim]``
 layout. Explicit singleton slices preserve the four-dimensional DMA descriptor
@@ -32,7 +32,10 @@ def build_flashattn(*,
                     block_m: int = 16,
                     block_n: int = 16,
                     dtype: str = "float16",
+                    programming_model: str = "tpukernel",
                     is_causal: bool = False):
+    if programming_model not in ("tpukernel", "rv"):
+        raise ValueError(f"unsupported TPU programming model: {programming_model!r}")
     torch_dtype(dtype)
     validate_dimensions(
         "flashattn",
@@ -44,10 +47,6 @@ def build_flashattn(*,
         block_n=block_n)
     if not isinstance(is_causal, bool):
         raise TypeError(f"flashattn requires boolean is_causal, got {is_causal!r}")
-    if is_causal:
-        raise NotImplementedError(
-            "causal attention needs a validated diagonal-tile mask; shortening the K loop "
-            "alone is incorrect and is intentionally not exposed")
     validate_exact_tiling("flashattn", ("sequence/block_m", sequence, block_m),
                           ("sequence/block_n", sequence, block_n))
     compute_dtype = "bfloat16" if dtype == "float32" else dtype
@@ -56,8 +55,9 @@ def build_flashattn(*,
     @T.prim_func
     def kernel(Q: T.Tensor((batch, sequence, heads, head_dim), dtype), K: T.Tensor(
         (batch, sequence, heads, head_dim), dtype), V: T.Tensor(
-            (batch, sequence, heads, head_dim), dtype), Output: T.Tensor(
-                (batch, sequence, heads, head_dim), dtype)):
+            (batch, sequence, heads, head_dim), dtype), Mask: T.Tensor(
+                (sequence, sequence), "float32"), Output: T.Tensor(
+                    (batch, sequence, heads, head_dim), dtype)):
         with T.Kernel(T.ceildiv(sequence, block_m), heads, batch, is_cpu=True) as (bx, by, bz):
             q_compute = T.alloc_shared((block_m, head_dim), compute_dtype)
             k_compute = T.alloc_shared((block_n, head_dim), compute_dtype)
@@ -67,6 +67,7 @@ def build_flashattn(*,
             v_input = T.alloc_shared((block_n, head_dim), dtype)
             output_local = T.alloc_shared((block_m, head_dim), dtype)
             scores = T.alloc_shared((block_m, block_n), "float32")
+            mask = T.alloc_shared((block_m, block_n), "float32")
             scores_compute = T.alloc_shared((block_m, block_n), compute_dtype)
             accumulator = T.alloc_shared((block_m, head_dim), "float32")
             normalized = T.alloc_shared((block_m, head_dim), "float32")
@@ -108,15 +109,16 @@ def build_flashattn(*,
                                v_compute)
 
                 T.ppl_gemm(q_compute, k_compute, scores, transpose_B=True, accumulate=False)
+                T.ppl_mul_C(scores, scores, T.float32(scale))
+                T.ppl_copy(Mask[bx * block_m, ko * block_n], mask)
+                T.ppl_add(scores, scores, mask)
                 T.ppl_copy(row_max, previous_max)
                 T.ppl_reduce_max(scores, current_max, dim=1)
                 T.ppl_max(row_max, previous_max, current_max)
                 T.ppl_subtract(previous_scale, previous_max, row_max)
-                T.ppl_mul_C(previous_scale, previous_scale, T.float32(scale))
                 T.ppl_exp(previous_scale, scale_work0, scale_work1, exp_coeff)
 
                 T.ppl_subtract(scores, scores, row_max)
-                T.ppl_mul_C(scores, scores, T.float32(scale))
                 T.ppl_exp(scores, score_work0, score_work1, exp_coeff)
                 T.ppl_reduce_sum(scores, chunk_sum, dim=1)
 
@@ -140,7 +142,8 @@ def build_flashattn(*,
     return kernel
 
 
-def _reference(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, dtype: str) -> torch.Tensor:
+def _reference(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor,
+               dtype: str) -> torch.Tensor:
     if dtype == "float32":
         q_compute = q.to(torch.bfloat16).float()
         k_compute = k.to(torch.bfloat16).float()
@@ -148,7 +151,7 @@ def _reference(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, dtype: str) ->
     else:
         q_compute, k_compute, v_compute = q.float(), k.float(), v.float()
     scores = torch.einsum("bqhd,bkhd->bhqk", q_compute, k_compute)
-    probabilities = torch.softmax(scores / math.sqrt(q.shape[-1]), dim=-1)
+    probabilities = torch.softmax(scores / math.sqrt(q.shape[-1]) + mask, dim=-1)
     output = torch.einsum("bhqk,bkhd->bqhd", probabilities, v_compute)
     return output.to(q.dtype)
 
@@ -191,35 +194,51 @@ def _validation_inputs(dtype: str, variant: str, seed: int):
     return q, k, v
 
 
+def _attention_mask(sequence: int, is_causal: bool) -> torch.Tensor:
+    if is_causal:
+        return torch.triu(
+            torch.full((sequence, sequence), float("-inf"), dtype=torch.float32), diagonal=1)
+    return torch.zeros((sequence, sequence), dtype=torch.float32)
+
+
 def run(*,
         dtype: str,
         chip: str,
         programming_model: str,
         runtime_mode: str,
         variant: str = "balanced",
+        is_causal: bool = False,
         allow_pcie: bool = False,
         device_id: Optional[int] = None,
         seed: int = 0) -> dict:
     torch_dtype(dtype)
+    if not isinstance(is_causal, bool):
+        raise TypeError(f"flashattn requires boolean is_causal, got {is_causal!r}")
     validate_selection(
         chip=chip,
         programming_model=programming_model,
         runtime_mode=runtime_mode,
-        supports_rv=False,
+        supports_rv=True,
         allow_pcie=allow_pcie,
         device_id=device_id)
     batch, sequence, heads, head_dim = 1, 32, 1, 16
     tensors = _validation_inputs(dtype, variant, seed)
     q, k, v = tensors
+    mask = _attention_mask(sequence, is_causal)
     output = torch.zeros_like(q)
     timing = compile_and_launch(
         build_flashattn(
-            batch=batch, heads=heads, sequence=sequence, head_dim=head_dim, dtype=dtype),
-        (*tensors, output),
+            batch=batch,
+            heads=heads,
+            sequence=sequence,
+            head_dim=head_dim,
+            dtype=dtype,
+            programming_model=programming_model,
+            is_causal=is_causal), (*tensors, mask, output),
         chip=chip,
         programming_model=programming_model,
         runtime_mode=runtime_mode)
-    expected = _reference(*tensors, dtype)
+    expected = _reference(*tensors, mask, dtype)
     atol, rtol = tolerance(dtype, "flashattn")
     metrics = comparison(output, expected, atol=atol, rtol=rtol)
     return result_payload(
@@ -237,7 +256,7 @@ def run(*,
             "head_dim": head_dim,
             "block_m": 16,
             "block_n": 16,
-            "is_causal": False,
+            "is_causal": is_causal,
             "fp32_compute_dtype": ("bfloat16" if dtype == "float32" else None),
             "variant": variant,
             "seed": seed

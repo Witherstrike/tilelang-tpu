@@ -24,9 +24,11 @@ def build_rmsnorm(*,
     validate_exact_tiling("rmsnorm", ("rows", rows, block_rows))
 
     @T.prim_func
-    def kernel(source: T.Tensor((rows, width), dtype), destination: T.Tensor((rows, width), dtype)):
+    def kernel(source: T.Tensor((rows, width), dtype), weight: T.Tensor((rows, width), dtype),
+               destination: T.Tensor((rows, width), dtype)):
         with T.Kernel(T.ceildiv(rows, block_rows), is_cpu=True) as (bx,):
             input_local = T.alloc_shared((block_rows, width), dtype)
+            weight_local = T.alloc_shared((block_rows, width), dtype)
             output_local = T.alloc_shared((block_rows, width), dtype)
             value = T.alloc_shared((block_rows, width), "float32")
             square = T.alloc_shared((block_rows, width), "float32")
@@ -45,10 +47,13 @@ def build_rmsnorm(*,
             T.ppl_add_C(variance, variance, T.float32(epsilon))
             T.ppl_rsqrt(inverse_rms, variance)
             T.ppl_mul(normalized, value, inverse_rms)
+            T.ppl_copy(weight[bx * block_rows, 0], weight_local)
             if dtype == "float32":
+                T.ppl_mul(normalized, normalized, weight_local)
                 T.ppl_copy(normalized, destination[bx * block_rows, 0])
             else:
                 T.ppl_copy(normalized, output_local)
+                T.ppl_mul(output_local, output_local, weight_local)
                 T.ppl_copy(output_local, destination[bx * block_rows, 0])
 
     return kernel
@@ -68,9 +73,11 @@ def build_rmsnorm_splitk(*,
     validate_exact_tiling("rmsnorm-splitk", ("rows", rows, block_rows), ("width", width, block_k))
 
     @T.prim_func
-    def kernel(source: T.Tensor((rows, width), dtype), destination: T.Tensor((rows, width), dtype)):
+    def kernel(source: T.Tensor((rows, width), dtype), weight: T.Tensor((rows, width), dtype),
+               destination: T.Tensor((rows, width), dtype)):
         with T.Kernel(T.ceildiv(rows, block_rows), is_cpu=True) as (bx,):
             input_local = T.alloc_shared((block_rows, block_k), dtype)
+            weight_local = T.alloc_shared((block_rows, block_k), dtype)
             output_local = T.alloc_shared((block_rows, block_k), dtype)
             value = T.alloc_shared((block_rows, block_k), "float32")
             square = T.alloc_shared((block_rows, block_k), "float32")
@@ -103,10 +110,13 @@ def build_rmsnorm_splitk(*,
                     T.ppl_copy(source[bx * block_rows, reverse_ko * block_k], input_local)
                     T.ppl_copy(input_local, value)
                 T.ppl_mul(normalized, value, inverse_rms)
+                T.ppl_copy(weight[bx * block_rows, reverse_ko * block_k], weight_local)
                 if dtype == "float32":
+                    T.ppl_mul(normalized, normalized, weight_local)
                     T.ppl_copy(normalized, destination[bx * block_rows, reverse_ko * block_k])
                 else:
                     T.ppl_copy(normalized, output_local)
+                    T.ppl_mul(output_local, output_local, weight_local)
                     T.ppl_copy(output_local, destination[bx * block_rows, reverse_ko * block_k])
 
     return kernel
@@ -136,18 +146,20 @@ def run(*,
     generator = torch.Generator().manual_seed(seed)
     host_dtype = torch_dtype(dtype)
     source = torch.randn((rows, width), generator=generator).to(host_dtype)
+    weight = (torch.randn((rows, width), generator=generator) * 0.25 + 1.0).to(host_dtype)
     destination = torch.zeros_like(source)
     program = (
         build_rmsnorm_splitk(rows=rows, width=width, dtype=dtype) if split_k else build_rmsnorm(
             rows=rows, width=width, dtype=dtype))
     timing = compile_and_launch(
-        program, (source, destination),
+        program, (source, weight, destination),
         chip=chip,
         programming_model=programming_model,
         runtime_mode=runtime_mode)
-    expected = (source.float() *
-                torch.rsqrt(torch.mean(source.float().square(), dim=1, keepdim=True) +
-                            1e-12)).to(host_dtype)
+    normalized = (
+        source.float() *
+        torch.rsqrt(torch.mean(source.float().square(), dim=1, keepdim=True) + 1e-12))
+    expected = normalized.to(host_dtype) * weight
     atol, rtol = tolerance(dtype, "rmsnorm")
     metrics = comparison(destination, expected, atol=atol, rtol=rtol)
     return result_payload(

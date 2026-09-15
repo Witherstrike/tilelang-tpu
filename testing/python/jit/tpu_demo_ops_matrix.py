@@ -952,6 +952,9 @@ def validate_numeric_identity(payload: Mapping[str, Any], *, chip: str, programm
     if case.variant != "default" and (not isinstance(parameters, dict) or
                                       parameters.get("variant") != case.variant):
         raise RuntimeError("demo worker result does not identify the scheduled variant")
+    if case.operation == "flashattn" and (not isinstance(parameters, dict) or
+                                          parameters.get("is_causal") is not case.is_causal):
+        raise RuntimeError("demo worker result does not identify the scheduled causal mode")
 
 
 def selected_configurations(args: argparse.Namespace) -> tuple[tuple[str, str], ...]:
