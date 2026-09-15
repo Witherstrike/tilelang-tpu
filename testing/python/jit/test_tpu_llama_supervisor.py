@@ -91,3 +91,45 @@ def test_timeout_never_waits_for_a_stuck_driver_process(monkeypatch):
         supervisor.run_child(["kernel"], None, 1)
     assert error.value.process_group == 12345
     assert [call[0] for call in calls] == ["wait", "killpg", "poll"]
+
+
+@pytest.mark.parametrize("utils,passes,count", [
+    (["9%", "0%", "0%"], True, 3),
+    (["0%", "9%", "0%", "0%"], True, 4),
+    (["9%"] * 10, False, 10),
+    (["unknown"], False, 1),
+])
+def test_post_kernel_settle_is_bounded(monkeypatch, tmp_path, utils, passes, count):
+    calls = []
+
+    def status_command(command, output, timeout):
+        util = utils[len(calls)]
+        calls.append(util)
+        output.write(json.dumps({"card0": {"chip0": {
+            "status": "Active", "mem_usage": "0MB", "tpu_util": util}}}))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(supervisor, "run_child", status_command)
+    monkeypatch.setattr(supervisor.time, "sleep", lambda seconds: None)
+    destination = tmp_path / "board.json"
+    if passes:
+        supervisor.board_state("smi", 0, destination, settle=True)
+        assert destination.exists()
+    else:
+        with pytest.raises(RuntimeError, match="not quiescent"):
+            supervisor.board_state("smi", 0, destination, settle=True)
+    assert len(calls) == count
+    assert len(list(tmp_path.glob("board-*.json"))) == count
+
+
+@pytest.mark.parametrize("status,memory", [("Fault", "0MB"), ("Active", "1MB")])
+def test_settle_does_not_retry_faults_or_retained_memory(monkeypatch, tmp_path, status, memory):
+    def status_command(command, output, timeout):
+        output.write(json.dumps({"card0": {"chip0": {
+            "status": status, "mem_usage": memory, "tpu_util": "0%"}}}))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(supervisor, "run_child", status_command)
+    monkeypatch.setattr(supervisor.time, "sleep", lambda _: pytest.fail("must fail immediately"))
+    with pytest.raises(RuntimeError, match="not quiescent"):
+        supervisor.board_state("smi", 0, tmp_path / "board.json", settle=True)

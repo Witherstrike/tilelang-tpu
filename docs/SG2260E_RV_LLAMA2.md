@@ -84,7 +84,11 @@ and the used chip SDK headers/libraries. Each result includes an output byte
 hash. Source changes during a run are rejected. PCIe requires the complete
 matching CModel manifest, the existing `/run/lock` exclusive/session/quarantine
 protocol, and idle board checks before and after every case. It never resets a
-board or removes quarantine markers.
+board or removes quarantine markers. After a successful kernel process exits,
+it allows up to ten status samples, one second apart, for utilization to settle
+and requires two consecutive idle samples. Every sample is retained. Device
+faults, retained memory, malformed telemetry and status-command failures still
+stop immediately; the pre-launch check remains strict.
 
 Example, after setting `PYTHONPATH`, `TILELANG_LIBRARY_PATH`, `TVM_LIBRARY_PATH`
 and `PPL_PROJECT_ROOT` to the same source/build/SDK identity:
@@ -121,11 +125,22 @@ record these separately scoped checks:
 - **Remote PCIe compilation/linking 46/46 passed**, without loading device
   libraries. All 46 generated kernels match the CModel sources byte-for-byte.
   Remote Llama API/registry checks passed 135 tests.
-- **PCIe numerical execution not performed.** The final device-0 check at
-  `2026-09-15T11:01:38+08:00` reported Active, 0% utilization and 0MB memory,
-  but admin1-owned quarantine/session markers remained under `/run/lock`.
-  These markers were neither removed nor bypassed. As requested, the work is
-  submitted with board numerical validation pending recovery/ownership clearance.
+- **PCIe numerical execution 78/78 passed on device 0**, covering the same
+  32 essential and 46 Llama cases. All generated C and output bytes match the
+  complete CModel rerun with the final supervisor source fingerprint.
+  Final telemetry was Active / 0% / 0MB; no session or quarantine marker remains.
+- **Supervisor 12/12 tests passed locally and remotely**, including six new
+  tests for bounded utilization settling and immediate rejection of faults or
+  retained memory.
+
+The initial PCIe attempt completed `fill.float16` with exact output, then stopped
+because the immediate utilization sample was 9% despite 0MB device memory. Its
+owner process exited, no visible device holders remained, and two subsequent
+samples were idle. With user authorization and the exclusive lock held, the
+admin2-owned markers were archived and cleared, preserving the lock file. No
+hardware reset occurred. The revised supervisor then passed a fresh full CModel
+matrix before the successful full PCIe matrix. Original attempt logs and all
+status samples remain archived alongside the final validation artifacts.
 
 The common extern capability contract registers embedding and its compiler
 stages. Its stricter runtime-claim format has not been populated from this

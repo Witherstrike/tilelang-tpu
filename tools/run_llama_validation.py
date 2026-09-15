@@ -14,6 +14,7 @@ import signal
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -53,21 +54,38 @@ def cases(path):
     return json.loads(result.stdout.splitlines()[-1])
 
 
-def board_state(smi, device_id, destination):
+def board_state(smi, device_id, destination, *, settle=False):
+    # Only a successfully exited kernel may need time for utilization sampling
+    # to settle. Faults, retained memory, malformed status and command errors
+    # fail immediately. Never launch another kernel during this bounded wait.
     command = [str(smi), '--noloop', '--json_format', f'--dev={device_id}']
-    with destination.open('w') as output:
-        result = run_child(command, output, 15)
-    if result.returncode:
-        raise RuntimeError(f'Board status command failed: {destination}')
-    state = json.loads(destination.read_text())
-    chips = [
-        chip for card in state.values() if isinstance(card, dict) for chip in card.values()
-        if isinstance(chip, dict) and 'status' in chip
-    ]
-    if not chips or any(
-            c['status'] != 'Active' or c.get('tpu_util') != '0%' or c.get('mem_usage') != '0MB'
-            for c in chips):
-        raise RuntimeError(f'Board is not quiescent: {destination}')
+    idle_samples = 0
+    for attempt in range(10 if settle else 1):
+        sample = destination.with_name(f'{destination.stem}-{attempt}.json') if settle else destination
+        with sample.open('w') as output:
+            result = run_child(command, output, 15)
+        if result.returncode:
+            raise RuntimeError(f'Board status command failed: {sample}')
+        state = json.loads(sample.read_text())
+        chips = [
+            chip for card in state.values() if isinstance(card, dict) for chip in card.values()
+            if isinstance(chip, dict) and 'status' in chip
+        ]
+        if not chips or any(c['status'] != 'Active' or c.get('mem_usage') != '0MB'
+                            for c in chips):
+            raise RuntimeError(f'Board is not quiescent: {sample}')
+        for chip in chips:
+            util = chip.get('tpu_util', '')
+            if not util.endswith('%') or not util[:-1].isdigit() or not 0 <= int(util[:-1]) <= 100:
+                raise RuntimeError(f'Board is not quiescent: invalid utilization: {sample}')
+        idle_samples = idle_samples + 1 if all(c['tpu_util'] == '0%' for c in chips) else 0
+        if idle_samples >= (2 if settle else 1):
+            if settle:
+                destination.write_text(sample.read_text())
+            return
+        if settle and attempt < 9:
+            time.sleep(1)
+    raise RuntimeError(f'Board is not quiescent: {destination}')
 
 
 def run_child(command, log, timeout):
@@ -151,7 +169,7 @@ def main():
                     if proc.returncode:
                         raise RuntimeError(f'exit {proc.returncode}')
                     if a.runtime == 'pcie':
-                        board_state(a.smi, device_id, path / 'board-after.json')
+                        board_state(a.smi, device_id, path / 'board-after.json', settle=True)
                 except BaseException as e:
                     if a.runtime == 'pcie':
                         _quarantine_pcie_device(
