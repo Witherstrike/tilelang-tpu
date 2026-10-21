@@ -122,3 +122,14 @@ Llama MLP、paged attention 的 FP16/BF16 PCIe 通过记录来自上游此前
 验证，本次 DQ2 定向测试不重新证明这些结果，也不构成完整模型验收。
 对应入口分别在 `tpu_demo/llama_mlp/`、`tpu_demo/paged_attention/`；
 通用矩阵和 profiling 流程以 `tpu_demo/README.md` 为准。
+
+### RV GPTQ promotion scope
+
+RV GPTQ is a software unpack/dequant implementation; the TPU-Kernel GPTQ
+counterpart still invokes the unsupported vendor DQ2 primitive. For a scoped
+`gptq-w4a16` RV PCIe run, the demo supervisor therefore requires a passing
+BM1690 TPU-Kernel `matmul` baseline of the same dtype and the exact SG2260E RV
+`gptq-w4a16` CModel result. This is not a claim that BM1690 GPTQ passed. Both
+stages must be complete, ordered, and match the current clean source and
+native/SDK identities. All snapshot, lock, session, quarantine, watchdog and
+board-health gates remain required. TPU-Kernel GPTQ receives no exception.

@@ -32,7 +32,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tpu_demo.cases import (DTYPES, OPERATIONS, TARGET_CONFIGS, DemoCase, build_cases,
+from tpu_demo.cases import (DTYPES, OPERATIONS, TARGET_CONFIGS, DemoCase, build_cases, case_by_id,
                             kernel_variant)
 
 if __package__:
@@ -1059,7 +1059,14 @@ def validate_pcie_promotion(
     sg_passed = passed_results(sg)
     missing = []
     for _chip, programming_model, case in scheduled:
-        bm_key = f"cmodel/bm1690/tpukernel/{case.case_id}"
+        # RV GPTQ uses software unpacking; TPU-Kernel still calls the vendor
+        # dequant instruction, which this SDK cannot emulate. Require the shared
+        # GEMM baseline on BM, plus the exact full GPTQ result on SG/RV below.
+        # This exception never promotes the unsupported TPU-Kernel GPTQ path.
+        bm_case = (case_by_id(f"matmul.{case.dtype}")
+                   if programming_model == "rv" and case.operation == "gptq-w4a16"
+                   else case)
+        bm_key = f"cmodel/bm1690/tpukernel/{bm_case.case_id}"
         sg_key = f"cmodel/sg2260e/{programming_model}/{case.case_id}"
         bm_result = bm_passed.get(bm_key)
         sg_result = sg_passed.get(sg_key)
@@ -1071,7 +1078,7 @@ def validate_pcie_promotion(
                 chip="bm1690",
                 programming_model="tpukernel",
                 runtime_mode="cmodel",
-                case=case)
+                case=bm_case)
             if not isinstance(bm_result.get("raw_instruction_count"),
                               int) or (bm_result["raw_instruction_count"] <= 0):
                 raise RuntimeError(f"promotion result has no raw instructions: {bm_key}")

@@ -1334,3 +1334,39 @@ def test_failed_board_postflight_is_not_retried(monkeypatch, tmp_path, interrupt
             }],
             "settled": False
         }
+
+
+@pytest.mark.parametrize("dtype", ("float16", "bfloat16"))
+def test_rv_gptq_promotion_requires_bm_gemm_and_exact_sg_gptq(promotion, dtype):
+    case = case_by_id(f"gptq-w4a16.{dtype}")
+    baseline = case_by_id(f"matmul.{dtype}")
+    promotion.bm = _promotion_summary(baseline, "bm1690", "tpukernel")
+    promotion.sg = _promotion_summary(case, "sg2260e", "rv")
+    promotion.sg["started_at"] = "2026-09-08T00:02:00+00:00"
+    promotion.sg["finished_at"] = "2026-09-08T00:03:00+00:00"
+    _write_json(promotion.bm_path, promotion.bm)
+    _write_json(promotion.sg_path, promotion.sg)
+    promotion.scheduled = (("sg2260e", "rv", case),)
+    assert _validate_promotion(promotion)["validated_case_count"] == 1
+
+    # A shared baseline does not authorize the vendor DQ2 path.
+    promotion.scheduled = (("sg2260e", "tpukernel", case),)
+    with pytest.raises(RuntimeError, match="missing passing cases"):
+        _validate_promotion(promotion)
+
+    promotion.scheduled = (("sg2260e", "rv", case),)
+    promotion.sg["results"][0]["numeric"]["dtype"] = "float32"
+    _write_json(promotion.sg_path, promotion.sg)
+    with pytest.raises(RuntimeError):
+        _validate_promotion(promotion)
+
+
+def test_rv_gptq_promotion_rejects_wrong_bm_baseline(promotion):
+    case = case_by_id("gptq-w4a16.bfloat16")
+    promotion.sg = _promotion_summary(case, "sg2260e", "rv")
+    promotion.sg["started_at"] = "2026-09-08T00:02:00+00:00"
+    promotion.sg["finished_at"] = "2026-09-08T00:03:00+00:00"
+    _write_json(promotion.sg_path, promotion.sg)
+    promotion.scheduled = (("sg2260e", "rv", case),)
+    with pytest.raises(RuntimeError, match="matmul.bfloat16"):
+        _validate_promotion(promotion)
