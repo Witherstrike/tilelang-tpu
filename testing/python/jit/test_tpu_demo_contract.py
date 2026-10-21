@@ -18,6 +18,9 @@ from tpu_demo.elementwise import build_elementwise
 from tpu_demo.flashattn import build_flashattn
 from tpu_demo.flashattn.flashattn import _attention_mask, _reference, _validation_inputs
 from tpu_demo.matmul import build_matmul
+from tpu_demo.gptq_w4a16.gptq_w4a16 import build_gptq_w4a16
+from tpu_demo.llama_mlp.llama_mlp import build_llama_mlp
+from tpu_demo.paged_attention.paged_attention import build_paged_attention
 from tpu_demo.rmsnorm import build_rmsnorm, build_rmsnorm_splitk
 from tpu_demo.rope import build_rope
 from tpu_demo.swiglu import build_swiglu
@@ -25,7 +28,7 @@ from tpu_demo.swiglu import build_swiglu
 
 def test_registry_is_unique_complete_and_capability_scoped():
     cases = build_cases()
-    assert len(cases) == 73
+    assert len(cases) == 79
     assert len({case.case_id for case in cases}) == len(cases)
     assert sum(case.supports_rv for case in cases) == len(cases)
     assert set(OPERATIONS) == RV_SUPPORTED_OPERATIONS
@@ -56,6 +59,13 @@ def _build_case_kernel(case, programming_model):
         return build_swiglu(dtype=case.dtype)
     if case.operation == "flashattn":
         return build_flashattn(dtype=case.dtype)
+    if case.operation == "paged-attention":
+        program, _, _, _ = build_paged_attention(dtype=case.dtype,
+                                                programming_model=programming_model)
+        return program
+    extended = {"gptq-w4a16": build_gptq_w4a16, "llama-mlp": build_llama_mlp}
+    if case.operation in extended:
+        return extended[case.operation](dtype=case.dtype, programming_model=programming_model)
     raise AssertionError(f"unhandled test operation: {case.operation}")
 
 
@@ -63,8 +73,11 @@ def _build_case_kernel(case, programming_model):
 @pytest.mark.parametrize("case", build_cases(), ids=lambda case: case.case_id)
 def test_each_matrix_case_selects_the_declared_kernel(case, programming_model):
     program = _build_case_kernel(case, programming_model)
-    assert str(program.attrs["global_symbol"]) == kernel_variant(case.operation, case.dtype,
-                                                                 programming_model)
+    variant = kernel_variant(case.operation, case.dtype, programming_model)
+    # Paged attention's public variant names the builder family; its PrimFunc
+    # has a distinct symbol, and the builder also returns staging dimensions.
+    expected_symbol = "paged_attention_kernel" if variant == "paged_attention" else variant
+    assert str(program.attrs["global_symbol"]) == expected_symbol
 
 
 def test_kernel_variants_cover_only_distinct_frontend_expressions():
@@ -89,6 +102,9 @@ def test_kernel_variants_cover_only_distinct_frontend_expressions():
         "swiglu_fp32",
         "flashattn_low_precision",
         "flashattn_fp32",
+        "llama_mlp",
+        "paged_attention",
+        "gptq_w4a16",
     }
 
 

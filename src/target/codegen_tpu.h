@@ -143,8 +143,11 @@ private:
   void EmitRVConstant(double value, const std::string &dtype);
   void EmitRVScalar(const std::string &operation, const std::string &dst,
                     const std::string &src, DataType dtype, double value);
-  // KV-cache write for paged attention: scatter local rows into a global cache
-  // using an index table.
+  // Software group dequantization; never emits the unsupported DQ2 opcode.
+  void EmitRVDQ2(const std::string &dst, const std::string &packed,
+                 const std::string &quant, const std::string &scratch,
+                 DataType dtype, DataType packed_dtype, int width, int group);
+  // KV-cache write: scatter local rows into a global cache using an index table.
   void EmitRVScatter(const std::string &dst, const std::string &src,
                      const std::string &index, DataType dtype);
   void EmitRVReduction(const std::string &operation, const std::string &src,

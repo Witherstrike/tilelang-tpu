@@ -11,6 +11,8 @@ _SEMANTIC_EXTERN = re.compile(r'"(tl\.(?:tpu|tpukernel)\.[a-z0-9_]+)"')
 
 _PORTABLE_EXTERNS = {
     "tl.tpu.embedding",
+    "tl.tpu.dq2",
+    "tl.tpu.scatter",
     "tl.tpu.add_scalar",
     "tl.tpu.mul_scalar",
     "tl.tpu.rsqrt",
@@ -28,10 +30,13 @@ _PORTABLE_EXTERNS = {
 }
 _TPUKERNEL_EXTERNS = {
     "tl.tpukernel.gather",
+    "tl.tpukernel.scatter_add",
     "tl.tpukernel.topk",
 }
 _PORTABLE_IMPLEMENTED_IN_TPUKERNEL = {
     "tl.tpu.embedding",
+    "tl.tpu.dq2",
+    "tl.tpu.scatter",
     "tl.tpu.add_scalar",
     "tl.tpu.mul_scalar",
     "tl.tpu.rsqrt",
@@ -73,6 +78,9 @@ def test_every_semantic_extern_has_exact_region_operand_positions():
     positions = _literal_assignment("tilelang/engine/lower.py", "_TPU_SEMANTIC_REGION_ARGS")
 
     assert set(positions) == expected
+    assert positions["tl.tpu.dq2"] == (1, 2, 3, 5)  # arg 4 is scalar gsize
+    assert positions["tl.tpu.scatter"] == (1, 2, 3)
+    assert positions["tl.tpukernel.scatter_add"] == (1, 2, 3, 4, 5)
     assert all(
-        tuple(indices) == tuple(range(1,
-                                      len(indices) + 1)) for indices in positions.values())
+        tuple(indices) == tuple(range(1, len(indices) + 1))
+        for op, indices in positions.items() if op != "tl.tpu.dq2")
